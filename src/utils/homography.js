@@ -81,9 +81,11 @@ export function applyHomography(H, x, y) {
  * @param {number} dstW             - Output width in pixels
  * @param {number} dstH             - Output height in pixels
  * @param {function} onProgress     - Called with 0..1 as processing advances
- * @returns {Promise<string>}       - Resolves to a JPEG data URL
+ * @param {object}  [options]       - { transparent: boolean } — preserve alpha channel and output PNG
+ * @returns {Promise<string>}       - Resolves to a data URL (JPEG by default, PNG when transparent)
  */
-export function warpPerspectiveAsync(imgEl, srcCorners, dstW, dstH, onProgress) {
+export function warpPerspectiveAsync(imgEl, srcCorners, dstW, dstH, onProgress, options = {}) {
+  const { transparent = false } = options
   return new Promise((resolve, reject) => {
     try {
       // --- Read source pixels ---
@@ -149,7 +151,9 @@ export function warpPerspectiveAsync(imgEl, srcCorners, dstW, dstH, onProgress) 
               dstData[od]   = srcData[i00]   * w00 + srcData[i10]   * w10 + srcData[i01]   * w01 + srcData[i11]   * w11
               dstData[od+1] = srcData[i00+1] * w00 + srcData[i10+1] * w10 + srcData[i01+1] * w01 + srcData[i11+1] * w11
               dstData[od+2] = srcData[i00+2] * w00 + srcData[i10+2] * w10 + srcData[i01+2] * w01 + srcData[i11+2] * w11
-              dstData[od+3] = 255
+              dstData[od+3] = transparent
+                ? srcData[i00+3] * w00 + srcData[i10+3] * w10 + srcData[i01+3] * w01 + srcData[i11+3] * w11
+                : 255
             }
           }
         }
@@ -158,7 +162,7 @@ export function warpPerspectiveAsync(imgEl, srcCorners, dstW, dstH, onProgress) 
 
         if (dy >= dstH) {
           dstCtx.putImageData(imgData, 0, 0)
-          resolve(dstCanvas.toDataURL('image/jpeg', 0.93))
+          resolve(transparent ? dstCanvas.toDataURL('image/png') : dstCanvas.toDataURL('image/jpeg', 0.93))
         } else {
           requestAnimationFrame(processChunk)
         }
