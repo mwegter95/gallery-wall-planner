@@ -48,6 +48,14 @@ function heicConvertPlugin() {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), heicConvertPlugin()],
+  server: {
+    proxy: {
+      // heicConvertPlugin middleware intercepts /api/heic-to-jpeg before proxy runs.
+      // All other /api/* and /uploads/* routes go to the local Express backend.
+      '/api': { target: 'http://localhost:3001', changeOrigin: true },
+      '/uploads': { target: 'http://localhost:3001', changeOrigin: true },
+    },
+  },
   optimizeDeps: {
     // These packages bundle their own WASM loaders and internal dynamic imports.
     // Vite's pre-bundler breaks those paths, so we exclude them and let them

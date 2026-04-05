@@ -127,6 +127,23 @@ export default function Sidebar({
             <div className="layouts-wall-label">🏠 {wallName}</div>
           )}
 
+          {/* Overwrite current layout */}
+          {currentLayout && (
+            <div className="layout-current-banner">
+              <span className="layout-current-name">✓ {currentLayout}</span>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => onSaveLayout(currentLayout)}
+                title="Save current arrangement into this layout"
+              >
+                💾 Overwrite
+              </button>
+            </div>
+          )}
+
+          {/* Save as new */}
+          <div className="layout-save-as">
+            <span className="layout-save-as-label">Save as new…</span>
           <div className="layout-save">
             <input
               className="text-input"
@@ -137,6 +154,7 @@ export default function Sidebar({
             />
             <button className="btn btn-primary btn-sm" onClick={handleSave}>Save</button>
             {saveError && <span className="field-error">{saveError}</span>}
+          </div>
           </div>
 
           {Object.keys(layouts).length === 0 && (

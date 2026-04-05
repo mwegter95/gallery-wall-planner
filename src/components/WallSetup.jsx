@@ -15,26 +15,105 @@ const CORNER_META = [
   { label: 'BL', full: 'Bottom-Left',  color: '#34d399' },
 ]
 
-/** Convert a File to a data URL via an img element → canvas (handles most formats) */
-async function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const objUrl = URL.createObjectURL(file)
+const isHeic = (file) =>
+  file.type === 'image/heic' ||
+  file.type === 'image/heif' ||
+  /\.(heic|heif)$/i.test(file.name)
+
+const blobToDataUrl = (blob) => new Promise((res, rej) => {
+  const r = new FileReader()
+  r.onload = () => res(r.result)
+  r.onerror = rej
+  r.readAsDataURL(blob)
+})
+
+/** Scale a canvas/image down so its longest side is at most MAX px */
+function scaleDataUrl(dataUrl, max = 2400) {
+  return new Promise((resolve) => {
     const img = new Image()
     img.onload = () => {
-      URL.revokeObjectURL(objUrl)
-      // Scale down very large photos so the corner-picker is responsive
-      const MAX = 2400
-      const scale = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight))
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight))
       const w = Math.round(img.naturalWidth * scale)
       const h = Math.round(img.naturalHeight * scale)
       const c = Object.assign(document.createElement('canvas'), { width: w, height: h })
       c.getContext('2d').drawImage(img, 0, 0, w, h)
       resolve(c.toDataURL('image/jpeg', 0.92))
     }
-    img.onerror = () => { URL.revokeObjectURL(objUrl); reject(new Error('Could not load image')) }
-    img.src = objUrl
+    img.src = dataUrl
   })
 }
+
+/**
+ * Convert any image File to a JPEG data URL (same 4-strategy pipeline as AddPieceModal).
+ * Strategy 0: server-side sips (macOS, handles all HEIC variants)
+ * Strategy 1: createImageBitmap → canvas
+ * Strategy 2: heic2any WASM
+ * Strategy 3: img element → canvas
+ */
+async function anyImageToJpeg(file) {
+  // ── Strategy 0: server-side sips (macOS dev server) ──
+  if (isHeic(file)) {
+    try {
+      const res = await fetch('/api/heic-to-jpeg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      })
+      if (res.ok) {
+        const blob = await res.blob()
+        return scaleDataUrl(await blobToDataUrl(blob))
+      }
+    } catch (e) {
+      console.warn('[WallSetup] sips endpoint failed:', e)
+    }
+  }
+
+  // ── Strategy 1: createImageBitmap → canvas ──
+  try {
+    const bitmap = await createImageBitmap(file)
+    const canvas = document.createElement('canvas')
+    canvas.width  = bitmap.width
+    canvas.height = bitmap.height
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    return scaleDataUrl(canvas.toDataURL('image/jpeg', 0.92))
+  } catch (_) { /* fall through */ }
+
+  // ── Strategy 2: heic2any WASM ──
+  if (isHeic(file)) {
+    try {
+      const mod = await import('heic2any')
+      const heic2any = typeof mod.default === 'function' ? mod.default : mod
+      const result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.93 })
+      const blob   = Array.isArray(result) ? result[0] : result
+      return scaleDataUrl(await blobToDataUrl(blob))
+    } catch (e) {
+      console.warn('[WallSetup] heic2any failed:', e)
+    }
+  }
+
+  // ── Strategy 3: img element → canvas ──
+  try {
+    const objUrl = URL.createObjectURL(file)
+    const jpeg = await new Promise((res, rej) => {
+      const img = new Image()
+      img.onload = () => {
+        URL.revokeObjectURL(objUrl)
+        const c = Object.assign(document.createElement('canvas'), {
+          width: img.naturalWidth, height: img.naturalHeight,
+        })
+        c.getContext('2d').drawImage(img, 0, 0)
+        res(c.toDataURL('image/jpeg', 0.92))
+      }
+      img.onerror = () => { URL.revokeObjectURL(objUrl); rej(new Error('img decode failed')) }
+      img.src = objUrl
+    })
+    return scaleDataUrl(jpeg)
+  } catch (_) { /* fall through */ }
+
+  throw new Error('Could not decode image')
+}
+
 
 export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
   const imgRef            = useRef(null)
@@ -58,13 +137,13 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
     setPhotoError('')
     setLoadingPhoto(true)
     try {
-      const dataUrl = await fileToDataUrl(file)
+      const dataUrl = await anyImageToJpeg(file)
       setRawPhoto(dataUrl)
       setCorners(DEFAULT_CORNERS)   // reset corners for new photo
       setShowPreview(false)
       setPreviewUrl(null)
     } catch (err) {
-      setPhotoError('Could not load that image. Try a JPEG or PNG file.')
+      setPhotoError('Could not load that image. Try a JPEG, PNG, or HEIC file.')
     } finally {
       setLoadingPhoto(false)
     }

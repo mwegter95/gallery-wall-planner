@@ -5,6 +5,7 @@ const DEFAULT_H = 95
 
 export default function WallManager({
   walls,
+  wallImages = {},
   activeWallId,
   onSelect,
   onCreate,
@@ -64,8 +65,8 @@ export default function WallManager({
               <div key={wall.id} className={`wm-wall-row ${isActive ? 'wm-wall-row--active' : ''}`}>
                 {/* Thumbnail */}
                 <div className="wm-thumb">
-                  {wall.image
-                    ? <img src={wall.image} alt={wall.name} />
+                  {wallImages[wall.id]
+                    ? <img src={wallImages[wall.id]} alt={wall.name} />
                     : <span className="wm-thumb-icon">🖼️</span>
                   }
                 </div>
@@ -95,7 +96,7 @@ export default function WallManager({
                     </span>
                   )}
                   <span className="wm-wall-dims">{wall.width}" × {wall.height}"</span>
-                  {!wall.image && (
+                  {!wallImages[wall.id] && (
                     <span className="wm-no-photo">No photo yet</span>
                   )}
                 </div>
@@ -115,7 +116,7 @@ export default function WallManager({
                     title="Upload / recalibrate wall photo"
                     onClick={() => { onSetupWall(wall.id); onClose() }}
                   >
-                    📐 {wall.image ? 'Recalibrate' : 'Set Photo'}
+                    📐 {wallImages[wall.id] ? 'Recalibrate' : 'Set Photo'}
                   </button>
                   {wallList.length > 1 && (
                     <button
