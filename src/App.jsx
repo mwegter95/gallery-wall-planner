@@ -36,7 +36,7 @@ export default function App() {
   const [showSetup,      setShowSetup]      = useState(false)
   const [setupWallId,    setSetupWallId]    = useState(null)
   const [showWallMgr,    setShowWallMgr]    = useState(false)
-  const [authUser,       setAuthUser]       = useState(null)
+  const [authUser,       setAuthUser]       = useState(() => api.getJwtUser())
   const [showAuth,       setShowAuth]       = useState(() => {
     // Auto-open auth modal when arriving via password-reset link
     return Boolean(new URLSearchParams(window.location.search).get('reset_token'))
@@ -51,14 +51,12 @@ export default function App() {
   const [library,        setLibrary]        = useState({})
   const saveMenuRef = useRef(null)
 
-  /* ── Boot: load all state from backend ──────────────── */
-  useEffect(() => {
-    // Resolve auth first so loadState sends the right owner token
-    api.authMe()
-      .then(data => setAuthUser(data.user))
-      .catch(() => {})
-      .finally(() => {
-        api.loadState().then(({ walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} }) => {
+  /* ── Load all state from backend (called on boot and after auth change) ─── */
+  const loadAppState = useCallback(async () => {
+    setIsLoading(true)
+    try {
+      const { walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} } =
+        await api.loadState()
       const wallsObj   = savedWalls   || {}
       const layoutsObj = savedLayouts || {}
       setWalls(wallsObj)
@@ -94,7 +92,6 @@ export default function App() {
       const ids = Object.keys(wallsObj)
       let activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
       if (!activeId) {
-        // First-ever run: create a default wall
         const id = genId()
         const wall = { id, name: 'My Wall', width: 128, height: 95, createdAt: Date.now() }
         setWalls({ [id]: wall })
@@ -103,15 +100,19 @@ export default function App() {
         localStorage.setItem(ACTIVE_WALL_KEY, id)
       }
       setActiveWallId(activeId)
-    }).catch(err => {
+    } catch (err) {
       console.error('Failed to load state from backend:', err)
       const id = genId()
       const wall = { id, name: 'My Wall', width: 128, height: 95, createdAt: Date.now() }
       setWalls({ [id]: wall })
       setActiveWallId(id)
-    }).finally(() => setIsLoading(false))
-      }) // end .finally authMe
+    } finally {
+      setIsLoading(false)
+    }
   }, [])
+
+  /* ── Boot ──────────────────────────────────────────────── */
+  useEffect(() => { loadAppState() }, [loadAppState])
 
   /* ── Close save menu on outside click ────────────────── */
   useEffect(() => {
@@ -212,18 +213,21 @@ export default function App() {
     setAuthUser(user)
     setShowAuth(false)
     setResetToken(null)
-    // Strip any reset_token query param, then reload to pick up merged state
     const url = new URL(window.location.href)
     url.searchParams.delete('reset_token')
     window.history.replaceState({}, '', url.toString())
-    window.location.reload()
-  }, [])
+    // Re-fetch state now that JWT is set (picks up user's saved data)
+    loadAppState()
+  }, [loadAppState])
 
   const handleLogout = useCallback(() => {
     api.authLogout()
     setAuthUser(null)
-    window.location.reload()
-  }, [])
+    setPieces([])
+    setCurrentLayout('')
+    // Re-fetch state now that JWT is cleared (returns to device data)
+    loadAppState()
+  }, [loadAppState])
 
   const openSetup = useCallback((wallId = null) => {
     setSetupWallId(wallId || activeWallId)

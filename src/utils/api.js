@@ -29,6 +29,30 @@ export function clearJwt()    { localStorage.removeItem('gwp-jwt') }
 export function isLoggedIn()  { return Boolean(getJwt()) }
 export { getDeviceToken }
 
+/**
+ * Decode the stored JWT payload client-side (no server call).
+ * Returns a user object { id, email, display_name } or null if no token / expired.
+ */
+export function getJwtUser() {
+  const token = getJwt()
+  if (!token) return null
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    if (payload.exp && payload.exp * 1000 < Date.now()) {
+      clearJwt()
+      return null
+    }
+    if (!payload.sub) return null
+    return {
+      id:           payload.sub,
+      email:        payload.email        || '',
+      display_name: payload.display_name || '',
+    }
+  } catch {
+    return null
+  }
+}
+
 // ── Core fetch ────────────────────────────────────────────────────────────────
 async function apiFetch(path, options = {}) {
   const jwt    = getJwt()
@@ -77,6 +101,8 @@ export async function authLogout() {
   clearJwt()
 }
 
+// authMe is kept for server-side validation when explicitly needed,
+// but boot no longer calls it — use getJwtUser() for instant local decode.
 export async function authMe() {
   return apiFetch('/auth/me')
 }
