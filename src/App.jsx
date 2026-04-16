@@ -49,6 +49,7 @@ export default function App() {
   const [saveAsError,    setSaveAsError]    = useState('')
   const [isSaving,       setIsSaving]       = useState(false)
   const [library,        setLibrary]        = useState({})
+  const [sidebarOpen,    setSidebarOpen]    = useState(false)
   const saveMenuRef = useRef(null)
 
   /* ── Load all state from backend (called on boot and after auth change) ─── */
@@ -456,6 +457,11 @@ export default function App() {
     <div className="app" onKeyDown={handleKeyDown} tabIndex={-1}>
       <header className="app-header">
         <div className="header-brand">
+          <button
+            className="hamburger-btn"
+            onClick={() => setSidebarOpen(v => !v)}
+            aria-label="Toggle sidebar"
+          >☰</button>
           <span className="brand-icon">🖼️</span>
           <span className="brand-name">Gallery Wall Planner</span>
           <button
@@ -531,6 +537,9 @@ export default function App() {
       </header>
 
       <div className="app-body">
+        {sidebarOpen && (
+          <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+        )}
         <Sidebar
           pieces={pieces}
           selectedId={selectedId}
@@ -554,6 +563,8 @@ export default function App() {
           library={library}
           onAddFromLibrary={addPieceFromLibrary}
           onDeleteFromLibrary={deleteFromLibrary}
+          isOpen={sidebarOpen}
+          onRequestClose={() => setSidebarOpen(false)}
         />
 
         <Wall

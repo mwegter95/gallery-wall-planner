@@ -6,6 +6,7 @@ export default function Sidebar({
   layouts, wallName, currentLayout, onSaveLayout, onLoadLayout, onDeleteLayout,
   onAddPiece, onClearAll,
   library = {}, onAddFromLibrary, onDeleteFromLibrary,
+  isOpen = false, onRequestClose,
 }) {
   const [layoutName, setLayoutName] = useState('')
   const [saveError, setSaveError]   = useState('')
@@ -22,7 +23,7 @@ export default function Sidebar({
   const selectedPiece = pieces.find(p => p.id === selectedId)
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${isOpen ? ' sidebar--open' : ''}`}>
       {/* Top tabs */}
       <div className="sidebar-tabs">
         <button
@@ -41,6 +42,14 @@ export default function Sidebar({
           className={`tab-btn ${section === 'settings' ? 'active' : ''}`}
           onClick={() => setSection('settings')}
         >Settings</button>
+        {onRequestClose && (
+          <button
+            className="tab-btn sidebar-close-btn"
+            onClick={onRequestClose}
+            aria-label="Close sidebar"
+            title="Close"
+          >✕</button>
+        )}
       </div>
 
       {/* ── PIECES tab ─────────────────────────────── */}

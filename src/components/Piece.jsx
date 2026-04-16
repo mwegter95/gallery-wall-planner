@@ -67,6 +67,38 @@ export default function Piece({
     startDragMove(e)
   }, [onSelect, scale, piece.x, piece.y, startDragMove])
 
+  /* ── Touch drag to move ──────────────────────────────── */
+  const handlePieceTouchStart = useCallback((e) => {
+    if (e.touches.length !== 1) return
+    e.stopPropagation()
+    // Don't preventDefault here — let the browser's scroll-blocking be handled by the touchmove listener
+    const touch = e.touches[0]
+    onSelect()
+    const wallEl = e.currentTarget.parentElement
+    const wallRect = wallEl.getBoundingClientRect()
+    const ox = (touch.clientX - wallRect.left) / scale - piece.x
+    const oy = (touch.clientY - wallRect.top)  / scale - piece.y
+    const ref = { wallRect, ox, oy, moved: false }
+
+    const handleTouchMove = (ev) => {
+      if (ev.touches.length !== 1) return
+      ev.preventDefault()  // prevent scroll while dragging a piece
+      ref.moved = true
+      const t = ev.touches[0]
+      const mx = (t.clientX - ref.wallRect.left) / scale
+      const my = (t.clientY - ref.wallRect.top)  / scale
+      const newX = Math.max(0, Math.min(wallWidth  - piece.width,  mx - ref.ox))
+      const newY = Math.max(0, Math.min(wallHeight - piece.height, my - ref.oy))
+      onMove(newX, newY)
+    }
+    const handleTouchEnd = () => {
+      window.removeEventListener('touchmove', handleTouchMove)
+      window.removeEventListener('touchend', handleTouchEnd)
+    }
+    window.addEventListener('touchmove', handleTouchMove, { passive: false })
+    window.addEventListener('touchend', handleTouchEnd, { passive: true })
+  }, [onSelect, scale, piece.x, piece.y, piece.width, piece.height, wallWidth, wallHeight, onMove])
+
   /* ── Resize handles ────────────────────────────────── */
   const resizeRef = useRef(null)
 
@@ -137,6 +169,7 @@ export default function Piece({
         userSelect: 'none',
       }}
       onMouseDown={handlePieceMouseDown}
+      onTouchStart={handlePieceTouchStart}
     >
       {/* Overlay tint so image is legible */}
       {piece.image && !piece.transparent && <div className="piece-img-tint" />}
