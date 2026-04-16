@@ -32,6 +32,7 @@ function useWindowDrag(onMove, onEnd) {
 
 export default function Piece({
   piece, scale, isSelected, onSelect, onMove, onResize, wallWidth, wallHeight,
+  resizable,
 }) {
   const dragRef = useRef(null)
 
@@ -115,12 +116,11 @@ export default function Piece({
   }, [piece, startDragResize])
 
   /* ── Render ────────────────────────────────────────── */
-  const showLabel = pxW > 50 && pxH > 30
-  const showDims  = pxW > 80 && pxH > 50
+
 
   return (
     <div
-      className={`piece${isSelected ? ' piece--selected' : ''}`}
+      className={`piece${isSelected ? ' piece--selected' : ''}${piece.transparent ? ' piece--transparent' : ''}`}
       style={{
         position:  'absolute',
         left:      pxX,
@@ -138,24 +138,14 @@ export default function Piece({
       }}
       onMouseDown={handlePieceMouseDown}
     >
-      {/* Overlay tint so label is legible over non-transparent photos */}
+      {/* Overlay tint so image is legible */}
       {piece.image && !piece.transparent && <div className="piece-img-tint" />}
 
-      {/* Label */}
-      {showLabel && (
-        <div className="piece-label">
-          <span className="piece-name">{piece.name}</span>
-          {showDims && (
-            <span className="piece-dims">{piece.width}" × {piece.height}"</span>
-          )}
-        </div>
-      )}
-
-      {/* Selection border + resize handles */}
+      {/* Selection border + resize handles (only when resizable=true) */}
       {isSelected && (
         <>
           <div className="piece-selection-border" />
-          {HANDLES.map(h => (
+          {resizable && HANDLES.map(h => (
             <div
               key={h.id}
               className="resize-handle"

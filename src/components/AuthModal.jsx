@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { login, register, logout, isLoggedIn } from '../services/api'
+import { authLogin, authRegister } from '../utils/api'
 
 /* ── AuthModal ───────────────────────────────────────────────────────────────
    Shows login / register tabs.
@@ -29,8 +29,8 @@ export default function AuthModal({ onSuccess, onClose }) {
     setLoading(true)
     try {
       const user = tab === 'login'
-        ? await login(email.trim(), pass)
-        : await register(email.trim(), pass, name.trim() || undefined)
+        ? await authLogin(email.trim(), pass)
+        : await authRegister(email.trim(), pass, name.trim() || undefined)
       onSuccess(user)
     } catch (err) {
       setError(err.message || 'Something went wrong')
@@ -121,8 +121,11 @@ export function UserBadge({ user, onLoginClick, onLogout }) {
     )
   }
   return (
-    <button className="btn btn-ghost user-login-btn" onClick={onLoginClick} title="Log in to sync across devices">
-      ☁ Sync
-    </button>
+    <div className="user-login-wrap">
+      <span className="user-login-hint">to save and access across devices</span>
+      <button className="btn btn-ghost user-login-btn" onClick={onLoginClick}>
+        ☁ Login
+      </button>
+    </div>
   )
 }

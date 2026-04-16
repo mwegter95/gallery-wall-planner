@@ -1,22 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { warpPerspectiveAsync } from '../utils/homography'
 
-/**
- * Default corner positions as fractions [0-1] of the photo dimensions.
- * These are initial estimates for the wall photo — user drags to fine-tune.
- *
- * Looking at the photo (2400×1800):
- *   The green wall starts after the kitchen opening on the left,
- *   and the vaulted ceiling creates a slight diagonal at the top.
- *
- *   TL ≈ (0.21, 0.05)   TR ≈ (0.99, 0.09)
- *   BL ≈ (0.21, 0.96)   BR ≈ (0.99, 0.96)
- */
 const DEFAULT_CORNERS = [
-  [0.21, 0.05],   // 0: Top-Left
-  [0.99, 0.09],   // 1: Top-Right
-  [0.99, 0.96],   // 2: Bottom-Right
-  [0.21, 0.96],   // 3: Bottom-Left
+  [0.05, 0.05],   // TL
+  [0.95, 0.05],   // TR
+  [0.95, 0.95],   // BR
+  [0.05, 0.95],   // BL
 ]
 
 const CORNER_META = [
@@ -26,40 +15,159 @@ const CORNER_META = [
   { label: 'BL', full: 'Bottom-Left',  color: '#34d399' },
 ]
 
-const STORAGE_KEY = 'gwp-wall-corners'
+const isHeic = (file) =>
+  file.type === 'image/heic' ||
+  file.type === 'image/heif' ||
+  /\.(heic|heif)$/i.test(file.name)
 
-export default function WallSetup({ onApply, onClose, existingDataUrl }) {
-  const imgRef       = useRef(null)
-  const [imgSize, setImgSize] = useState({ w: 0, h: 0 })
+const blobToDataUrl = (blob) => new Promise((res, rej) => {
+  const r = new FileReader()
+  r.onload = () => res(r.result)
+  r.onerror = rej
+  r.readAsDataURL(blob)
+})
 
-  // Load saved corners or use defaults
-  const [corners, setCorners] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY))
-      if (saved?.length === 4) return saved
-    } catch {}
-    return DEFAULT_CORNERS
+/** Scale a canvas/image down so its longest side is at most MAX px */
+function scaleDataUrl(dataUrl, max = 2400) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight))
+      const w = Math.round(img.naturalWidth * scale)
+      const h = Math.round(img.naturalHeight * scale)
+      const c = Object.assign(document.createElement('canvas'), { width: w, height: h })
+      c.getContext('2d').drawImage(img, 0, 0, w, h)
+      resolve(c.toDataURL('image/jpeg', 0.92))
+    }
+    img.src = dataUrl
   })
+}
 
-  const [progress,     setProgress]     = useState(0)
-  const [isProcessing, setIsProcessing] = useState(false)
-  const [statusMsg,    setStatusMsg]    = useState('')
-  const [previewUrl,   setPreviewUrl]   = useState(existingDataUrl || null)
-  const [showPreview,  setShowPreview]  = useState(false)
+/**
+ * Convert any image File to a JPEG data URL (same 4-strategy pipeline as AddPieceModal).
+ * Strategy 0: server-side sips (macOS, handles all HEIC variants)
+ * Strategy 1: createImageBitmap → canvas
+ * Strategy 2: heic2any WASM
+ * Strategy 3: img element → canvas
+ */
+async function anyImageToJpeg(file) {
+  // ── Strategy 0: server-side sips (macOS dev server) ──
+  if (isHeic(file)) {
+    try {
+      const res = await fetch('/api/heic-to-jpeg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      })
+      if (res.ok) {
+        const blob = await res.blob()
+        return scaleDataUrl(await blobToDataUrl(blob))
+      }
+    } catch (e) {
+      console.warn('[WallSetup] sips endpoint failed:', e)
+    }
+  }
 
-  /* ── Measure the displayed image ─────────────────── */
+  // ── Strategy 1: createImageBitmap → canvas ──
+  try {
+    const bitmap = await createImageBitmap(file)
+    const canvas = document.createElement('canvas')
+    canvas.width  = bitmap.width
+    canvas.height = bitmap.height
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    return scaleDataUrl(canvas.toDataURL('image/jpeg', 0.92))
+  } catch (_) { /* fall through */ }
+
+  // ── Strategy 2: heic2any WASM ──
+  if (isHeic(file)) {
+    try {
+      const mod = await import('heic2any')
+      const heic2any = typeof mod.default === 'function' ? mod.default : mod
+      const result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.93 })
+      const blob   = Array.isArray(result) ? result[0] : result
+      return scaleDataUrl(await blobToDataUrl(blob))
+    } catch (e) {
+      console.warn('[WallSetup] heic2any failed:', e)
+    }
+  }
+
+  // ── Strategy 3: img element → canvas ──
+  try {
+    const objUrl = URL.createObjectURL(file)
+    const jpeg = await new Promise((res, rej) => {
+      const img = new Image()
+      img.onload = () => {
+        URL.revokeObjectURL(objUrl)
+        const c = Object.assign(document.createElement('canvas'), {
+          width: img.naturalWidth, height: img.naturalHeight,
+        })
+        c.getContext('2d').drawImage(img, 0, 0)
+        res(c.toDataURL('image/jpeg', 0.92))
+      }
+      img.onerror = () => { URL.revokeObjectURL(objUrl); rej(new Error('img decode failed')) }
+      img.src = objUrl
+    })
+    return scaleDataUrl(jpeg)
+  } catch (_) { /* fall through */ }
+
+  throw new Error('Could not decode image')
+}
+
+
+export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 128, wallHeight = 95 }) {
+  const imgRef            = useRef(null)
+  const fileInputRef      = useRef(null)
+  const [rawPhoto,        setRawPhoto]        = useState(null)   // data URL of uploaded photo
+  const [loadingPhoto,    setLoadingPhoto]    = useState(false)
+  const [photoError,      setPhotoError]      = useState('')
+  const [imgSize,         setImgSize]         = useState({ w: 0, h: 0 })
+  const [corners,         setCorners]         = useState(DEFAULT_CORNERS)
+  const [progress,        setProgress]        = useState(0)
+  const [isProcessing,    setIsProcessing]    = useState(false)
+  const [statusMsg,       setStatusMsg]       = useState('')
+  const [previewUrl,      setPreviewUrl]      = useState(null)
+  const [showPreview,     setShowPreview]     = useState(false)
+
+  /* ── File upload handler ─────────────────────────── */
+  const handleFileChange = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    setPhotoError('')
+    setLoadingPhoto(true)
+    try {
+      const dataUrl = await anyImageToJpeg(file)
+      setRawPhoto(dataUrl)
+      setCorners(DEFAULT_CORNERS)   // reset corners for new photo
+      setShowPreview(false)
+      setPreviewUrl(null)
+    } catch (err) {
+      setPhotoError('Could not load that image. Try a JPEG, PNG, or HEIC file.')
+    } finally {
+      setLoadingPhoto(false)
+    }
+  }, [])
+
+  /* ── Measure the displayed image (re-runs when rawPhoto changes) ── */
   useEffect(() => {
+    if (!rawPhoto) return
     const measure = () => {
       if (!imgRef.current) return
       setImgSize({ w: imgRef.current.offsetWidth, h: imgRef.current.offsetHeight })
     }
-    const img = imgRef.current
-    if (img?.complete) measure()
-    else img?.addEventListener('load', measure)
-    const ro = new ResizeObserver(measure)
-    if (img) ro.observe(img)
-    return () => { img?.removeEventListener('load', measure); ro.disconnect() }
-  }, [])
+    // Small delay so the img element has been rendered into the DOM
+    const raf = requestAnimationFrame(() => {
+      const img = imgRef.current
+      if (!img) return
+      if (img.complete && img.naturalWidth) measure()
+      else img.addEventListener('load', measure)
+      const ro = new ResizeObserver(measure)
+      ro.observe(img)
+      return () => { img.removeEventListener('load', measure); ro.disconnect() }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [rawPhoto])
 
   /* ── Drag a corner handle ────────────────────────── */
   const handleMouseDown = useCallback((e, idx) => {
@@ -82,7 +190,7 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
     window.addEventListener('mouseup', up)
   }, [])
 
-  /* ── Apply the perspective warp ──────────────────── */
+  /* ── Apply the perspective warp ─────────────────────── */
   const handleApply = useCallback(async () => {
     const img = imgRef.current
     if (!img?.complete || !img.naturalWidth) {
@@ -93,19 +201,16 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
     setProgress(0)
     setStatusMsg('Preparing…')
 
-    // Persist corners
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(corners))
-
-    await new Promise(r => setTimeout(r, 30))  // Let UI update
+    await new Promise(r => setTimeout(r, 30))
 
     try {
       const iw = img.naturalWidth
       const ih = img.naturalHeight
       const pixelCorners = corners.map(([nx, ny]) => [nx * iw, ny * ih])
 
-      // Output at 128:95 ratio, 1280px wide
+      // Output at wallWidth:wallHeight ratio, 1280px wide
       const outW = 1280
-      const outH = Math.round(outW * 95 / 128)  // 950px
+      const outH = Math.round(outW * wallHeight / wallWidth)
 
       setStatusMsg('Warping perspective…')
 
@@ -131,24 +236,74 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
     }
   }, [corners])
 
-  /* ── Compute SVG polygon from current handles ────── */
+  /* ── Compute SVG polygon from current handles ──────── */
   const polyPoints = corners
     .map(([nx, ny]) => `${nx * imgSize.w},${ny * imgSize.h}`)
     .join(' ')
 
   // Edge midpoints for labels
   const edgeLabels = [
-    { // top edge
+    {
       x: ((corners[0][0] + corners[1][0]) / 2) * imgSize.w,
       y: ((corners[0][1] + corners[1][1]) / 2) * imgSize.h - 14,
-      text: '← 128" →',
+      text: `← ${wallWidth}" →`,
     },
-    { // right edge
+    {
       x: ((corners[1][0] + corners[2][0]) / 2) * imgSize.w + 14,
       y: ((corners[1][1] + corners[2][1]) / 2) * imgSize.h,
-      text: '95"',
+      text: `${wallHeight}"`,
     },
   ]
+
+  /* ── Upload step ──────────────────────────────────── */
+  if (!rawPhoto) {
+    return (
+      <div className="ws-backdrop">
+        <div className="ws-modal ws-modal--upload">
+          <div className="ws-header">
+            <div className="ws-title-row">
+              <span className="ws-icon">📸</span>
+              <h2>Upload Wall Photo — {wallName}</h2>
+            </div>
+            <p className="ws-subtitle">
+              Upload a photo of your wall taken straight-on. In the next step you’ll drag
+              the 4 corner handles to mark the exact boundary of the <strong>{wallWidth}″ × {wallHeight}″</strong> wall area.
+            </p>
+          </div>
+
+          <div className="ws-upload-body">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              style={{ display: 'none' }}
+              onChange={handleFileChange}
+            />
+            <button
+              className="ws-upload-zone"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loadingPhoto}
+            >
+              {loadingPhoto ? (
+                <><div className="ms-spinner" /><span>Loading photo…</span></>
+              ) : (
+                <>
+                  <span className="ws-upload-icon">🖼️</span>
+                  <span className="ws-upload-label">Click to choose a wall photo</span>
+                  <span className="ws-upload-sub">JPEG, PNG, WebP, HEIC</span>
+                </>
+              )}
+            </button>
+            {photoError && <p className="ws-upload-error">{photoError}</p>}
+          </div>
+
+          <div className="ws-footer" style={{ justifyContent: 'flex-end' }}>
+            <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="ws-backdrop">
@@ -158,10 +313,10 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
         <div className="ws-header">
           <div className="ws-title-row">
             <span className="ws-icon">📐</span>
-            <h2>Calibrate Wall Perspective</h2>
+            <h2>Calibrate — {wallName}</h2>
           </div>
           <p className="ws-subtitle">
-            Drag the four colored handles to the exact corners of your <strong>128" × 95"</strong> wall.
+            Drag the four colored handles to the exact corners of your <strong>{wallWidth}″ × {wallHeight}″</strong> wall.
             The app will correct the perspective so pieces are placed to true scale.
           </p>
         </div>
@@ -173,11 +328,10 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
             <div className="ws-photo-wrap">
               <img
                 ref={imgRef}
-                src="/wall.jpg"
+                src={rawPhoto}
                 className="ws-photo"
                 alt="Wall photo"
                 draggable={false}
-                crossOrigin="anonymous"
               />
 
               {/* SVG quad overlay */}
@@ -246,7 +400,7 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
               <div className="ws-preview-badge">✓ Corrected Wall Preview</div>
               <img src={previewUrl} className="ws-preview-img" alt="Corrected wall" />
               <div className="ws-preview-meta">
-                128" × 95" — perspective corrected &amp; ready to use
+                {wallWidth}" × {wallHeight}" — perspective corrected &amp; ready to use
               </div>
             </div>
           )}
@@ -280,6 +434,13 @@ export default function WallSetup({ onApply, onClose, existingDataUrl }) {
               <>
                 <button className="btn btn-ghost" onClick={onClose} disabled={isProcessing}>
                   Cancel
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => { setRawPhoto(null); setCorners(DEFAULT_CORNERS) }}
+                  disabled={isProcessing}
+                >
+                  📂 Change Photo
                 </button>
                 <button
                   className="btn btn-ghost btn-sm"
