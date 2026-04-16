@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import CropModal from './CropModal'
+import { BASE as API_BASE } from '../utils/api'
 
 const PALETTE = [
   '#8B7D6B','#6B8E9F','#9E8B6A','#7B9E87','#A08080',
@@ -35,7 +36,7 @@ async function anyImageToJpeg(file) {
   // that browser-side libraries choke on.
   if (isHeic(file)) {
     try {
-      const res = await fetch('/api/heic-to-jpeg', {
+      const res = await fetch(`${API_BASE}/api/heic-to-jpeg`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file,
