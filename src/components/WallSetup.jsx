@@ -170,26 +170,34 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
     return () => cancelAnimationFrame(raf)
   }, [rawPhoto])
 
-  /* ── Drag a corner handle ────────────────────────── */
+  /* ── Shared corner-move logic ───────────────────────── */
+  const moveCorner = useCallback((clientX, clientY, idx) => {
+    if (!imgRef.current) return
+    const rect = imgRef.current.getBoundingClientRect()
+    const nx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const ny = Math.max(0, Math.min(1, (clientY - rect.top)  / rect.height))
+    setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
+  }, [])
+
+  /* ── Drag a corner handle (mouse) ───────────────────── */
   const handleMouseDown = useCallback((e, idx) => {
     if (e.button !== 0) return
-    e.stopPropagation()
-    e.preventDefault()
-
-    const move = (ev) => {
-      if (!imgRef.current) return
-      const rect = imgRef.current.getBoundingClientRect()
-      const nx = Math.max(0, Math.min(1, (ev.clientX - rect.left)  / rect.width))
-      const ny = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height))
-      setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
-    }
-    const up = () => {
-      window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', up)
-    }
+    e.stopPropagation(); e.preventDefault()
+    const move = (ev) => moveCorner(ev.clientX, ev.clientY, idx)
+    const up   = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup', up)
-  }, [])
+  }, [moveCorner])
+
+  /* ── Drag a corner handle (touch) ───────────────────── */
+  const handleTouchStart = useCallback((e, idx) => {
+    if (e.touches.length !== 1) return
+    e.stopPropagation(); e.preventDefault()
+    const move = (ev) => { ev.preventDefault(); if (ev.touches[0]) moveCorner(ev.touches[0].clientX, ev.touches[0].clientY, idx) }
+    const up   = () => { window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up) }
+    window.addEventListener('touchmove', move, { passive: false })
+    window.addEventListener('touchend',  up,   { passive: true })
+  }, [moveCorner])
 
   /* ── Apply the perspective warp ─────────────────────── */
   const handleApply = useCallback(async () => {
@@ -380,8 +388,10 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                     background:      meta.color,
                     borderColor:     'rgba(255,255,255,0.9)',
                     boxShadow:       `0 0 0 2px ${meta.color}, 0 2px 6px rgba(0,0,0,0.6)`,
+                    touchAction:     'none',
                   }}
                   onMouseDown={(e) => handleMouseDown(e, idx)}
+                  onTouchStart={(e) => handleTouchStart(e, idx)}
                 />
               ))}
 

@@ -114,21 +114,34 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
     return () => { img?.removeEventListener('load', measure); ro.disconnect() }
   }, [])
 
-  /* ── Drag a corner ───────────────────────────────────── */
+  /* ── Shared corner-move logic ───────────────────────── */
+  const movePcCorner = useCallback((clientX, clientY, idx) => {
+    if (!imgRef.current) return
+    const rect = imgRef.current.getBoundingClientRect()
+    const nx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const ny = Math.max(0, Math.min(1, (clientY - rect.top)  / rect.height))
+    setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
+  }, [])
+
+  /* ── Drag a corner (mouse) ───────────────────────────── */
   const handleDrag = useCallback((e, idx) => {
     if (e.button !== 0) return
     e.stopPropagation(); e.preventDefault()
-    const move = (ev) => {
-      if (!imgRef.current) return
-      const rect = imgRef.current.getBoundingClientRect()
-      const nx = Math.max(0, Math.min(1, (ev.clientX - rect.left)  / rect.width))
-      const ny = Math.max(0, Math.min(1, (ev.clientY - rect.top)   / rect.height))
-      setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
-    }
-    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    const move = (ev) => movePcCorner(ev.clientX, ev.clientY, idx)
+    const up   = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup',   up)
-  }, [])
+  }, [movePcCorner])
+
+  /* ── Drag a corner (touch) ───────────────────────────── */
+  const handleTouchDrag = useCallback((e, idx) => {
+    if (e.touches.length !== 1) return
+    e.stopPropagation(); e.preventDefault()
+    const move = (ev) => { ev.preventDefault(); if (ev.touches[0]) movePcCorner(ev.touches[0].clientX, ev.touches[0].clientY, idx) }
+    const up   = () => { window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up) }
+    window.addEventListener('touchmove', move, { passive: false })
+    window.addEventListener('touchend',  up,   { passive: true })
+  }, [movePcCorner])
 
   /* ── Apply perspective warp ──────────────────────────── */
   const handleApply = useCallback(async () => {
@@ -193,9 +206,11 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
                     top:  ny * size.h,
                     borderColor:     PCROP_COLORS[idx],
                     backgroundColor: PCROP_COLORS[idx] + '55',
+                    touchAction:     'none',
                   }}
                   data-label={['TL', 'TR', 'BR', 'BL'][idx]}
                   onMouseDown={(e) => handleDrag(e, idx)}
+                  onTouchStart={(e) => handleTouchDrag(e, idx)}
                 />
               ))}
             </>
@@ -458,6 +473,31 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
   }, [doPaint])
   const onPointerUp = useCallback(() => { isPaintingRef.current = false; setIsPainting(false) }, [])
 
+  /* ── Touch equivalents for brush canvas ─────────────── */
+  const getCanvasXYFromClient = (clientX, clientY) => {
+    const cr = canvasRef.current?.getBoundingClientRect()
+    const wr = wrapRef.current?.getBoundingClientRect()
+    if (!cr || !wr) return null
+    return { x: clientX - cr.left, y: clientY - cr.top,
+             cx: clientX - wr.left, cy: clientY - wr.top }
+  }
+  const onTouchStartCanvas = useCallback((e) => {
+    if (e.touches.length !== 1) return
+    e.preventDefault()
+    isPaintingRef.current = true; setIsPainting(true)
+    const t = e.touches[0]
+    const pos = getCanvasXYFromClient(t.clientX, t.clientY); if (pos) doPaint(pos.x, pos.y)
+  }, [doPaint])  // eslint-disable-line react-hooks/exhaustive-deps
+  const onTouchMoveCanvas = useCallback((e) => {
+    if (e.touches.length !== 1) return
+    e.preventDefault()
+    const t = e.touches[0]
+    const pos = getCanvasXYFromClient(t.clientX, t.clientY); if (!pos) return
+    setCursor({ x: pos.cx, y: pos.cy })
+    if (isPaintingRef.current) doPaint(pos.x, pos.y)
+  }, [doPaint])  // eslint-disable-line react-hooks/exhaustive-deps
+  const onTouchEndCanvas = useCallback(() => { isPaintingRef.current = false; setIsPainting(false) }, [])
+
   /* ── Load original image data (shared across paths) ────── */
   const ensureOrigData = useCallback(async () => {
     if (origDataRef.current) return
@@ -592,21 +632,37 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
     return () => { img?.removeEventListener('load', measure); ro.disconnect() }
   }, [phase, warpCutoutUrl])
 
-  /* ── Drag a warp corner ────────────────────────────────── */
+  /* ── Shared warp corner move ──────────────────────────── */
+  const moveWarpCorner = useCallback((clientX, clientY, idx) => {
+    if (!warpImgRef.current) return
+    const rect = warpImgRef.current.getBoundingClientRect()
+    const nx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const ny = Math.max(0, Math.min(1, (clientY - rect.top)  / rect.height))
+    setWarpCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
+  }, [])
+
+  /* ── Drag a warp corner (mouse) ────────────────────────── */
   const handleWarpDrag = useCallback((e, idx) => {
     if (e.button !== 0) return
     e.stopPropagation(); e.preventDefault()
     const move = (ev) => {
       if (!warpImgRef.current) return
-      const rect = warpImgRef.current.getBoundingClientRect()
-      const nx = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width))
-      const ny = Math.max(0, Math.min(1, (ev.clientY - rect.top)  / rect.height))
-      setWarpCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
+      moveWarpCorner(ev.clientX, ev.clientY, idx)
     }
     const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup', up)
-  }, [])
+  }, [moveWarpCorner])
+
+  /* ── Drag a warp corner (touch) ────────────────────────── */
+  const handleWarpTouchDrag = useCallback((e, idx) => {
+    if (e.touches.length !== 1) return
+    e.stopPropagation(); e.preventDefault()
+    const move = (ev) => { ev.preventDefault(); if (ev.touches[0]) moveWarpCorner(ev.touches[0].clientX, ev.touches[0].clientY, idx) }
+    const up   = () => { window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up) }
+    window.addEventListener('touchmove', move, { passive: false })
+    window.addEventListener('touchend',  up,   { passive: true })
+  }, [moveWarpCorner])
 
   /* ── Apply perspective warp to the cutout ──────────────── */
   const applyWarp = useCallback(async () => {
@@ -677,11 +733,14 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
           <div
             ref={wrapRef}
             className="ms-canvas-wrap"
-            style={{ cursor: phase === 'ready' ? 'none' : 'default' }}
+            style={{ cursor: phase === 'ready' ? 'none' : 'default', touchAction: phase === 'ready' ? 'none' : 'auto' }}
             onMouseDown={phase === 'ready' ? onPointerDown : undefined}
             onMouseMove={phase === 'ready' ? onPointerMove : undefined}
             onMouseUp={phase === 'ready' ? onPointerUp : undefined}
             onMouseLeave={phase === 'ready' ? () => { isPaintingRef.current = false; setIsPainting(false); setCursor(null) } : undefined}
+            onTouchStart={phase === 'ready' ? onTouchStartCanvas : undefined}
+            onTouchMove={phase === 'ready' ? onTouchMoveCanvas : undefined}
+            onTouchEnd={phase === 'ready' ? onTouchEndCanvas : undefined}
           >
             <canvas ref={canvasRef} className="ms-canvas" />
             {phase === 'ready' && cursor && (
@@ -785,9 +844,11 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
                         left: nx * warpSize.w, top: ny * warpSize.h,
                         borderColor: PCROP_COLORS[idx],
                         backgroundColor: PCROP_COLORS[idx] + '55',
+                        touchAction: 'none',
                       }}
                       data-label={['TL','TR','BR','BL'][idx]}
                       onMouseDown={e => handleWarpDrag(e, idx)}
+                      onTouchStart={e => handleWarpTouchDrag(e, idx)}
                     />
                   ))}
                 </>

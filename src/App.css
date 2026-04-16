@@ -2502,10 +2502,14 @@ kbd {
   /* Hide the login hint text; keep the button */
   .user-login-hint { display: none; }
 
-  /* Shrink all header action buttons */
+  /* Hide button label text — keep emoji/icon only */
+  .btn-label { display: none; }
+
+  /* Shrink all header action buttons to icon-sized */
   .header-actions .btn {
-    font-size: 11px;
-    padding: 5px 8px;
+    padding: 6px 9px;
+    font-size: 15px;
+    min-width: 0;
   }
 
   /* Collapse save-layout button label to just the emoji */
@@ -2513,6 +2517,31 @@ kbd {
 
   /* collapse calibrate label */
   .header-actions .btn-calibrate-label { display: none; }
+
+  /* ── WallSetup footer: stack / wrap on mobile ─────── */
+  .ws-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+
+  .ws-legend { display: none; }   /* hide corner legend — saves space */
+
+  .ws-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .ws-actions .btn {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    font-size: 12px;
+    padding: 9px 6px;
+  }
 
   /* ── Sidebar — slide-in drawer ─────────────────── */
   .sidebar {
@@ -2668,6 +2697,27 @@ kbd {
     height: 16px;
   }
 
+  /* Corner calibration handles — much bigger hit target on mobile */
+  .ws-handle {
+    width: 28px !important;
+    height: 28px !important;
+  }
+
+  /* CropModal footer — wrap on mobile */
+  .cm-footer {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px;
+  }
+
+  .cm-footer .btn {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    font-size: 12px;
+    padding: 9px 6px;
+  }
+
   /* Piece label — slightly larger text */
   .piece-name { font-size: 12px; }
   .piece-dims { font-size: 10px; }
@@ -2685,7 +2735,7 @@ kbd {
 
 /* ── Very narrow (≤ 400px) extra tweaks ─────────────── */
 @media (max-width: 400px) {
-  .wall-badge--btn { max-width: 100px; }
-  .header-actions .btn-primary { font-size: 0; padding: 8px; }
-  .header-actions .btn-primary::before { content: '+'; font-size: 18px; font-weight: 700; }
+  .wall-badge--btn { max-width: 90px; font-size: 10px; }
+  .header-actions { gap: 2px; }
+  .header-actions .btn { padding: 6px 7px; }
 }

@@ -214,7 +214,7 @@ export function UserBadge({ user, onLoginClick, onLogout }) {
     <div className="user-login-wrap">
       <span className="user-login-hint">save &amp; access across devices</span>
       <button className="btn btn-ghost btn-sm user-login-btn" onClick={onLoginClick}>
-        ☁ Log in
+        ☁<span className="btn-label"> Log in</span>
       </button>
     </div>
   )

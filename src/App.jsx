@@ -486,7 +486,7 @@ export default function App() {
               disabled={pieces.length === 0 || isSaving}
               title="Save current layout"
             >
-              {isSaving ? '⏳ Saving…' : `💾 ${currentLayout ? currentLayout : 'Save Layout'}`}
+              {isSaving ? '⏳' : '💾'}<span className="btn-label">{isSaving ? ' Saving…' : ` ${currentLayout ? currentLayout : 'Save Layout'}`}</span>
             </button>
             {saveMenuOpen && (
               <div className="header-save-menu">
@@ -523,10 +523,10 @@ export default function App() {
             onClick={() => openSetup()}
             title={activeWallImage ? 'Re-calibrate wall perspective' : 'Calibrate wall perspective'}
           >
-            {activeWallImage ? '⚙ Recalibrate' : '📐 Calibrate Wall'}
+            {activeWallImage ? '⚙' : '📐'}<span className="btn-label"> {activeWallImage ? 'Recalibrate' : 'Calibrate Wall'}</span>
           </button>
           <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
-            + Add Piece
+            +<span className="btn-label"> Add Piece</span>
           </button>
           <UserBadge
             user={authUser}
