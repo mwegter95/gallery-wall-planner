@@ -10,8 +10,8 @@
  */
 
 // In dev this is '' so paths stay relative (Vite proxy handles them).
-// On Netlify set VITE_API_URL in the build environment.
-const BASE = import.meta.env.VITE_API_URL || ''
+// In production (VITE_API_URL=https://api.michaelwegter.com) it becomes absolute.
+export const BASE = import.meta.env.VITE_API_URL || ''
 
 // ── Device token ─────────────────────────────────────────────────────────────
 // Stable UUID per browser; lets anonymous users keep their data without login.
@@ -81,9 +81,37 @@ export async function authMe() {
   return apiFetch('/auth/me')
 }
 
+// ── URL helpers ───────────────────────────────────────────────────────────────
+// Relative /uploads/... paths need BASE prefix in production.
+export function fixUrl(url) {
+  if (!url || !url.startsWith('/')) return url
+  return `${BASE}${url}`
+}
+
 // ── Gallery: full state ───────────────────────────────────────────────────────
 export async function loadState() {
-  return apiFetch('/api/state')
+  const state = await apiFetch('/api/state')
+  // Normalise any relative /uploads/... URLs to absolute
+  if (state.walls) {
+    for (const w of Object.values(state.walls)) {
+      if (w.imageUrl) w.imageUrl = fixUrl(w.imageUrl)
+    }
+  }
+  if (state.library) {
+    for (const p of Object.values(state.library)) {
+      if (p.image) p.image = fixUrl(p.image)
+    }
+  }
+  if (state.layouts) {
+    for (const wallLayouts of Object.values(state.layouts)) {
+      for (const pieces of Object.values(wallLayouts)) {
+        for (const piece of pieces) {
+          if (piece.image) piece.image = fixUrl(piece.image)
+        }
+      }
+    }
+  }
+  return state
 }
 
 // ── Gallery: walls ────────────────────────────────────────────────────────────
@@ -99,10 +127,11 @@ export async function deleteWall(id) {
 }
 
 export async function uploadWallImage(wallId, dataUrl) {
-  return apiFetch(`/api/walls/${wallId}/image`, {
+  const data = await apiFetch(`/api/walls/${wallId}/image`, {
     method: 'POST',
     body: JSON.stringify({ dataUrl }),
   })
+  return { ...data, url: data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url }
 }
 
 // ── Gallery: layouts ──────────────────────────────────────────────────────────
@@ -121,10 +150,11 @@ export async function deleteLayout(wallId, name) {
 
 // ── Gallery: piece images ─────────────────────────────────────────────────────
 export async function uploadPieceImage(pieceId, dataUrl) {
-  return apiFetch(`/api/piece-images/${pieceId}`, {
+  const data = await apiFetch(`/api/piece-images/${pieceId}`, {
     method: 'POST',
     body: JSON.stringify({ dataUrl }),
   })
+  return { ...data, url: data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url }
 }
 
 export async function deletePieceImage(pieceId) {
@@ -144,8 +174,9 @@ export async function deleteLibraryPiece(id) {
 }
 
 export async function uploadLibraryImage(libId, dataUrl) {
-  return apiFetch(`/api/library/${libId}/image`, {
+  const data = await apiFetch(`/api/library/${libId}/image`, {
     method: 'POST',
     body: JSON.stringify({ dataUrl }),
   })
+  return { ...data, url: data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url }
 }

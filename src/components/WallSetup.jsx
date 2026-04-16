@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { warpPerspectiveAsync } from '../utils/homography'
+import { BASE as API_BASE } from '../utils/api'
 
 const DEFAULT_CORNERS = [
   [0.05, 0.05],   // TL
@@ -54,7 +55,7 @@ async function anyImageToJpeg(file) {
   // ── Strategy 0: server-side sips (macOS dev server) ──
   if (isHeic(file)) {
     try {
-      const res = await fetch('/api/heic-to-jpeg', {
+      const res = await fetch(`${API_BASE}/api/heic-to-jpeg`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file,
