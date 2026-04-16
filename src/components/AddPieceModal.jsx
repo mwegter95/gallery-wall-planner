@@ -26,30 +26,9 @@ const isHeic = (file) =>
  *    on all browsers, and HEIC natively on Safari 16+)
  * 2. heic2any WASM  (fallback for HEIC on Chrome/Firefox; loaded dynamically to
  *    avoid Vite pre-bundler breaking the WASM loader)
- * 3. img element → Canvas  (handles formats <img> can decode that
- *    createImageBitmap rejects, e.g. Safari HEIC native, AVIF, TIFF)
+ * 3. Raw FileReader  (last resort — lets the <img> tag try native rendering)
  */
 async function anyImageToJpeg(file) {
-  // ── Strategy 0: server-side sips conversion (dev server, macOS) ──
-  // Uses the macOS native HEVC codec via `sips` — handles all HEIC variants
-  // that browser-side libraries choke on.
-  if (isHeic(file)) {
-    try {
-      const res = await fetch('/api/heic-to-jpeg', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: file,
-      })
-      if (res.ok) {
-        const blob = await res.blob()
-        return blobToDataUrl(blob)
-      }
-    } catch (sipsErr) {
-      console.warn('[anyImageToJpeg] sips endpoint failed:', sipsErr)
-      /* fall through */
-    }
-  }
-
   // ── Strategy 1: createImageBitmap → canvas ──────────
   try {
     const bitmap = await createImageBitmap(file)
@@ -64,47 +43,16 @@ async function anyImageToJpeg(file) {
   // ── Strategy 2: heic2any WASM (dynamic import avoids Vite pre-bundle) ──
   if (isHeic(file)) {
     try {
-      const mod = await import('heic2any')
-      // heic2any is a UMD/CJS module; the function may live on .default or be the module itself
-      const heic2any = typeof mod.default === 'function' ? mod.default : mod
+      const heic2any = (await import('heic2any')).default
       const result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.93 })
       const blob   = Array.isArray(result) ? result[0] : result
       return blobToDataUrl(blob)
-    } catch (heicErr) {
-      console.warn('[anyImageToJpeg] heic2any failed:', heicErr)
-      /* fall through */
-    }
+    } catch (_) { /* fall through */ }
   }
 
-  // ── Strategy 3: img element → canvas ──
-  // Catches formats that <img> can decode natively even when
-  // createImageBitmap rejects them (Safari HEIC, AVIF, TIFF, etc.).
-  try {
-    const objUrl = URL.createObjectURL(file)
-    const jpeg = await new Promise((res, rej) => {
-      const img = new Image()
-      img.onload = () => {
-        URL.revokeObjectURL(objUrl)
-        const c = Object.assign(document.createElement('canvas'), {
-          width: img.naturalWidth, height: img.naturalHeight,
-        })
-        c.getContext('2d').drawImage(img, 0, 0)
-        res(c.toDataURL('image/jpeg', 0.93))
-      }
-      img.onerror = () => { URL.revokeObjectURL(objUrl); rej(new Error('img decode failed')) }
-      img.src = objUrl
-    })
-    return jpeg
-  } catch (_) { /* fall through */ }
-
-  // ── All strategies exhausted ──
-  if (isHeic(file)) {
-    throw new Error(
-      'Could not decode HEIC image on this browser. ' +
-      'Open the photo in the Photos app, share/export it as JPEG, then try again.'
-    )
-  }
-  // For other formats, return raw data URL and let the browser attempt it.
+  // ── Strategy 3: raw data URL ──
+  // The browser's <img> may still be able to render it natively
+  // (e.g. Safari + HEIC, or a non-standard MIME type).
   return blobToDataUrl(file)
 }
 

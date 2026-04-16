@@ -1,0 +1,56 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]          # deploys whenever you push to main
+  workflow_dispatch:          # lets you trigger a deploy manually from GitHub UI
+
+# Allow writing to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy runs at a time
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          # If you set up a custom domain (gallery.michaelwegter.com), base stays /
+          # If you do NOT have a custom domain, set VITE_BASE to /your-repo-name/
+          # in GitHub → Settings → Secrets and variables → Actions → Variables
+          VITE_BASE: ${{ vars.VITE_BASE || '/' }}
+          # URL of your mw-backend Cloudflare Tunnel
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

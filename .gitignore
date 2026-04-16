@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Images in root folder
+/*.heic
+/*.HEIC
+/*.png
+/*.PNG
+/*.jpg
+/*.JPG
+/*.jpeg
+/*.JPEG

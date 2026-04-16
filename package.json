@@ -4,8 +4,6 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "start": "concurrently -n backend,frontend -c cyan,magenta \"npm run backend\" \"npm run dev\"",
-    "backend": "node --watch backend/server.js",
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
@@ -17,7 +15,6 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@imgly/background-removal": "^1.7.0",
     "heic2any": "^0.0.4",
-    "onnxruntime-web": "^1.21.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
@@ -26,7 +23,6 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "concurrently": "^9.2.1",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",

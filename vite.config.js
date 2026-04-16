@@ -16,7 +16,6 @@ function heicConvertPlugin() {
     configureServer(server) {
       server.middlewares.use('/api/heic-to-jpeg', (req, res) => {
         if (req.method !== 'POST') { res.statusCode = 405; res.end('Method Not Allowed'); return }
-
         const chunks = []
         req.on('data', c => chunks.push(c))
         req.on('end', async () => {
@@ -47,28 +46,30 @@ function heicConvertPlugin() {
 
 // https://vite.dev/config/
 export default defineConfig({
+  // base stays '/' when using a custom domain (gallery.michaelwegter.com).
+  // Set VITE_BASE=/gallery-wall-planner/ in GitHub Actions variables if NOT
+  // using a custom domain and the repo is not username.github.io.
+  base: process.env.VITE_BASE || '/',
+
   plugins: [react(), heicConvertPlugin()],
+
   server: {
     proxy: {
-      // heicConvertPlugin middleware intercepts /api/heic-to-jpeg before proxy runs.
-      // All other /api/* and /uploads/* routes go to the local Express backend.
-      '/api': { target: 'http://localhost:3001', changeOrigin: true },
-      '/uploads': { target: 'http://localhost:3001', changeOrigin: true },
+      // heicConvertPlugin intercepts /api/heic-to-jpeg before this proxy runs.
+      // Everything else goes to mw-backend (Flask, port 5050).
+      '/api':     { target: 'http://localhost:5050', changeOrigin: true },
+      '/auth':    { target: 'http://localhost:5050', changeOrigin: true },
+      '/uploads': { target: 'http://localhost:5050', changeOrigin: true },
     },
   },
+
   optimizeDeps: {
-    // These packages bundle their own WASM loaders and internal dynamic imports.
-    // Vite's pre-bundler breaks those paths, so we exclude them and let them
-    // load their own assets at runtime as intended.
-    // @imgly/background-removal and onnxruntime-web bundle their own WASM
-    // loaders and internal dynamic imports — Vite's pre-bundler breaks those
-    // paths, so we exclude them and let them load their own assets at runtime.
-    // heic2any is a plain UMD/CJS bundle with no dynamic internal imports, so
-    // we let Vite pre-bundle it so ESM interop (.default) works correctly.
+    // These packages bundle WASM loaders / dynamic imports that Vite's
+    // pre-bundler breaks — exclude them so they load at runtime as intended.
     exclude: ['@imgly/background-removal', 'onnxruntime-web'],
   },
+
   build: {
-    // heic2any's WASM makes the bundle large; suppress the size warning.
     chunkSizeWarningLimit: 2000,
   },
 })

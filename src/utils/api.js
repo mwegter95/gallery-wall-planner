@@ -1,100 +1,151 @@
-// All requests go through Vite's proxy → http://localhost:3001
+/**
+ * Gallery Wall backend client.
+ *
+ * Dev:        requests go to /api/* → Vite proxy → localhost:5050
+ * Production: VITE_API_URL=https://api.michaelwegter.com  →  absolute URLs
+ *
+ * Auth headers are attached automatically:
+ *   - Logged-in users:  Authorization: Bearer <jwt>
+ *   - Anonymous:        X-Device-Token: <uuid>   (persistent per browser)
+ */
 
-async function apiFetch(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`API error ${res.status}: ${text}`);
+// In dev this is '' so paths stay relative (Vite proxy handles them).
+// On Netlify set VITE_API_URL in the build environment.
+const BASE = import.meta.env.VITE_API_URL || ''
+
+// ── Device token ─────────────────────────────────────────────────────────────
+// Stable UUID per browser; lets anonymous users keep their data without login.
+function getDeviceToken() {
+  const key = 'gwp-device-token'
+  let t = localStorage.getItem(key)
+  if (!t) { t = crypto.randomUUID(); localStorage.setItem(key, t) }
+  return t
+}
+
+// ── JWT helpers ───────────────────────────────────────────────────────────────
+export function getJwt()      { return localStorage.getItem('gwp-jwt') }
+export function setJwt(token) { localStorage.setItem('gwp-jwt', token) }
+export function clearJwt()    { localStorage.removeItem('gwp-jwt') }
+export function isLoggedIn()  { return Boolean(getJwt()) }
+export { getDeviceToken }
+
+// ── Core fetch ────────────────────────────────────────────────────────────────
+async function apiFetch(path, options = {}) {
+  const jwt    = getJwt()
+  const device = getDeviceToken()
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Device-Token': device,
+    ...(jwt ? { 'Authorization': `Bearer ${jwt}` } : {}),
+    ...(options.headers || {}),
   }
-  return res.json();
+
+  const res = await fetch(`${BASE}${path}`, { ...options, headers })
+
+  if (res.status === 401) {
+    clearJwt()
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`API error ${res.status}: ${text}`)
+  }
+  return res.json()
 }
 
-/** Load all persisted walls and layouts from backend */
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export async function authRegister(email, password, displayName) {
+  const data = await apiFetch('/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, display_name: displayName, device_token: getDeviceToken() }),
+  })
+  setJwt(data.token)
+  return data.user
+}
+
+export async function authLogin(email, password) {
+  const data = await apiFetch('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, device_token: getDeviceToken() }),
+  })
+  setJwt(data.token)
+  return data.user
+}
+
+export async function authLogout() {
+  clearJwt()
+}
+
+export async function authMe() {
+  return apiFetch('/auth/me')
+}
+
+// ── Gallery: full state ───────────────────────────────────────────────────────
 export async function loadState() {
-  return apiFetch('/api/state');
+  return apiFetch('/api/state')
 }
 
-/** Upsert wall metadata (id, name, width, height, createdAt) */
+// ── Gallery: walls ────────────────────────────────────────────────────────────
 export async function putWall(wall) {
   return apiFetch(`/api/walls/${wall.id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(wall),
-  });
+  })
 }
 
-/** Delete a wall (metadata + image + layouts) */
 export async function deleteWall(id) {
-  return apiFetch(`/api/walls/${id}`, { method: 'DELETE' });
+  return apiFetch(`/api/walls/${id}`, { method: 'DELETE' })
 }
 
-/**
- * Upload a wall image as a dataUrl.
- * Returns { url } where url is like "/uploads/walls/{id}.jpg"
- */
 export async function uploadWallImage(wallId, dataUrl) {
   return apiFetch(`/api/walls/${wallId}/image`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dataUrl }),
-  });
+  })
 }
 
-/**
- * Upload a piece image as a dataUrl.
- * Returns { url } where url is like "/uploads/pieces/{id}.jpg"
- */
-export async function uploadPieceImage(pieceId, dataUrl) {
-  return apiFetch(`/api/piece-images/${pieceId}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dataUrl }),
-  });
-}
-
-/** Delete a piece image from disk */
-export async function deletePieceImage(pieceId) {
-  return apiFetch(`/api/piece-images/${pieceId}`, { method: 'DELETE' });
-}
-
-/**
- * Save (upsert) a named layout for a wall.
- * pieces should already have server URLs (not data: URLs).
- */
+// ── Gallery: layouts ──────────────────────────────────────────────────────────
 export async function putLayout(wallId, name, pieces) {
   return apiFetch(`/api/layouts/${wallId}/${encodeURIComponent(name)}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pieces }),
-  });
+  })
 }
 
-/** Delete a named layout for a wall */
 export async function deleteLayout(wallId, name) {
   return apiFetch(`/api/layouts/${wallId}/${encodeURIComponent(name)}`, {
     method: 'DELETE',
-  });
+  })
 }
 
-/** Upload a library piece image. Returns { url } */
-export async function uploadLibraryImage(libId, dataUrl) {
-  return apiFetch(`/api/library/${libId}/image`, {
+// ── Gallery: piece images ─────────────────────────────────────────────────────
+export async function uploadPieceImage(pieceId, dataUrl) {
+  return apiFetch(`/api/piece-images/${pieceId}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dataUrl }),
-  });
+  })
 }
 
-/** Upsert a library piece entry */
+export async function deletePieceImage(pieceId) {
+  return apiFetch(`/api/piece-images/${pieceId}`, { method: 'DELETE' })
+}
+
+// ── Gallery: library ──────────────────────────────────────────────────────────
 export async function putLibraryPiece(piece) {
   return apiFetch(`/api/library/${piece.id}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(piece),
-  });
+  })
 }
 
-/** Remove a library piece entry */
 export async function deleteLibraryPiece(id) {
-  return apiFetch(`/api/library/${id}`, { method: 'DELETE' });
+  return apiFetch(`/api/library/${id}`, { method: 'DELETE' })
+}
+
+export async function uploadLibraryImage(libId, dataUrl) {
+  return apiFetch(`/api/library/${libId}/image`, {
+    method: 'POST',
+    body: JSON.stringify({ dataUrl }),
+  })
 }

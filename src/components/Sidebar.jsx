@@ -3,13 +3,12 @@ import { useState, useRef } from 'react'
 export default function Sidebar({
   pieces, selectedId, onSelect, onDelete, onEdit, onBringForward, onSendBackward,
   snapToGrid, onSnapToggle, gridSize, onGridSizeChange,
-  layouts, wallName, currentLayout, onSaveLayout, onLoadLayout, onDeleteLayout,
+  layouts, currentLayout, onSaveLayout, onLoadLayout, onDeleteLayout,
   onAddPiece, onClearAll,
-  library = {}, onAddFromLibrary, onDeleteFromLibrary,
 }) {
   const [layoutName, setLayoutName] = useState('')
   const [saveError, setSaveError]   = useState('')
-  const [section, setSection]       = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'settings'
+  const [section, setSection]       = useState('pieces') // 'pieces' | 'layouts' | 'settings'
 
   const handleSave = () => {
     const name = layoutName.trim()
@@ -29,10 +28,6 @@ export default function Sidebar({
           className={`tab-btn ${section === 'pieces' ? 'active' : ''}`}
           onClick={() => setSection('pieces')}
         >Pieces</button>
-        <button
-          className={`tab-btn ${section === 'library' ? 'active' : ''}`}
-          onClick={() => setSection('library')}
-        >Library{Object.keys(library).length > 0 && <span className="count-badge">{Object.keys(library).length}</span>}</button>
         <button
           className={`tab-btn ${section === 'layouts' ? 'active' : ''}`}
           onClick={() => setSection('layouts')}
@@ -122,88 +117,13 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* ── LIBRARY tab ─────────────────────────── */}
-      {section === 'library' && (
-        <div className="sidebar-section">
-          <div className="sidebar-header">
-            <span className="section-title">Piece Library <span className="count-badge">{Object.keys(library).length}</span></span>
-          </div>
-          <p className="lib-hint">All pieces are saved here automatically. Click "+ Add" to place one on the current wall.</p>
-
-          {Object.keys(library).length === 0 ? (
-            <div className="empty-state">
-              <p>Library is empty.</p>
-              <p>Add a piece to the wall and it will appear here.</p>
-            </div>
-          ) : (
-            <div className="lib-grid">
-              {Object.values(library)
-                .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
-                .map(piece => (
-                  <div key={piece.id} className="lib-card">
-                    <div
-                      className="lib-thumb"
-                      style={{
-                        backgroundColor: piece.color,
-                        backgroundImage: piece.image ? `url(${piece.image})` : undefined,
-                        backgroundSize: piece.transparent ? 'contain' : 'cover',
-                        backgroundRepeat: 'no-repeat',
-                        backgroundPosition: 'center',
-                      }}
-                    />
-                    <div className="lib-info">
-                      <span className="lib-name" title={piece.name}>{piece.name}</span>
-                      <span className="lib-dims">{piece.width}" × {piece.height}"</span>
-                    </div>
-                    <div className="lib-actions">
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => onAddFromLibrary(piece)}
-                        title="Place on current wall"
-                      >+ Add</button>
-                      <button
-                        className="icon-btn"
-                        onClick={() => {
-                          if (window.confirm(`Remove "${piece.name}" from library?`)) onDeleteFromLibrary(piece.id)
-                        }}
-                        title="Remove from library"
-                      >🗑️</button>
-                    </div>
-                  </div>
-                ))
-              }
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── LAYOUTS tab ─────────────────────────── */}
+      {/* ── LAYOUTS tab ────────────────────────────── */}
       {section === 'layouts' && (
         <div className="sidebar-section">
           <div className="sidebar-header">
             <span className="section-title">Saved Layouts</span>
           </div>
-          {wallName && (
-            <div className="layouts-wall-label">🏠 {wallName}</div>
-          )}
 
-          {/* Overwrite current layout */}
-          {currentLayout && (
-            <div className="layout-current-banner">
-              <span className="layout-current-name">✓ {currentLayout}</span>
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={() => onSaveLayout(currentLayout)}
-                title="Save current arrangement into this layout"
-              >
-                💾 Overwrite
-              </button>
-            </div>
-          )}
-
-          {/* Save as new */}
-          <div className="layout-save-as">
-            <span className="layout-save-as-label">Save as new…</span>
           <div className="layout-save">
             <input
               className="text-input"
@@ -214,7 +134,6 @@ export default function Sidebar({
             />
             <button className="btn btn-primary btn-sm" onClick={handleSave}>Save</button>
             {saveError && <span className="field-error">{saveError}</span>}
-          </div>
           </div>
 
           {Object.keys(layouts).length === 0 && (
@@ -310,7 +229,7 @@ export default function Sidebar({
 
       {/* Footer */}
       <div className="sidebar-footer">
-        Piece library: {Object.keys(library).length} saved
+        Wall: 128" × 95" &nbsp;|&nbsp; {(128/12).toFixed(1)}′ × {(95/12).toFixed(1)}′
       </div>
     </aside>
   )
