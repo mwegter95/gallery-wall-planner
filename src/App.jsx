@@ -579,6 +579,7 @@ export default function App() {
           wallName={calibWall?.name || 'Wall'}
           wallWidth={calibWall?.width || 128}
           wallHeight={calibWall?.height || 95}
+          existingImageUrl={calibWall?.imageUrl || null}
         />
       )}
 

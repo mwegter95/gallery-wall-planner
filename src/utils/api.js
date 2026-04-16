@@ -173,7 +173,9 @@ export async function uploadWallImage(wallId, dataUrl) {
     method: 'POST',
     body: JSON.stringify({ dataUrl }),
   })
-  return { ...data, url: data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url }
+  // Append cache-bust timestamp so browsers reload the image after recalibration
+  const url = data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url
+  return { ...data, url: `${url}?v=${Date.now()}` }
 }
 
 // ── Gallery: layouts ──────────────────────────────────────────────────────────

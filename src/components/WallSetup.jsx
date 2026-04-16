@@ -116,10 +116,10 @@ async function anyImageToJpeg(file) {
 }
 
 
-export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 128, wallHeight = 95 }) {
+export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 128, wallHeight = 95, existingImageUrl = null }) {
   const imgRef            = useRef(null)
   const fileInputRef      = useRef(null)
-  const [rawPhoto,        setRawPhoto]        = useState(null)   // data URL of uploaded photo
+  const [rawPhoto,        setRawPhoto]        = useState(existingImageUrl)   // data URL or existing URL
   const [loadingPhoto,    setLoadingPhoto]    = useState(false)
   const [photoError,      setPhotoError]      = useState('')
   const [imgSize,         setImgSize]         = useState({ w: 0, h: 0 })
