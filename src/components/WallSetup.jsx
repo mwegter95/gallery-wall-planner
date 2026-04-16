@@ -115,7 +115,7 @@ async function anyImageToJpeg(file) {
 }
 
 
-export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
+export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 128, wallHeight = 95 }) {
   const imgRef            = useRef(null)
   const fileInputRef      = useRef(null)
   const [rawPhoto,        setRawPhoto]        = useState(null)   // data URL of uploaded photo
@@ -208,9 +208,9 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
       const ih = img.naturalHeight
       const pixelCorners = corners.map(([nx, ny]) => [nx * iw, ny * ih])
 
-      // Output at 128:95 ratio, 1280px wide
+      // Output at wallWidth:wallHeight ratio, 1280px wide
       const outW = 1280
-      const outH = Math.round(outW * 95 / 128)
+      const outH = Math.round(outW * wallHeight / wallWidth)
 
       setStatusMsg('Warping perspective…')
 
@@ -246,12 +246,12 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
     {
       x: ((corners[0][0] + corners[1][0]) / 2) * imgSize.w,
       y: ((corners[0][1] + corners[1][1]) / 2) * imgSize.h - 14,
-      text: '← 128" →',
+      text: `← ${wallWidth}" →`,
     },
     {
       x: ((corners[1][0] + corners[2][0]) / 2) * imgSize.w + 14,
       y: ((corners[1][1] + corners[2][1]) / 2) * imgSize.h,
-      text: '95"',
+      text: `${wallHeight}"`,
     },
   ]
 
@@ -267,7 +267,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
             </div>
             <p className="ws-subtitle">
               Upload a photo of your wall taken straight-on. In the next step you’ll drag
-              the 4 corner handles to mark the exact boundary of the <strong>128″ × 95″</strong> wall area.
+              the 4 corner handles to mark the exact boundary of the <strong>{wallWidth}″ × {wallHeight}″</strong> wall area.
             </p>
           </div>
 
@@ -316,7 +316,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
             <h2>Calibrate — {wallName}</h2>
           </div>
           <p className="ws-subtitle">
-            Drag the four colored handles to the exact corners of your <strong>128″ × 95″</strong> wall.
+            Drag the four colored handles to the exact corners of your <strong>{wallWidth}″ × {wallHeight}″</strong> wall.
             The app will correct the perspective so pieces are placed to true scale.
           </p>
         </div>
@@ -400,7 +400,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall' }) {
               <div className="ws-preview-badge">✓ Corrected Wall Preview</div>
               <img src={previewUrl} className="ws-preview-img" alt="Corrected wall" />
               <div className="ws-preview-meta">
-                128" × 95" — perspective corrected &amp; ready to use
+                {wallWidth}" × {wallHeight}" — perspective corrected &amp; ready to use
               </div>
             </div>
           )}

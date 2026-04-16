@@ -10,6 +10,7 @@ export default function Wall({
   const [baseScale, setBaseScale] = useState(5)   // px per inch
   const [zoom, setZoom]           = useState(1.0)
   const [showRulers, setShowRulers] = useState(true)
+  const [showGrid,   setShowGrid]   = useState(false)
 
   /* Auto-compute base scale to fill the container */
   useEffect(() => {
@@ -63,6 +64,13 @@ export default function Wall({
         >
           📏 Rulers
         </button>
+        <button
+          className={`ctrl-btn ${showGrid ? 'active' : ''}`}
+          onClick={() => setShowGrid(g => !g)}
+          title="Toggle inch/foot measurement grid"
+        >
+          ⊞ Grid
+        </button>
         {snapToGrid && (
           <span className="snap-badge">⊞ Snap {gridSize}"</span>
         )}
@@ -109,7 +117,67 @@ export default function Wall({
                 }}
                 onClick={handleBgClick}
               >
-                {/* Grid overlay */}
+                {/* Measurement grid overlay (inches + feet) */}
+                {showGrid && (
+                  <svg
+                    className="grid-svg"
+                    width={wPx}
+                    height={hPx}
+                    style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2 }}
+                  >
+                    <defs>
+                      {/* Inch sub-pattern — only rendered when scale >= 3px/inch */}
+                      {scale >= 3 && (
+                        <pattern id="inch-pat" width={scale} height={scale} patternUnits="userSpaceOnUse">
+                          <path
+                            d={`M ${scale} 0 L 0 0 0 ${scale}`}
+                            fill="none"
+                            stroke="rgba(255,255,255,0.09)"
+                            strokeWidth="0.5"
+                          />
+                        </pattern>
+                      )}
+                      {/* Foot pattern (12") — draws over inch grid */}
+                      <pattern id="foot-pat" width={12 * scale} height={12 * scale} patternUnits="userSpaceOnUse">
+                        {scale >= 3 && <rect width={12 * scale} height={12 * scale} fill="url(#inch-pat)" />}
+                        <path
+                          d={`M ${12 * scale} 0 L 0 0 0 ${12 * scale}`}
+                          fill="none"
+                          stroke="rgba(255,255,255,0.28)"
+                          strokeWidth="1"
+                        />
+                      </pattern>
+                    </defs>
+                    <rect width="100%" height="100%" fill="url(#foot-pat)" />
+                    {/* Foot labels inside the wall */}
+                    {Array.from({ length: Math.floor(wallWidth / 12) + 1 }, (_, i) => i).map(fi => (
+                      fi > 0 && fi * 12 <= wallWidth && (
+                        <text
+                          key={`fx-${fi}`}
+                          x={fi * 12 * scale + 3}
+                          y={10}
+                          fill="rgba(255,255,255,0.35)"
+                          fontSize={9}
+                          fontFamily="ui-monospace,monospace"
+                        >{fi}′</text>
+                      )
+                    ))}
+                    {Array.from({ length: Math.floor(wallHeight / 12) + 1 }, (_, i) => i).map(fi => (
+                      fi > 0 && fi * 12 <= wallHeight && (
+                        <text
+                          key={`fy-${fi}`}
+                          x={4}
+                          y={fi * 12 * scale - 3}
+                          fill="rgba(255,255,255,0.35)"
+                          fontSize={9}
+                          fontFamily="ui-monospace,monospace"
+                        >{fi}′</text>
+                      )
+                    ))}
+                  </svg>
+                )}
+
+                {/* Snap grid overlay */}
                 {snapToGrid && (
                   <svg
                     className="grid-svg"

@@ -6,14 +6,16 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const DATA_FILE = path.join(__dirname, 'data', 'app.json');
-const WALLS_DIR = path.join(__dirname, 'uploads', 'walls');
-const PIECES_DIR = path.join(__dirname, 'uploads', 'pieces');
+const DATA_FILE   = path.join(__dirname, 'data', 'app.json');
+const WALLS_DIR   = path.join(__dirname, 'uploads', 'walls');
+const PIECES_DIR  = path.join(__dirname, 'uploads', 'pieces');
+const LIBRARY_DIR = path.join(__dirname, 'uploads', 'library');
 
 // Ensure directories exist on startup
 fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
-fs.mkdirSync(WALLS_DIR, { recursive: true });
-fs.mkdirSync(PIECES_DIR, { recursive: true });
+fs.mkdirSync(WALLS_DIR,   { recursive: true });
+fs.mkdirSync(PIECES_DIR,  { recursive: true });
+fs.mkdirSync(LIBRARY_DIR, { recursive: true });
 
 // ── data helpers ────────────────────────────────────────────────────────────
 function readData() {
@@ -46,7 +48,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ── GET /api/state ────────────────────────────────────────────────────────────
 app.get('/api/state', (req, res) => {
-  res.json(readData());
+  const data = readData();
+  res.json({ walls: data.walls || {}, layouts: data.layouts || {}, library: data.library || {} });
 });
 
 // ── PUT /api/walls/:id ────────────────────────────────────────────────────────
@@ -136,6 +139,49 @@ app.delete('/api/piece-images/:id', (req, res) => {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
   res.json({ ok: true });
+});
+
+// ── GET /api/library ─────────────────────────────────────────────────────────
+app.get('/api/library', (req, res) => {
+  const data = readData();
+  res.json(data.library || {});
+});
+
+// ── PUT /api/library/:id ──────────────────────────────────────────────────────
+app.put('/api/library/:id', (req, res) => {
+  const data = readData();
+  if (!data.library) data.library = {};
+  data.library[req.params.id] = req.body;
+  writeData(data);
+  res.json({ ok: true });
+});
+
+// ── DELETE /api/library/:id ───────────────────────────────────────────────────
+app.delete('/api/library/:id', (req, res) => {
+  const data = readData();
+  if (data.library) delete data.library[req.params.id];
+  writeData(data);
+  res.json({ ok: true });
+});
+
+// ── POST /api/library/:id/image ───────────────────────────────────────────────
+app.post('/api/library/:id/image', (req, res) => {
+  const { id } = req.params;
+  const { dataUrl } = req.body;
+  try {
+    const { buffer, ext } = dataUrlToBuffer(dataUrl);
+    const filename = `${id}.${ext}`;
+    const filePath = path.join(LIBRARY_DIR, filename);
+    for (const e of ['jpg', 'jpeg', 'png', 'webp']) {
+      const old = path.join(LIBRARY_DIR, `${id}.${e}`);
+      if (e !== ext && fs.existsSync(old)) fs.unlinkSync(old);
+    }
+    fs.writeFileSync(filePath, buffer);
+    res.json({ url: `/uploads/library/${filename}` });
+  } catch (err) {
+    console.error('library image upload error', err);
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ── PUT /api/layouts/:wallId/:name ────────────────────────────────────────────

@@ -75,3 +75,26 @@ export async function deleteLayout(wallId, name) {
     method: 'DELETE',
   });
 }
+
+/** Upload a library piece image. Returns { url } */
+export async function uploadLibraryImage(libId, dataUrl) {
+  return apiFetch(`/api/library/${libId}/image`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataUrl }),
+  });
+}
+
+/** Upsert a library piece entry */
+export async function putLibraryPiece(piece) {
+  return apiFetch(`/api/library/${piece.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(piece),
+  });
+}
+
+/** Remove a library piece entry */
+export async function deleteLibraryPiece(id) {
+  return apiFetch(`/api/library/${id}`, { method: 'DELETE' });
+}

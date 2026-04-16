@@ -120,7 +120,7 @@ export default function Piece({
 
   return (
     <div
-      className={`piece${isSelected ? ' piece--selected' : ''}`}
+      className={`piece${isSelected ? ' piece--selected' : ''}${piece.transparent ? ' piece--transparent' : ''}`}
       style={{
         position:  'absolute',
         left:      pxX,

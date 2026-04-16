@@ -39,15 +39,42 @@ export default function App() {
   const [saveAsName,     setSaveAsName]     = useState('')
   const [saveAsError,    setSaveAsError]    = useState('')
   const [isSaving,       setIsSaving]       = useState(false)
+  const [library,        setLibrary]        = useState({})
   const saveMenuRef = useRef(null)
 
   /* ── Boot: load all state from backend ──────────────── */
   useEffect(() => {
-    api.loadState().then(({ walls: savedWalls = {}, layouts: savedLayouts = {} }) => {
-      const wallsObj = savedWalls || {}
+    api.loadState().then(({ walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} }) => {
+      const wallsObj   = savedWalls   || {}
       const layoutsObj = savedLayouts || {}
       setWalls(wallsObj)
       setAllLayouts(layoutsObj)
+
+      // ── Auto-migrate existing pieces into library (runs once if library is empty) ──
+      let libObj = { ...savedLibrary }
+      if (Object.keys(libObj).length === 0) {
+        const seen = new Set()
+        for (const wallLayouts of Object.values(layoutsObj)) {
+          for (const layoutPieces of Object.values(wallLayouts)) {
+            for (const piece of layoutPieces) {
+              const key = piece.image || `${piece.name}_${piece.width}_${piece.height}`
+              if (seen.has(key)) continue
+              seen.add(key)
+              const libId = genId()
+              const libPiece = {
+                id: libId, name: piece.name,
+                width: piece.width, height: piece.height,
+                color: piece.color, image: piece.image || null,
+                transparent: piece.transparent || false,
+                addedAt: Date.now(),
+              }
+              libObj[libId] = libPiece
+              api.putLibraryPiece(libPiece).catch(console.error)
+            }
+          }
+        }
+      }
+      setLibrary(libObj)
 
       const savedActive = localStorage.getItem(ACTIVE_WALL_KEY)
       const ids = Object.keys(wallsObj)
@@ -218,6 +245,48 @@ export default function App() {
     })
   }, [])
 
+  /* ── Library operations ───────────────────────────── */
+  const saveToLibrary = useCallback(async (pieceData) => {
+    const libId = genId()
+    let imageUrl = pieceData.image || null
+    if (imageUrl?.startsWith('data:')) {
+      try {
+        const { url } = await api.uploadLibraryImage(libId, imageUrl)
+        imageUrl = url
+      } catch (err) {
+        console.error('Library image upload failed:', err)
+      }
+    }
+    const libPiece = {
+      id: libId,
+      name: pieceData.name,
+      width: pieceData.width,
+      height: pieceData.height,
+      color: pieceData.color,
+      image: imageUrl,
+      transparent: pieceData.transparent || false,
+      addedAt: Date.now(),
+    }
+    setLibrary(prev => ({ ...prev, [libId]: libPiece }))
+    api.putLibraryPiece(libPiece).catch(console.error)
+  }, [])
+
+  const deleteFromLibrary = useCallback((libId) => {
+    setLibrary(prev => { const n = { ...prev }; delete n[libId]; return n })
+    api.deleteLibraryPiece(libId).catch(console.error)
+  }, [])
+
+  const addPieceFromLibrary = useCallback((libPiece) => {
+    addPiece({
+      name: libPiece.name,
+      width: libPiece.width,
+      height: libPiece.height,
+      color: libPiece.color,
+      image: libPiece.image,
+      transparent: libPiece.transparent || false,
+    })
+  }, [addPiece])
+
   /* ── Snap helper ──────────────────────────────────── */
   const snap = useCallback((v) =>
     snapToGrid ? Math.round(v / gridSize) * gridSize : v,
@@ -318,9 +387,10 @@ export default function App() {
       updatePiece(editingPiece.id, data)
     } else {
       addPiece(data)
+      saveToLibrary(data)
     }
     closeModal()
-  }, [editingPiece, updatePiece, addPiece, closeModal])
+  }, [editingPiece, updatePiece, addPiece, saveToLibrary, closeModal])
 
   /* ── Keyboard: delete selected ────────────────────── */
   const handleKeyDown = useCallback((e) => {
@@ -439,6 +509,9 @@ export default function App() {
           onDeleteLayout={deleteLayout}
           onAddPiece={() => setShowAddModal(true)}
           onClearAll={() => { setPieces([]); setSelectedId(null) }}
+          library={library}
+          onAddFromLibrary={addPieceFromLibrary}
+          onDeleteFromLibrary={deleteFromLibrary}
         />
 
         <Wall
@@ -462,6 +535,8 @@ export default function App() {
           onApply={handleWallCalibrated}
           onClose={() => { setShowSetup(false); setSetupWallId(null) }}
           wallName={calibWall?.name || 'Wall'}
+          wallWidth={calibWall?.width || 128}
+          wallHeight={calibWall?.height || 95}
         />
       )}
 
