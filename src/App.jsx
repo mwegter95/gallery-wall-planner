@@ -37,7 +37,13 @@ export default function App() {
   const [setupWallId,    setSetupWallId]    = useState(null)
   const [showWallMgr,    setShowWallMgr]    = useState(false)
   const [authUser,       setAuthUser]       = useState(null)
-  const [showAuth,       setShowAuth]       = useState(false)
+  const [showAuth,       setShowAuth]       = useState(() => {
+    // Auto-open auth modal when arriving via password-reset link
+    return Boolean(new URLSearchParams(window.location.search).get('reset_token'))
+  })
+  const [resetToken,     setResetToken]     = useState(() =>
+    new URLSearchParams(window.location.search).get('reset_token') || null
+  )
   const [saveMenuOpen,   setSaveMenuOpen]   = useState(false)
   const [saveAsName,     setSaveAsName]     = useState('')
   const [saveAsError,    setSaveAsError]    = useState('')
@@ -47,9 +53,12 @@ export default function App() {
 
   /* ── Boot: load all state from backend ──────────────── */
   useEffect(() => {
-    // Check auth first, then load state
-    api.authMe().then(data => setAuthUser(data.user)).catch(() => {})
-    api.loadState().then(({ walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} }) => {
+    // Resolve auth first so loadState sends the right owner token
+    api.authMe()
+      .then(data => setAuthUser(data.user))
+      .catch(() => {})
+      .finally(() => {
+        api.loadState().then(({ walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} }) => {
       const wallsObj   = savedWalls   || {}
       const layoutsObj = savedLayouts || {}
       setWalls(wallsObj)
@@ -101,6 +110,7 @@ export default function App() {
       setWalls({ [id]: wall })
       setActiveWallId(id)
     }).finally(() => setIsLoading(false))
+      }) // end .finally authMe
   }, [])
 
   /* ── Close save menu on outside click ────────────────── */
@@ -201,7 +211,11 @@ export default function App() {
   const handleAuthSuccess = useCallback((user) => {
     setAuthUser(user)
     setShowAuth(false)
-    // Reload to pick up server-side merged state
+    setResetToken(null)
+    // Strip any reset_token query param, then reload to pick up merged state
+    const url = new URL(window.location.href)
+    url.searchParams.delete('reset_token')
+    window.history.replaceState({}, '', url.toString())
     window.location.reload()
   }, [])
 
@@ -589,7 +603,8 @@ export default function App() {
       {showAuth && (
         <AuthModal
           onSuccess={handleAuthSuccess}
-          onClose={() => setShowAuth(false)}
+          onClose={() => { setShowAuth(false); setResetToken(null) }}
+          resetToken={resetToken}
         />
       )}
     </div>

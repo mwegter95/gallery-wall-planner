@@ -81,6 +81,22 @@ export async function authMe() {
   return apiFetch('/auth/me')
 }
 
+export async function authForgotPassword(email) {
+  return apiFetch('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export async function authResetPassword(token, password) {
+  const data = await apiFetch('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, password }),
+  })
+  setJwt(data.token)
+  return data.user
+}
+
 // ── URL helpers ───────────────────────────────────────────────────────────────
 // Relative /uploads/... paths need BASE prefix in production.
 export function fixUrl(url) {
