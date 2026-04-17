@@ -167,7 +167,7 @@ export default function Sidebar({
                     <div className="lib-actions">
                       <button
                         className="btn btn-primary btn-sm"
-                        onClick={() => onAddFromLibrary(piece)}
+                        onClick={() => { onAddFromLibrary(piece); onRequestClose?.() }}
                         title="Place on current wall"
                       >+ Add</button>
                       <button
