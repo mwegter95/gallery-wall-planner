@@ -268,60 +268,47 @@ export default function App() {
     url.searchParams.delete('reset_token')
     window.history.replaceState({}, '', url.toString())
 
-    // Read local snapshot BEFORE calling loadAppState so we know what to push.
+    // Read local snapshot BEFORE loading from backend
     const localSnap = (() => {
       try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
     })()
 
-    // ── Step 1: If we have local-only data, push it all to backend first,
-    //            awaited, so the subsequent loadAppState sees the full picture. ────
+    // ── Step 1: Unconditionally upsert ALL local snapshot data to the backend.
+    //    The server uses ON CONFLICT DO UPDATE so duplicate pushes are safe.
+    //    We await all writes so the subsequent loadAppState sees the full picture. ──
     if (localSnap) {
-      // Fetch what the backend currently has for this user (may be empty for new accounts)
-      let backendData = null
-      try {
-        backendData = await api.loadState()
-      } catch { /* backend unreachable — skip sync */ }
+      const pushOps = []
 
-      if (backendData) {
-        const backendWallIds   = new Set(Object.keys(backendData.walls   || {}))
-        const backendLayoutMap = backendData.layouts  || {}
-        const backendLibIds    = new Set(Object.keys(backendData.library || {}))
-        const pushOps = []
+      for (const wall of Object.values(localSnap.walls || {})) {
+        // Don't push walls that carry a data-URL imageUrl — strip it first
+        // (the image upload path handles that separately; walls with data-URL
+        //  imageUrls are oversized and the upload would have failed anyway).
+        const wallToSync = { ...wall }
+        if (wallToSync.imageUrl?.startsWith('data:')) delete wallToSync.imageUrl
+        pushOps.push(api.putWall(wallToSync))
+      }
+      for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
+        for (const [name, pcs] of Object.entries(wLayouts || {})) {
+          pushOps.push(api.putLayout(wallId, name, pcs))
+        }
+      }
+      for (const piece of Object.values(localSnap.library || {})) {
+        pushOps.push(api.putLibraryPiece(piece))
+      }
 
-        // Walls missing from backend
-        for (const [id, wall] of Object.entries(localSnap.walls || {})) {
-          if (!backendWallIds.has(id)) {
-            pushOps.push(api.putWall(wall))
-          }
-        }
-        // Layouts missing from backend
-        for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
-          for (const [name, pcs] of Object.entries(wLayouts || {})) {
-            if (!backendLayoutMap[wallId]?.[name]) {
-              pushOps.push(api.putLayout(wallId, name, pcs))
-            }
-          }
-        }
-        // Library pieces missing from backend
-        for (const [id, piece] of Object.entries(localSnap.library || {})) {
-          if (!backendLibIds.has(id)) {
-            pushOps.push(api.putLibraryPiece(piece))
-          }
-        }
-
-        // Wait for all writes to land before reloading state
-        if (pushOps.length > 0) {
-          await Promise.allSettled(pushOps)
-        }
+      if (pushOps.length > 0) {
+        const results = await Promise.allSettled(pushOps)
+        const failures = results.filter(r => r.status === 'rejected')
+        if (failures.length) console.warn('Some sync writes failed:', failures)
       }
     }
 
-    // ── Step 2: Reload full state from backend (now includes synced data) ────────
+    // ── Step 2: Reload full state from backend (now includes all synced data) ──
     await loadAppState()
 
-    // ── Step 3: Restore unsaved canvas pieces from the snapshot.
-    //    loadAppState only restores pieces in the offline-fallback path; here we
-    //    need to bring them back manually so work-in-progress isn't lost. ─────────
+    // ── Step 3: Restore unsaved canvas pieces (pieces placed but not yet in a
+    //    named layout). loadAppState doesn't touch pieces state, but we want the
+    //    user's in-progress work to still be on the canvas after login. ──────────
     if (localSnap?.activePieces?.length > 0) {
       setPieces(localSnap.activePieces)
       setCurrentLayout(localSnap.currentLayout || '')
