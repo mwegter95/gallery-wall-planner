@@ -268,48 +268,63 @@ export default function App() {
     url.searchParams.delete('reset_token')
     window.history.replaceState({}, '', url.toString())
 
-    // Snapshot any local-only work the user did while the backend was unreachable
+    // Read local snapshot BEFORE calling loadAppState so we know what to push.
     const localSnap = (() => {
       try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
     })()
 
-    // Re-fetch state now that JWT is set (picks up user's existing backend data)
-    const backendData = await loadAppState()
+    // ── Step 1: If we have local-only data, push it all to backend first,
+    //            awaited, so the subsequent loadAppState sees the full picture. ────
+    if (localSnap) {
+      // Fetch what the backend currently has for this user (may be empty for new accounts)
+      let backendData = null
+      try {
+        backendData = await api.loadState()
+      } catch { /* backend unreachable — skip sync */ }
 
-    // ── Sync offline work into the newly logged-in account ─────────────────
-    if (localSnap && backendData) {
-      const backendWallIds   = new Set(Object.keys(backendData.walls   || {}))
-      const backendLayoutMap = backendData.layouts  || {}
-      const backendLibIds    = new Set(Object.keys(backendData.library || {}))
-      let synced = false
+      if (backendData) {
+        const backendWallIds   = new Set(Object.keys(backendData.walls   || {}))
+        const backendLayoutMap = backendData.layouts  || {}
+        const backendLibIds    = new Set(Object.keys(backendData.library || {}))
+        const pushOps = []
 
-      // Walls that exist locally but not on the backend
-      for (const [id, wall] of Object.entries(localSnap.walls || {})) {
-        if (!backendWallIds.has(id)) {
-          api.putWall(wall).catch(console.error)
-          synced = true
-        }
-      }
-      // Layouts that exist locally but not on the backend
-      for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
-        for (const [name, pcs] of Object.entries(wLayouts || {})) {
-          if (!(backendLayoutMap[wallId]?.[name])) {
-            api.putLayout(wallId, name, pcs).catch(console.error)
-            synced = true
+        // Walls missing from backend
+        for (const [id, wall] of Object.entries(localSnap.walls || {})) {
+          if (!backendWallIds.has(id)) {
+            pushOps.push(api.putWall(wall))
           }
         }
-      }
-      // Library pieces that exist locally but not on the backend
-      for (const [id, piece] of Object.entries(localSnap.library || {})) {
-        if (!backendLibIds.has(id)) {
-          api.putLibraryPiece(piece).catch(console.error)
-          synced = true
+        // Layouts missing from backend
+        for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
+          for (const [name, pcs] of Object.entries(wLayouts || {})) {
+            if (!backendLayoutMap[wallId]?.[name]) {
+              pushOps.push(api.putLayout(wallId, name, pcs))
+            }
+          }
+        }
+        // Library pieces missing from backend
+        for (const [id, piece] of Object.entries(localSnap.library || {})) {
+          if (!backendLibIds.has(id)) {
+            pushOps.push(api.putLibraryPiece(piece))
+          }
+        }
+
+        // Wait for all writes to land before reloading state
+        if (pushOps.length > 0) {
+          await Promise.allSettled(pushOps)
         }
       }
-      // If anything was merged, reload after a brief delay so the backend has written
-      if (synced) {
-        setTimeout(() => loadAppState(), 800)
-      }
+    }
+
+    // ── Step 2: Reload full state from backend (now includes synced data) ────────
+    await loadAppState()
+
+    // ── Step 3: Restore unsaved canvas pieces from the snapshot.
+    //    loadAppState only restores pieces in the offline-fallback path; here we
+    //    need to bring them back manually so work-in-progress isn't lost. ─────────
+    if (localSnap?.activePieces?.length > 0) {
+      setPieces(localSnap.activePieces)
+      setCurrentLayout(localSnap.currentLayout || '')
     }
   }, [loadAppState])
 
