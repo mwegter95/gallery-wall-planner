@@ -103,7 +103,6 @@ export default function App() {
         setActiveWallId(activeId)
       }
 
-      hasLoadedRef.current = true
       // Return raw fetched data so callers (e.g. handleAuthSuccess) can compare
       return { walls: wallsObj, layouts: layoutsObj, library: libObj }
     } catch (err) {
@@ -133,7 +132,7 @@ export default function App() {
         } else {
           setActiveWallId(activeId)
         }
-        hasLoadedRef.current = true
+        // hasLoadedRef set in finally
       } else {
         setWalls({})
         setActiveWallId(null)
@@ -141,6 +140,9 @@ export default function App() {
       }
       return null  // null signals the backend was unreachable
     } finally {
+      // Always mark as loaded — MUST be unconditional so the auto-save
+      // snapshot effect can fire even on first offline session (no prior snap).
+      hasLoadedRef.current = true
       setIsLoading(false)
     }
   }, [])

@@ -119,6 +119,7 @@ async function anyImageToJpeg(file) {
 export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 128, wallHeight = 95, existingImageUrl = null }) {
   const imgRef            = useRef(null)
   const fileInputRef      = useRef(null)
+  const photoWrapRef      = useRef(null)
   const [rawPhoto,        setRawPhoto]        = useState(existingImageUrl)   // data URL or existing URL
   const [loadingPhoto,    setLoadingPhoto]    = useState(false)
   const [photoError,      setPhotoError]      = useState('')
@@ -130,6 +131,22 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
   const [errorMsg,        setErrorMsg]        = useState('')
   const [previewUrl,      setPreviewUrl]      = useState(null)
   const [showPreview,     setShowPreview]     = useState(false)
+
+  /* ── Block context-menu and prevent scroll-start in the image/handle zone ── */
+  useEffect(() => {
+    const el = photoWrapRef.current
+    if (!el) return
+    const prevent = (e) => e.preventDefault()
+    // contextmenu fires on long-press; blocking it stops iOS "Save Image" sheet
+    el.addEventListener('contextmenu', prevent, false)
+    // touchstart with passive:false lets us call preventDefault before browser
+    // decides to start a scroll gesture
+    el.addEventListener('touchstart', prevent, { passive: false })
+    return () => {
+      el.removeEventListener('contextmenu', prevent)
+      el.removeEventListener('touchstart', prevent)
+    }
+  }, [])
 
   /* ── File upload handler ─────────────────────────── */
   const handleFileChange = useCallback(async (e) => {
@@ -350,7 +367,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
         <div className="ws-body">
           {!showPreview ? (
             /* ── Corner picker ── */
-            <div className="ws-photo-wrap">
+              <div className="ws-photo-wrap" ref={photoWrapRef}>
               <img
                 ref={imgRef}
                 src={rawPhoto}

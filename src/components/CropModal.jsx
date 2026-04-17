@@ -68,11 +68,25 @@ function computeFloodMask(imageData, tolerance) {
 const DEFAULT_CORNERS = [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]]
 
 function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
-  const imgRef    = useRef(null)
+  const imgRef     = useRef(null)
+  const cropWrapRef = useRef(null)
   const [size,    setSize]    = useState({ w: 0, h: 0 })
   const [corners, setCorners] = useState(DEFAULT_CORNERS)
   const cornersRef = useRef(corners)
   useEffect(() => { cornersRef.current = corners }, [corners])
+
+  /* ── Block context-menu and prevent scroll-start over image/handle zone ── */
+  useEffect(() => {
+    const el = cropWrapRef.current
+    if (!el) return
+    const prevent = (e) => e.preventDefault()
+    el.addEventListener('contextmenu', prevent, false)
+    el.addEventListener('touchstart', prevent, { passive: false })
+    return () => {
+      el.removeEventListener('contextmenu', prevent)
+      el.removeEventListener('touchstart', prevent)
+    }
+  }, [])
 
   const [warping,    setWarping]    = useState(false)
   const [warpPct,    setWarpPct]    = useState(0)
@@ -170,7 +184,7 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
   return (
     <div className="cm-body">
       <div className="cm-image-area">
-        <div className="crop-wrap" style={{ cursor: 'default' }}>
+        <div className="crop-wrap" style={{ cursor: 'default' }} ref={cropWrapRef}>
           <img
             ref={imgRef}
             src={displayUrl}
@@ -291,9 +305,10 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
 
   /* ── Canvas refs ───────────────────────────────────────── */
   const canvasRef = useRef(null)
-  const wrapRef   = useRef(null)
+  const wrapRef    = useRef(null)
+  const warpWrapRef = useRef(null)
 
-  /* ── Warp-phase state ──────────────────────────────────── */
+  /* ── Warp-phase state ────────────────────────── */
   const [warpCutoutUrl, setWarpCutoutUrl] = useState(null)
   const [warpCorners,   setWarpCorners]   = useState(DEFAULT_CORNERS)
   const warpCornersRef  = useRef(DEFAULT_CORNERS)
@@ -302,6 +317,20 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
   const [warpSize,      setWarpSize]      = useState({ w: 0, h: 0 })
   const [warpWarping,   setWarpWarping]   = useState(false)
   const [warpPct,       setWarpPct]       = useState(0)
+
+  /* ── Block context-menu + scroll on warp-phase handle area ── */
+  useEffect(() => {
+    if (phase !== 'warp') return
+    const el = warpWrapRef.current
+    if (!el) return
+    const prevent = (e) => e.preventDefault()
+    el.addEventListener('contextmenu', prevent, false)
+    el.addEventListener('touchstart', prevent, { passive: false })
+    return () => {
+      el.removeEventListener('contextmenu', prevent)
+      el.removeEventListener('touchstart', prevent)
+    }
+  }, [phase])
 
   /* ── fitCanvas: scale canvas to fill wrap ──────────────── */
   const fitCanvas = useCallback(() => {
@@ -819,7 +848,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
       {phase === 'warp' && (
         <div className="cm-body">
           <div className="cm-image-area">
-            <div className="crop-wrap">
+            <div className="crop-wrap" ref={warpWrapRef}>
               <img
                 ref={warpImgRef}
                 src={warpCutoutUrl}

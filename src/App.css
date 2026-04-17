@@ -1138,6 +1138,11 @@ kbd {
   border-radius: 8px;
   overflow: visible;
   max-width: 100%;
+  /* Prevent scroll and long-press callout from starting anywhere in the image/handle zone */
+  touch-action: none;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .ws-photo {
@@ -1146,7 +1151,10 @@ kbd {
   display: block;
   border-radius: 8px;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+  pointer-events: none;   /* image itself is not interactive; handles sit on top */
   border: 1px solid var(--border);
 }
 
@@ -1171,6 +1179,9 @@ kbd {
   z-index: 10;
   transition: transform 0.12s;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
 }
 
 .ws-handle:hover {
@@ -1393,6 +1404,11 @@ kbd {
   position: relative;
   display: inline-flex;
   line-height: 0;
+  /* Prevent scroll and long-press callout from starting in the image/handle zone */
+  touch-action: none;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .crop-img {
@@ -1401,7 +1417,10 @@ kbd {
   display: block;
   border-radius: 4px;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+  pointer-events: none;   /* image itself is not interactive; handles sit on top */
 }
 
 /* Dark dimming outside the crop area */
