@@ -93,20 +93,19 @@ export default function App() {
       const ids = Object.keys(wallsObj)
       let activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
       if (!activeId) {
-        const id = genId()
-        const wall = { id, name: 'My Wall', width: 128, height: 95, createdAt: Date.now() }
-        setWalls({ [id]: wall })
-        api.putWall(wall).catch(console.error)
-        activeId = id
-        localStorage.setItem(ACTIVE_WALL_KEY, id)
+        // No walls yet — prompt the user to create their first wall with real dimensions
+        setWalls({})
+        setActiveWallId(null)
+        setShowWallMgr(true)
+      } else {
+        setActiveWallId(activeId)
       }
-      setActiveWallId(activeId)
     } catch (err) {
       console.error('Failed to load state from backend:', err)
-      const id = genId()
-      const wall = { id, name: 'My Wall', width: 128, height: 95, createdAt: Date.now() }
-      setWalls({ [id]: wall })
-      setActiveWallId(id)
+      // On error, show Wall Manager so user can set up their wall
+      setWalls({})
+      setActiveWallId(null)
+      setShowWallMgr(true)
     } finally {
       setIsLoading(false)
     }
