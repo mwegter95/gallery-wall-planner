@@ -211,6 +211,7 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
                   data-label={['TL', 'TR', 'BR', 'BL'][idx]}
                   onMouseDown={(e) => handleDrag(e, idx)}
                   onTouchStart={(e) => handleTouchDrag(e, idx)}
+                  onContextMenu={(e) => e.preventDefault()}
                 />
               ))}
             </>
@@ -849,6 +850,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
                       data-label={['TL','TR','BR','BL'][idx]}
                       onMouseDown={e => handleWarpDrag(e, idx)}
                       onTouchStart={e => handleWarpTouchDrag(e, idx)}
+                      onContextMenu={e => e.preventDefault()}
                     />
                   ))}
                 </>

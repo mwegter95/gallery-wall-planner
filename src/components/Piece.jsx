@@ -156,6 +156,7 @@ export default function Piece({
 
       onMouseDown={handlePieceMouseDown}
       onTouchStart={handlePieceTouchStart}
+      onContextMenu={(e) => e.preventDefault()}
       style={{
         position:  'absolute',
         left:      pxX,

@@ -408,6 +408,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   }}
                   onMouseDown={(e) => handleMouseDown(e, idx)}
                   onTouchStart={(e) => handleTouchStart(e, idx)}
+                  onContextMenu={(e) => e.preventDefault()}
                 />
               ))}
 

@@ -113,14 +113,19 @@ export default function App() {
       const snap = (() => {
         try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
       })()
-      if (snap && Object.keys(snap.walls || {}).length > 0) {
+      if (snap && (Object.keys(snap.walls || {}).length > 0 || (snap.activePieces || []).length > 0)) {
         const wallsObj   = snap.walls      || {}
         const layoutsObj = snap.allLayouts || {}
         const libObj     = snap.library    || {}
         setWalls(wallsObj)
         setAllLayouts(layoutsObj)
         setLibrary(libObj)
-        const savedActive = localStorage.getItem(ACTIVE_WALL_KEY)
+        // Restore unsaved canvas pieces so work survives refresh while offline
+        if (snap.activePieces?.length > 0) {
+          setPieces(snap.activePieces)
+          setCurrentLayout(snap.currentLayout || '')
+        }
+        const savedActive = snap.activeWallId || localStorage.getItem(ACTIVE_WALL_KEY)
         const ids = Object.keys(wallsObj)
         const activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
         if (!activeId) {
@@ -145,13 +150,18 @@ export default function App() {
 
   /* ── Auto-save snapshot to localStorage on every state change ─────────── */
   // This powers: (a) offline fallback on next load, (b) merge-to-backend on login
+  // We also save `pieces` + `activeWallId` + `currentLayout` so unsaved canvas work
+  // (pieces placed but not yet in a named layout) survives a refresh while offline.
   useEffect(() => {
     if (!hasLoadedRef.current) return   // skip during initial load
-    if (Object.keys(walls).length === 0) return  // nothing worth saving yet
+    if (Object.keys(walls).length === 0 && pieces.length === 0) return // nothing worth saving
     try {
-      localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ walls, allLayouts, library }))
+      localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({
+        walls, allLayouts, library,
+        activePieces: pieces, activeWallId, currentLayout,
+      }))
     } catch { /* storage full - ignore */ }
-  }, [walls, allLayouts, library])
+  }, [walls, allLayouts, library, pieces, activeWallId, currentLayout])
 
   /* ── Close save menu on outside click ────────────────── */
   useEffect(() => {
@@ -445,7 +455,7 @@ export default function App() {
         })
       )
       setPieces(uploadedPieces)
-      await api.putLayout(activeWallId, name, uploadedPieces)
+      // ── Optimistic local update FIRST so snapshot captures the layout even if backend is down ──
       setAllLayouts(prev => {
         const wallPrev = prev[activeWallId] || {}
         return { ...prev, [activeWallId]: { ...wallPrev, [name]: uploadedPieces } }
@@ -453,6 +463,10 @@ export default function App() {
       setCurrentLayout(name)
       setSaveMenuOpen(false)
       setSaveAsName('')
+      // Then attempt to persist to backend (fire-and-forget when offline)
+      api.putLayout(activeWallId, name, uploadedPieces).catch(err => {
+        console.warn('Save layout to backend failed (will sync on next login):', err)
+      })
     } catch (err) {
       console.error('Save layout failed:', err)
     } finally {
