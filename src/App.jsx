@@ -242,8 +242,22 @@ export default function App() {
   }, [])
 
   /* ── Wall calibration ─────────────────────────────── */
-  const handleWallCalibrated = useCallback(async (dataUrl) => {
+  const handleWallCalibrated = useCallback(async (dataUrl, _corners, dims) => {
     const id = setupWallId || activeWallId
+    if (!id) { setShowSetup(false); setSetupWallId(null); return }
+    // If the user edited the wall dimensions inside WallSetup, save them now
+    if (dims && (dims.width || dims.height)) {
+      setWalls(prev => {
+        const existing = prev[id] || {}
+        const updated = {
+          ...existing,
+          ...(dims.width  ? { width:  dims.width  } : {}),
+          ...(dims.height ? { height: dims.height } : {}),
+        }
+        api.putWall(updated).catch(console.error)
+        return { ...prev, [id]: updated }
+      })
+    }
     try {
       const { url } = await api.uploadWallImage(id, dataUrl)
       setWalls(prev => {
@@ -677,7 +691,7 @@ export default function App() {
           wallWidth={activeWall?.width || 128}
           wallHeight={activeWall?.height || 95}
           wallImage={activeWallImage}
-          onCalibrate={() => openSetup()}
+          onCalibrate={() => activeWallId ? openSetup() : setShowWallMgr(true)}
         />
       </div>
 

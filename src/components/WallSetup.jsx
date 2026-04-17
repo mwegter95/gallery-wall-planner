@@ -128,6 +128,8 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
   const [progress,        setProgress]        = useState(0)
   const [isProcessing,    setIsProcessing]    = useState(false)
   const [statusMsg,       setStatusMsg]       = useState('')
+  const [editWidth,       setEditWidth]       = useState(wallWidth)
+  const [editHeight,      setEditHeight]      = useState(wallHeight)
   const [errorMsg,        setErrorMsg]        = useState('')
   const [previewUrl,      setPreviewUrl]      = useState(null)
   const [showPreview,     setShowPreview]     = useState(false)
@@ -448,7 +450,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
               <div className="ws-preview-badge">✓ Corrected Wall Preview</div>
               <img src={previewUrl} className="ws-preview-img" alt="Corrected wall" />
               <div className="ws-preview-meta">
-                {wallWidth}" × {wallHeight}" — perspective corrected &amp; ready to use
+                {editWidth}" × {editHeight}" — perspective corrected &amp; ready to use
               </div>
             </div>
           )}
@@ -465,6 +467,29 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
             ))}
           </div>
 
+          {/* Editable wall dimensions */}
+          <div className="ws-dims-row">
+            <label className="ws-dims-label">Wall size (inches):</label>
+            <div className="ws-dims-inputs">
+              <input
+                className="ws-dim-input"
+                type="number" min="1" max="600" step="1"
+                value={editWidth}
+                onChange={e => setEditWidth(Math.max(1, parseInt(e.target.value, 10) || editWidth))}
+                aria-label="Width in inches"
+              />
+              <span className="ws-dims-sep">×</span>
+              <input
+                className="ws-dim-input"
+                type="number" min="1" max="600" step="1"
+                value={editHeight}
+                onChange={e => setEditHeight(Math.max(1, parseInt(e.target.value, 10) || editHeight))}
+                aria-label="Height in inches"
+              />
+              <span className="ws-dims-unit">in</span>
+            </div>
+          </div>
+
           <div className="ws-actions">
             {showPreview ? (
               <>
@@ -473,7 +498,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                 </button>
                 <button
                   className="btn btn-primary"
-                  onClick={() => onApply(previewUrl, corners)}
+                  onClick={() => onApply(previewUrl, corners, { width: editWidth, height: editHeight })}
                 >
                   ✓ Use This Wall
                 </button>

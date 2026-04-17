@@ -1322,6 +1322,54 @@ kbd {
   gap: 8px;
 }
 
+/* Wall dimensions edit row in WallSetup footer */
+.ws-dims-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.ws-dims-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ws-dims-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ws-dim-input {
+  width: 64px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 14px;
+  font-family: ui-monospace, monospace;
+  text-align: center;
+}
+
+.ws-dim-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ws-dims-sep {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.ws-dims-unit {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ══════════════════════════════════════════════════
    CROP MODAL
    ══════════════════════════════════════════════════ */
