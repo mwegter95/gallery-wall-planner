@@ -126,8 +126,8 @@ export default function Wall({
                     style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2 }}
                   >
                     <defs>
-                      {/* Inch sub-pattern — only rendered when scale >= 3px/inch */}
-                      {scale >= 3 && (
+                      {/* Inch sub-pattern — rendered when scale >= 1px/inch (visible on mobile) */}
+                      {scale >= 1 && (
                         <pattern id="inch-pat" width={scale} height={scale} patternUnits="userSpaceOnUse">
                           <path
                             d={`M ${scale} 0 L 0 0 0 ${scale}`}
@@ -139,7 +139,7 @@ export default function Wall({
                       )}
                       {/* Foot pattern (12") — draws over inch grid */}
                       <pattern id="foot-pat" width={12 * scale} height={12 * scale} patternUnits="userSpaceOnUse">
-                        {scale >= 3 && <rect width={12 * scale} height={12 * scale} fill="url(#inch-pat)" />}
+                        {scale >= 1 && <rect width={12 * scale} height={12 * scale} fill="url(#inch-pat)" />}
                         <path
                           d={`M ${12 * scale} 0 L 0 0 0 ${12 * scale}`}
                           fill="none"

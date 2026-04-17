@@ -71,7 +71,7 @@ export default function Piece({
   const handlePieceTouchStart = useCallback((e) => {
     if (e.touches.length !== 1) return
     e.stopPropagation()
-    // Don't preventDefault here — let the browser's scroll-blocking be handled by the touchmove listener
+    e.preventDefault()  // stop scroll gesture from starting when grabbing a piece
     const touch = e.touches[0]
     onSelect()
     const wallEl = e.currentTarget.parentElement
@@ -153,6 +153,9 @@ export default function Piece({
   return (
     <div
       className={`piece${isSelected ? ' piece--selected' : ''}${piece.transparent ? ' piece--transparent' : ''}`}
+
+      onMouseDown={handlePieceMouseDown}
+      onTouchStart={handlePieceTouchStart}
       style={{
         position:  'absolute',
         left:      pxX,
@@ -167,9 +170,8 @@ export default function Piece({
         cursor: 'grab',
         zIndex: isSelected ? 50 : 1,
         userSelect: 'none',
+        touchAction: 'none',
       }}
-      onMouseDown={handlePieceMouseDown}
-      onTouchStart={handlePieceTouchStart}
     >
       {/* Overlay tint so image is legible */}
       {piece.image && !piece.transparent && <div className="piece-img-tint" />}

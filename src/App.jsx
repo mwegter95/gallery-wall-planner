@@ -9,7 +9,8 @@ import * as api from './utils/api'
 import './App.css'
 
 /* ── Only tiny UI preference stays in localStorage ─────── */
-const ACTIVE_WALL_KEY = 'gwp-active-wall'
+const ACTIVE_WALL_KEY    = 'gwp-active-wall'
+const LOCAL_SNAPSHOT_KEY = 'gwp-local-snapshot'
 
 const genId = () => Math.random().toString(36).slice(2, 10)
 
@@ -50,14 +51,16 @@ export default function App() {
   const [isSaving,       setIsSaving]       = useState(false)
   const [library,        setLibrary]        = useState({})
   const [sidebarOpen,    setSidebarOpen]    = useState(false)
-  const saveMenuRef = useRef(null)
+  const saveMenuRef  = useRef(null)
+  const hasLoadedRef = useRef(false)   // becomes true after first successful backend load
 
   /* ── Load all state from backend (called on boot and after auth change) ─── */
   const loadAppState = useCallback(async () => {
     setIsLoading(true)
     try {
+      const fetchedData = await api.loadState()
       const { walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} } =
-        await api.loadState()
+        fetchedData
       const wallsObj   = savedWalls   || {}
       const layoutsObj = savedLayouts || {}
       setWalls(wallsObj)
@@ -93,19 +96,45 @@ export default function App() {
       const ids = Object.keys(wallsObj)
       let activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
       if (!activeId) {
-        // No walls yet — prompt the user to create their first wall with real dimensions
         setWalls({})
         setActiveWallId(null)
         setShowWallMgr(true)
       } else {
         setActiveWallId(activeId)
       }
+
+      hasLoadedRef.current = true
+      // Return raw fetched data so callers (e.g. handleAuthSuccess) can compare
+      return { walls: wallsObj, layouts: layoutsObj, library: libObj }
     } catch (err) {
       console.error('Failed to load state from backend:', err)
-      // On error, show Wall Manager so user can set up their wall
-      setWalls({})
-      setActiveWallId(null)
-      setShowWallMgr(true)
+
+      // ── Offline fallback: restore from localStorage snapshot ──────────────
+      const snap = (() => {
+        try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
+      })()
+      if (snap && Object.keys(snap.walls || {}).length > 0) {
+        const wallsObj   = snap.walls      || {}
+        const layoutsObj = snap.allLayouts || {}
+        const libObj     = snap.library    || {}
+        setWalls(wallsObj)
+        setAllLayouts(layoutsObj)
+        setLibrary(libObj)
+        const savedActive = localStorage.getItem(ACTIVE_WALL_KEY)
+        const ids = Object.keys(wallsObj)
+        const activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
+        if (!activeId) {
+          setShowWallMgr(true)
+        } else {
+          setActiveWallId(activeId)
+        }
+        hasLoadedRef.current = true
+      } else {
+        setWalls({})
+        setActiveWallId(null)
+        setShowWallMgr(true)
+      }
+      return null  // null signals the backend was unreachable
     } finally {
       setIsLoading(false)
     }
@@ -113,6 +142,16 @@ export default function App() {
 
   /* ── Boot ──────────────────────────────────────────────── */
   useEffect(() => { loadAppState() }, [loadAppState])
+
+  /* ── Auto-save snapshot to localStorage on every state change ─────────── */
+  // This powers: (a) offline fallback on next load, (b) merge-to-backend on login
+  useEffect(() => {
+    if (!hasLoadedRef.current) return   // skip during initial load
+    if (Object.keys(walls).length === 0) return  // nothing worth saving yet
+    try {
+      localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ walls, allLayouts, library }))
+    } catch { /* storage full - ignore */ }
+  }, [walls, allLayouts, library])
 
   /* ── Close save menu on outside click ────────────────── */
   useEffect(() => {
@@ -209,15 +248,57 @@ export default function App() {
   }, [setupWallId, activeWallId])
 
   /* ── Auth callbacks ───────────────────────────────────── */
-  const handleAuthSuccess = useCallback((user) => {
+  const handleAuthSuccess = useCallback(async (user) => {
     setAuthUser(user)
     setShowAuth(false)
     setResetToken(null)
     const url = new URL(window.location.href)
     url.searchParams.delete('reset_token')
     window.history.replaceState({}, '', url.toString())
-    // Re-fetch state now that JWT is set (picks up user's saved data)
-    loadAppState()
+
+    // Snapshot any local-only work the user did while the backend was unreachable
+    const localSnap = (() => {
+      try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
+    })()
+
+    // Re-fetch state now that JWT is set (picks up user's existing backend data)
+    const backendData = await loadAppState()
+
+    // ── Sync offline work into the newly logged-in account ─────────────────
+    if (localSnap && backendData) {
+      const backendWallIds   = new Set(Object.keys(backendData.walls   || {}))
+      const backendLayoutMap = backendData.layouts  || {}
+      const backendLibIds    = new Set(Object.keys(backendData.library || {}))
+      let synced = false
+
+      // Walls that exist locally but not on the backend
+      for (const [id, wall] of Object.entries(localSnap.walls || {})) {
+        if (!backendWallIds.has(id)) {
+          api.putWall(wall).catch(console.error)
+          synced = true
+        }
+      }
+      // Layouts that exist locally but not on the backend
+      for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
+        for (const [name, pcs] of Object.entries(wLayouts || {})) {
+          if (!(backendLayoutMap[wallId]?.[name])) {
+            api.putLayout(wallId, name, pcs).catch(console.error)
+            synced = true
+          }
+        }
+      }
+      // Library pieces that exist locally but not on the backend
+      for (const [id, piece] of Object.entries(localSnap.library || {})) {
+        if (!backendLibIds.has(id)) {
+          api.putLibraryPiece(piece).catch(console.error)
+          synced = true
+        }
+      }
+      // If anything was merged, reload after a brief delay so the backend has written
+      if (synced) {
+        setTimeout(() => loadAppState(), 800)
+      }
+    }
   }, [loadAppState])
 
   const handleLogout = useCallback(() => {
