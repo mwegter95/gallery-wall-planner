@@ -127,6 +127,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
   const [progress,        setProgress]        = useState(0)
   const [isProcessing,    setIsProcessing]    = useState(false)
   const [statusMsg,       setStatusMsg]       = useState('')
+  const [errorMsg,        setErrorMsg]        = useState('')
   const [previewUrl,      setPreviewUrl]      = useState(null)
   const [showPreview,     setShowPreview]     = useState(false)
 
@@ -201,20 +202,36 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
   /* ── Apply the perspective warp ─────────────────────── */
   const handleApply = useCallback(async () => {
-    const img = imgRef.current
-    if (!img?.complete || !img.naturalWidth) {
-      setStatusMsg('Image not loaded yet — please wait a moment.')
-      return
-    }
+    setErrorMsg('')
     setIsProcessing(true)
     setProgress(0)
     setStatusMsg('Preparing…')
 
-    await new Promise(r => setTimeout(r, 30))
+    await new Promise(r => setTimeout(r, 40))
 
     try {
-      const iw = img.naturalWidth
-      const ih = img.naturalHeight
+      // If rawPhoto is an external URL (recalibrate case), fetch it and convert to a
+      // data URL first — otherwise canvas.getImageData() throws a CORS security error.
+      let safeDataUrl = rawPhoto
+      if (rawPhoto && !rawPhoto.startsWith('data:')) {
+        setStatusMsg('Fetching image…')
+        const res = await fetch(rawPhoto)
+        const blob = await res.blob()
+        safeDataUrl = await blobToDataUrl(blob)
+      }
+
+      // Create a fresh Image from the (guaranteed same-origin) data URL
+      const safeImg = await new Promise((res, rej) => {
+        const im = new Image()
+        im.onload = () => res(im)
+        im.onerror = () => rej(new Error('Image failed to load for warping'))
+        im.src = safeDataUrl
+      })
+
+      const iw = safeImg.naturalWidth
+      const ih = safeImg.naturalHeight
+      if (!iw || !ih) throw new Error('Image has zero dimensions')
+
       const pixelCorners = corners.map(([nx, ny]) => [nx * iw, ny * ih])
 
       // Output at wallWidth:wallHeight ratio, 1280px wide
@@ -224,26 +241,25 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
       setStatusMsg('Warping perspective…')
 
       const dataUrl = await warpPerspectiveAsync(
-        img,
+        safeImg,
         pixelCorners,
         outW,
         outH,
         (p) => {
           setProgress(p)
-          setStatusMsg(`Warping perspective… ${Math.round(p * 100)}%`)
+          setStatusMsg(`Warping… ${Math.round(p * 100)}%`)
         }
       )
 
       setPreviewUrl(dataUrl)
       setShowPreview(true)
-      setStatusMsg('Done! Check the preview, then click "Use This Wall".')
       setIsProcessing(false)
     } catch (err) {
-      console.error(err)
-      setStatusMsg('Error: ' + err.message)
+      console.error('[WallSetup] warp error:', err)
       setIsProcessing(false)
+      setErrorMsg('Warp failed: ' + (err.message || String(err)))
     }
-  }, [corners])
+  }, [corners, rawPhoto, wallWidth, wallHeight])
 
   /* ── Compute SVG polygon from current handles ──────── */
   const polyPoints = corners
@@ -385,9 +401,9 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   style={{
                     left:            corners[idx][0] * imgSize.w,
                     top:             corners[idx][1] * imgSize.h,
-                    background:      meta.color,
-                    borderColor:     'rgba(255,255,255,0.9)',
-                    boxShadow:       `0 0 0 2px ${meta.color}, 0 2px 6px rgba(0,0,0,0.6)`,
+                    backgroundColor: meta.color + '55',
+                    borderColor:     meta.color,
+                    boxShadow:       `0 0 0 2px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.5)`,
                     touchAction:     'none',
                   }}
                   onMouseDown={(e) => handleMouseDown(e, idx)}
@@ -403,6 +419,9 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   </div>
                   <span className="ws-progress-text">{statusMsg}</span>
                 </div>
+              )}
+              {errorMsg && !isProcessing && (
+                <div className="ws-error-banner">{errorMsg}</div>
               )}
             </div>
           ) : (
