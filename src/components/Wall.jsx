@@ -40,9 +40,10 @@ export default function Wall({
   for (let i = 0; i <= wallWidth; i += 12) {
     footTicks.push({ pos: i * scale, label: `${i / 12}'` })
   }
+  // Vertical ruler: 0' at the bottom (floor), wallHeight/12 at the top
   const footTicksH = []
   for (let i = 0; i <= wallHeight; i += 12) {
-    footTicksH.push({ pos: i * scale, label: `${i / 12}'` })
+    footTicksH.push({ pos: i * scale, label: `${(wallHeight - i) / 12}'` })
   }
 
   const handleBgClick = useCallback((e) => {
@@ -229,7 +230,7 @@ export default function Wall({
                           fill="rgba(255,255,255,0.35)"
                           fontSize={9}
                           fontFamily="ui-monospace,monospace"
-                        >{fi}′</text>
+                        >{Math.floor(wallHeight / 12) - fi}′</text>
                       )
                     ))}
                   </svg>
@@ -286,18 +287,10 @@ export default function Wall({
                   <div className="wall-empty">
                     <div className="wall-empty-icon">🖼️</div>
                     <p>
-                      Tap <strong>📐 Calibrate Wall</strong> to upload a photo and correct the perspective,
-                      then add pieces to start arranging your gallery wall.
+                      Click <strong>📐 Calibrate Wall</strong> in the toolbar above to upload a photo
+                      and correct the perspective, then add pieces to start arranging your gallery wall.
                     </p>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      style={{ marginTop: 8 }}
-                      onClick={(e) => { e.stopPropagation(); onCalibrate(); }}
-                    >
-                      📐 Calibrate Wall Now
-                    </button>
-                    <p className="wall-empty-sub" style={{ marginTop: 6 }}>
+                    <p className="wall-empty-sub">
                       Wall: {wallWidth}" × {wallHeight}"  ({(wallWidth/12).toFixed(1)}′ × {(wallHeight/12).toFixed(1)}′)
                     </p>
                   </div>
