@@ -2492,6 +2492,17 @@ kbd {
   border-top: 1px solid var(--border);
 }
 
+.auth-privacy-note {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.55;
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.03);
+  border-left: 2px solid var(--accent);
+  border-radius: 2px;
+}
+
 /* ── User badge in header ─────────────────────────────── */
 .user-login-wrap {
   display: flex;

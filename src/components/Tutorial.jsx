@@ -86,7 +86,7 @@ const STEPS = [
     id: 'account',
     target: '[data-tutorial="header-login"]',
     title: '☁ Save Your Work Across Devices',
-    desc: 'Creating an account syncs your walls and layouts to any device — phone, tablet, or desktop. Passwords are hashed and photo uploads are encrypted. Your data stays private.',
+    desc: 'Creating an account syncs your walls and layouts to any device — phone, tablet, or desktop. Your password is hashed and never stored in plain text, photo uploads are encrypted at rest, and your walls are only accessible to you — no one else can view your data.',,
     mDesc: 'Tap the profile icon (top-right) to log in. This syncs your walls and layouts securely across all your devices.',
     pos: 'bottom',
   },

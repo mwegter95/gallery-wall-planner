@@ -130,6 +130,11 @@ export default function AuthModal({ onSuccess, onClose, resetToken = null }) {
                   placeholder="••••••••" autoComplete="new-password" required />
               </label>
             )}
+            {view === 'register' && (
+              <p className="auth-privacy-note">
+                🔒 Your password is hashed and never stored in plain text. Photo uploads are encrypted at rest. Your walls and layouts are only accessible to you — no one else can view your data.
+              </p>
+            )}
             {view === 'login' && (
               <button type="button" className="auth-forgot-link" onClick={() => switchView('forgot')}>
                 Forgot password?
