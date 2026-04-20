@@ -635,13 +635,16 @@ kbd {
 .wall-scroll {
   flex: 1;
   overflow: auto;
+  /* No align-items/justify-content — centering is handled by margin:auto on the
+     child. This way the scroll origin is always at (0,0) so zoomed-in content
+     is reachable at every edge, including the top. */
   display: flex;
-  align-items: center;
-  justify-content: center;
   padding: 24px;
 }
 
-.wall-centering { display: inline-flex; align-items: flex-start; }
+/* margin:auto centres the wall when it fits; collapses to 0 when it overflows,
+   so scrolling reaches the top and all edges correctly. */
+.wall-centering { display: inline-flex; align-items: flex-start; margin: auto; }
 
 .ruler-wrapper { display: inline-flex; flex-direction: column; }
 
