@@ -115,11 +115,8 @@ export default function App() {
       if (!activeId) {
         setWalls({})
         setActiveWallId(null)
-        // Don't auto-open WallManager during tutorial — it blocks the welcome step.
-        // Tutorial step 2 (wall-select) guides the user there when they're ready.
-        if (localStorage.getItem(TUTORIAL_KEY) === 'true') {
-          setShowWallMgr(true)
-        }
+        // Never auto-open WallManager on load — the tutorial guides new users,
+        // and returning users can open it manually via the wall name badge.
       } else {
         setActiveWallId(activeId)
       }
@@ -163,16 +160,15 @@ export default function App() {
         const savedActive = snap.activeWallId || localStorage.getItem(ACTIVE_WALL_KEY)
         const ids = Object.keys(wallsObj)
         const activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
-        if (!activeId) {
-          if (localStorage.getItem(TUTORIAL_KEY) === 'true') setShowWallMgr(true)
-        } else {
+        if (activeId) {
           setActiveWallId(activeId)
         }
+        // No wall → stay on empty canvas, tutorial or header badge guides the user
         // hasLoadedRef set in finally
       } else {
         setWalls({})
         setActiveWallId(null)
-        if (localStorage.getItem(TUTORIAL_KEY) === 'true') setShowWallMgr(true)
+        // No auto-open — new users see the tutorial, returning users use the header badge
       }
       return null  // null signals the backend was unreachable
     } finally {
