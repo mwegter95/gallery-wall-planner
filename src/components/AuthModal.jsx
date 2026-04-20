@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { authLogin, authRegister, authForgotPassword, authResetPassword } from '../utils/api'
 
 /* ── AuthModal ───────────────────────────────────────────────────────────────
@@ -198,18 +198,61 @@ export default function AuthModal({ onSuccess, onClose, resetToken = null }) {
 }
 
 /* ── UserBadge ────────────────────────────────────────────────────────────────
-   Small header button: shows avatar if logged in, "Log in" if not.
+   Small header widget. When logged in: clicking the avatar opens a dropdown
+   with the user name + Log out option (no stray buttons cluttering the bar).
 */
 export function UserBadge({ user, onLoginClick, onLogout }) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const wrapRef = useRef(null)
+
+  /* Close on outside click / touch */
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('touchstart', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('touchstart', close)
+    }
+  }, [menuOpen])
+
   if (user) {
-    const initials = (user.display_name || user.email).slice(0, 2).toUpperCase()
+    const displayName = user.display_name || user.email || 'Account'
+    const initials = displayName.slice(0, 2).toUpperCase()
     return (
-      <div className="user-badge">
-        <div className="user-avatar" title={user.display_name || user.email}>{initials}</div>
-        <button className="user-logout" onClick={onLogout} title="Log out">↩</button>
+      <div className="user-badge" ref={wrapRef}>
+        <button
+          className={`user-avatar-btn ${menuOpen ? 'user-avatar-btn--open' : ''}`}
+          onClick={() => setMenuOpen(v => !v)}
+          title={displayName}
+          aria-expanded={menuOpen}
+          aria-haspopup="true"
+        >
+          <span className="user-avatar">{initials}</span>
+        </button>
+
+        {menuOpen && (
+          <div className="user-menu">
+            <div className="user-menu-name" title={displayName}>
+              <span className="user-menu-label">Signed in as</span>
+              <span className="user-menu-email">{displayName}</span>
+            </div>
+            <div className="user-menu-divider" />
+            <button
+              className="user-menu-item user-menu-item--danger"
+              onClick={() => { setMenuOpen(false); onLogout() }}
+            >
+              Log out
+            </button>
+          </div>
+        )}
       </div>
     )
   }
+
   return (
     <div className="user-login-wrap">
       <span className="user-login-hint">save &amp; access across devices</span>
