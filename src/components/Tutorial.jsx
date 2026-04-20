@@ -7,8 +7,9 @@ import { useState, useEffect } from 'react'
    Tips:      contextual, non-blocking just-in-time suggestions
    ═══════════════════════════════════════════════════════════════════ */
 
-// Placeholder art image for the demo overlay (Wikimedia public-domain painting)
-const DEMO_ART_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg'
+// Demo art image: Vermeer's "Girl with a Pearl Earring" — public domain, Wikimedia Commons
+// Shown with a CSS frame so it looks like a real piece hanging on a wall
+const DEMO_ART_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/1665_Girl_with_a_Pearl_Earring.jpg/800px-1665_Girl_with_a_Pearl_Earring.jpg'
 
 // ── Step definitions ──────────────────────────────────────────────
 const STEPS = [
@@ -54,9 +55,9 @@ const STEPS = [
   {
     id: 'piece-photo',
     target: '[data-tutorial="header-add-piece"]',
-    title: '🎨 Piece Photo Editing Tools',
-    desc: 'When you upload an art photo, powerful tools help you isolate the piece:\n\n**4-Corner Warp** — drag corners to straighten photos taken at an angle\n**Magic Select** — AI detects and removes the background automatically\n**Manual Brush** — paint to keep (Add mode) or erase (Erase mode) for fine detail\n**Sliders** — adjust brightness, contrast, saturation to match the real piece',
-    mDesc: 'After uploading a photo:\n\n**4-Corner Warp** for angled shots\n**Magic Select** for auto background removal\n**Manual Brush** — Add or Erase mode for fine control\n**Sliders** to fine-tune the look',
+    title: '🎨 Photo Editing Tools',
+    desc: 'After uploading a photo two tabs open:\n\n**Perspective Crop** — drag 4 coloured corner handles to flatten perspective on angled shots, then hit Apply Warp\n**Magic Select** — ⚡ Edge Select traces colour from photo borders instantly. Adjust **Tolerance** to grow/shrink the selection. Run ✨ AI Detect for cleaner edges, then fine-tune with **AI Threshold** pip dots\n**Brush** — Smart (edge-aware) or Manual, in Add or Erase mode to paint over any mistakes\n**Sensitivity** — how similarly-coloured neighbouring pixels must be to join the Smart brush selection',
+    mDesc: 'After uploading a photo:\n\n**Perspective Crop** — drag corners to flatten perspective\n**Edge Select** — instant colour-boundary tracing, adjust Tolerance\n**AI Detect** — removes the background; use AI Threshold pips to tighten or loosen\n**Brush** — Smart or Manual, Add or Erase mode to clean up edges',
     pos: 'bottom',
     showDemo: true,   // trigger the demo overlay when modal isn't open
   },
@@ -78,9 +79,10 @@ const STEPS = [
   },
   {
     id: 'sidebar',
-    target: '[data-tutorial="sidebar-toggle"]',
+    target: '[data-tutorial="sidebar-toggle"]',          // mobile: hamburger button
+    desktopTarget: '[data-tutorial="sidebar-tabs"]',     // desktop: the sidebar tabs row (always visible)
     title: '☰ The Sidebar',
-    desc: 'Open the sidebar for deeper controls:\n\n**Pieces** — reorder layers, edit individual pieces, delete them\n**Snap to Grid** — enable snapping with a grid interval for precise placement\n**Layouts** — load, rename, or delete saved arrangements\n**Library** — pieces you\'ve added are saved here so you can reuse them across layouts without re-uploading',
+    desc: 'The sidebar is always open on the left. Use the tabs to switch between sections:\n\n**Pieces** — reorder layers, edit individual pieces, delete them\n**Snap to Grid** — enable snapping with a grid interval for precise placement\n**Layouts** — load, rename, or delete saved arrangements\n**Library** — pieces you\'ve added are saved here so you can reuse them without re-uploading',
     mDesc: 'Tap ☰ to open the sidebar:\n\n**Pieces** — edit, reorder, delete\n**Snap to Grid** — for precise alignment\n**Layouts** — load saved arrangements\n**Library** — reuse previously added art',
     pos: 'bottom',
   },
@@ -94,11 +96,12 @@ const STEPS = [
   },
   {
     id: 'grid',
-    target: '[data-tutorial="ctrl-grid"]',
+    target: '[data-tutorial="snap-setting"]',
     title: '⊞ Grid & Snap to Grid',
-    desc: 'Click "Grid" to overlay measurement lines (inches and feet) across your wall — great for checking even spacing between pieces.\n\nFor Snap to Grid, open the sidebar (☰) and enable it there. Pieces snap to a grid interval you choose (e.g. 2″, 4″, 6″) for precise, even placement.',
-    mDesc: 'Tap Grid to show measurement lines. To snap pieces to a grid, open the sidebar (☰) and enable Snap to Grid.',
+    desc: 'The **Settings** tab (now open) has Snap to Grid. Toggle it on and pieces will snap to a grid interval you choose — great for even spacing. You can also click **⊞ Grid** in the controls bar to overlay a measurement grid (inches and feet) across your wall.',
+    mDesc: 'In the Settings tab, toggle Snap to Grid on. Pieces snap to a precise interval. Tap ⊞ Grid in the toolbar to show a measurement overlay.',
     pos: 'bottom',
+    openSettings: true,  // triggers sidebar → Settings tab on step enter
   },
   {
     id: 'lock',
@@ -128,6 +131,7 @@ const STEPS = [
 ]
 
 export const TUTORIAL_STEP_COUNT = STEPS.length
+export const TUTORIAL_LOCK_STEP  = STEPS.findIndex(s => s.id === 'lock')
 
 // ── Tips definitions ──────────────────────────────────────────────
 const TIPS = [
@@ -240,10 +244,18 @@ function cardPos(rect, pos, isMob) {
   return { position: 'fixed', top, left, width: W }
 }
 
-/** Measure a DOM element, with optional fallback selector */
-function measureEl(selector, fallback) {
-  const el = selector ? document.querySelector(selector) : null
+/**
+ * Measure a DOM element.
+ * On desktop, prefers desktopTarget if provided.
+ * Falls back through: desktopTarget → selector → fallback.
+ */
+function measureEl(selector, fallback, desktopTarget, isMob) {
+  const primary = (!isMob && desktopTarget) ? desktopTarget : selector
+  const el = primary ? document.querySelector(primary) : null
   if (el) return el.getBoundingClientRect()
+  // Try the other one as a secondary fallback
+  const alt = primary !== selector ? document.querySelector(selector) : null
+  if (alt) return alt.getBoundingClientRect()
   const fb = fallback ? document.querySelector(fallback) : null
   return fb ? fb.getBoundingClientRect() : null
 }
@@ -282,9 +294,15 @@ function TipRing({ rect }) {
 }
 
 // ── Demo overlay for the piece-photo step ────────────────────────
+// Shows a realistic mock of the Magic Select "brush" phase — the state
+// AFTER edge-detection has run, so the user can see the actual controls
+// they'll use to refine the selection.
 function DemoPiecePhotoOverlay({ isMob, tutorialStep, onNext, onBack, onSkip }) {
   const pct = ((tutorialStep + 1) / STEPS.length) * 100
-  const W   = isMob ? Math.min(340, window.innerWidth - 16) : 540
+  const W   = isMob ? Math.min(340, window.innerWidth - 16) : 520
+
+  // Simulate interactive AI Threshold pip dots
+  const [thresh, setThresh] = useState(6)
 
   return (
     <div className="tut-demo-backdrop">
@@ -295,58 +313,100 @@ function DemoPiecePhotoOverlay({ isMob, tutorialStep, onNext, onBack, onSkip }) 
         </div>
 
         <div className="tut-card-inner">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          {/* Header row */}
+          <div className="tut-demo-header-row">
             <div className="tut-step-num">{tutorialStep + 1} / {STEPS.length}</div>
-            <span className="tut-demo-badge">📽 Demo mode</span>
+            <span className="tut-demo-badge">📽 Demo</span>
           </div>
-          <h3 className="tut-title">🎨 Piece Photo Editing Tools</h3>
+          <h3 className="tut-title">🎨 Photo Editing Tools</h3>
 
-          {/* Demo image canvas area */}
+          {/* Mock CropModal tab bar */}
+          <div className="tut-demo-cm-tabs">
+            <button className="tut-demo-cm-tab">✂️ Perspective Crop</button>
+            <button className="tut-demo-cm-tab tut-demo-cm-tab--active">✨ Magic Select</button>
+          </div>
+
+          {/* Canvas: checkerboard bg + framed painting with masked edges
+              Simulates "after Edge Select / AI detection" phase            */}
           <div className="tut-demo-canvas-wrap">
-            <img
-              src={DEMO_ART_URL}
-              alt="Demo artwork — Van Gogh Starry Night"
-              className="tut-demo-img"
-              crossOrigin="anonymous"
-            />
-            {/* Simulated corner-warp handles */}
-            <div className="tut-demo-handle tut-demo-handle--tl" title="Top-left corner — drag to warp" />
-            <div className="tut-demo-handle tut-demo-handle--tr" title="Top-right corner" />
-            <div className="tut-demo-handle tut-demo-handle--bl" title="Bottom-left corner" />
-            <div className="tut-demo-handle tut-demo-handle--br" title="Bottom-right corner" />
-            <div className="tut-demo-canvas-label">← Drag corners to straighten (4-Corner Warp)</div>
+            {/* Checkerboard shows transparency around removed background */}
+            <div className="tut-demo-checker">
+              {/* CSS frame around the artwork */}
+              <div className="tut-demo-art-frame">
+                <img
+                  src={DEMO_ART_URL}
+                  alt="Vermeer — Girl with a Pearl Earring"
+                  className="tut-demo-art-img"
+                />
+              </div>
+              {/* Simulated green "Add" brush cursor */}
+              <div className="tut-demo-brush-cursor" />
+            </div>
+            <div className="tut-demo-canvas-caption">
+              After detection — checkerboard = transparent background
+            </div>
           </div>
 
-          {/* Tool descriptions */}
-          <div className="tut-demo-tools">
-            <div className="tut-demo-tool">
-              <span className="tut-demo-tool-icon">⬡</span>
-              <div>
-                <div className="tut-demo-tool-name">4-Corner Warp</div>
-                <div className="tut-demo-tool-desc">Drag the colored corner dots to straighten photos taken at an angle</div>
-              </div>
+          {/* Brush controls: accurate match to real MagicSelect UI */}
+          <div className="tut-demo-brush-panel">
+
+            {/* Row 1: brush type + mode */}
+            <div className="tut-demo-brush-row">
+              <button className="tut-demo-mb tut-demo-mb--smart">🪄 Smart</button>
+              <button className="tut-demo-mb">✏️ Manual</button>
+              <div className="tut-demo-mb-sep" />
+              <button className="tut-demo-mb tut-demo-mb--add">＋ Add</button>
+              <button className="tut-demo-mb">✕ Erase</button>
+              <div style={{ flex: 1 }} />
+              <button className="tut-demo-mb">⇄ Invert</button>
             </div>
-            <div className="tut-demo-tool">
-              <span className="tut-demo-tool-icon">✨</span>
-              <div>
-                <div className="tut-demo-tool-name">Magic Select</div>
-                <div className="tut-demo-tool-desc">AI automatically detects and removes the background from around your art</div>
-              </div>
+
+            {/* Row 2: brush size */}
+            <div className="tut-demo-ctrl-row">
+              <span className="tut-demo-ctrl-lbl">Size</span>
+              <input type="range" className="tut-demo-slider" min={5} max={100} defaultValue={28} readOnly />
+              <span className="tut-demo-ctrl-val">28px</span>
             </div>
-            <div className="tut-demo-tool">
-              <span className="tut-demo-tool-icon">🖌</span>
-              <div>
-                <div className="tut-demo-tool-name">Manual Brush</div>
-                <div className="tut-demo-tool-desc">Switch between Add and Erase mode to paint fine detail into the selection</div>
-              </div>
+
+            {/* Row 3: sensitivity (smart brush — colour match tolerance) */}
+            <div className="tut-demo-ctrl-row">
+              <span className="tut-demo-ctrl-lbl" title="How similarly-coloured neighbouring pixels must be to join the selection">Sensitivity</span>
+              <input type="range" className="tut-demo-slider" min={0} max={80} defaultValue={28} readOnly />
+              <span className="tut-demo-ctrl-val">Balanced</span>
             </div>
-            <div className="tut-demo-tool">
-              <span className="tut-demo-tool-icon">◐</span>
-              <div>
-                <div className="tut-demo-tool-name">Sliders</div>
-                <div className="tut-demo-tool-desc">Fine-tune brightness, contrast, and saturation to match the real piece</div>
-              </div>
+
+            {/* Row 4: edge-detect Tolerance */}
+            <div className="tut-demo-ctrl-row">
+              <span className="tut-demo-ctrl-lbl" title="How loosely the edge flood-fill grows from photo borders">Tolerance</span>
+              <input type="range" className="tut-demo-slider" min={0} max={80} defaultValue={35} readOnly />
+              <span className="tut-demo-ctrl-val">Balanced</span>
             </div>
+
+            {/* Row 5: AI Threshold pip dots (interactive in demo!) */}
+            <div className="tut-demo-ctrl-row">
+              <span className="tut-demo-ctrl-lbl" title="How strictly to apply the AI background mask">AI Threshold</span>
+              <div className="tut-demo-pips">
+                {Array.from({ length: 11 }, (_, i) => (
+                  <div
+                    key={i}
+                    className={`tut-demo-pip ${i <= thresh ? 'tut-demo-pip--on' : ''}`}
+                    onClick={() => setThresh(i)}
+                    title={`Set threshold to ${i}`}
+                  />
+                ))}
+              </div>
+              <span className="tut-demo-ctrl-val">
+                {thresh < 4 ? 'Tight' : thresh > 7 ? 'Loose' : 'Balanced'}
+              </span>
+            </div>
+          </div>
+
+          {/* Explanation */}
+          <div className="tut-demo-explain">
+            <strong>Perspective Crop</strong> tab: drag 4 coloured corners to straighten angled photos, then <em>Apply Warp</em>.
+            {' '}<strong>Magic Select</strong> tab: <em>⚡ Edge Select</em> traces colour from photo borders—adjust <strong>Tolerance</strong> to grow or shrink the selection.
+            Run <em>✨ AI Detect</em> for cleaner edges, then use <strong>AI Threshold</strong> and the <strong>brush</strong> to refine.
+            Paint in <em>Add</em> or <em>Erase</em> mode with Smart (edge-aware) or Manual brush.
           </div>
 
           {/* Navigation */}
@@ -369,6 +429,7 @@ export default function Tutorial({
   onNext, onBack, onSkip,
   tipsEnabled,
   showAddModal,     // true when AddPieceModal is open
+  onSidebarSection, // (section: string) => void — open sidebar to a tab
   // App state for tips
   pieces, walls,
   activeWallId, activeWallImage,
@@ -390,12 +451,34 @@ export default function Tutorial({
     // For piece-photo demo, no spotlight needed (demo modal takes over)
     if (step.showDemo && !showAddModal) { setSpotRect(null); return }
 
-    const measure = () => setSpotRect(measureEl(step.target, step.fallbackTarget))
+    // If this step requires a specific sidebar tab, open it first then measure
+    // after a short delay so the DOM renders the revealed content
+    if (step.openSettings && onSidebarSection) {
+      onSidebarSection('settings')
+      let measureFn = null
+      const t = setTimeout(() => {
+        measureFn = () => setSpotRect(measureEl(step.target, step.fallbackTarget, step.desktopTarget, isMob))
+        measureFn()
+        const activeTarget = (!isMob && step.desktopTarget) ? step.desktopTarget : step.target
+        if (activeTarget) {
+          const el = document.querySelector(activeTarget)
+          el?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+        }
+        window.addEventListener('resize', measureFn)
+      }, 350)
+      return () => {
+        clearTimeout(t)
+        if (measureFn) window.removeEventListener('resize', measureFn)
+      }
+    }
+
+    const measure = () => setSpotRect(measureEl(step.target, step.fallbackTarget, step.desktopTarget, isMob))
     measure()
 
     // Scroll the target into view so it's visible under the spotlight
-    if (step.target) {
-      const el = document.querySelector(step.target)
+    const activeTarget = (!isMob && step.desktopTarget) ? step.desktopTarget : step.target
+    if (activeTarget) {
+      const el = document.querySelector(activeTarget)
       el?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
     }
 
@@ -473,8 +556,7 @@ export default function Tutorial({
             {hasTarget && (
               <div className="tut-try-hint">
                 <span className="tut-try-arrow">↑</span>
-                {isMob ? 'Tap' : 'Click'} the highlighted button to try it, or hit{' '}
-                <strong>Next →</strong> to continue
+                {isMob ? 'Tap to try it' : 'Click to try it'}
               </div>
             )}
 

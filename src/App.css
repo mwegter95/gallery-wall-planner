@@ -617,6 +617,8 @@ kbd {
 .ctrl-btn:disabled { opacity: 0.38; cursor: not-allowed; }
 .ctrl-btn:disabled:hover { background: var(--bg-card); color: var(--text-secondary); }
 .ctrl-btn--lock.active { color: #fbbf24; border-color: rgba(251, 191, 36, 0.5); background: rgba(251, 191, 36, 0.12); }
+/* Ghost state: lock button shown as tutorial placeholder, no piece selected */
+.ctrl-btn--ghost { opacity: 0.45; cursor: default; pointer-events: none; }
 
 .snap-badge {
   font-size: 11px;
@@ -1662,6 +1664,26 @@ kbd {
   gap: 8px;
   flex-shrink: 0;
 }
+
+/* "Skip warp" / "Skip — use photo as-is" — intentionally low-prominence */
+.cm-skip-link {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition: color 0.12s, text-decoration-color 0.12s;
+  white-space: nowrap;
+}
+.cm-skip-link:hover:not(:disabled) {
+  color: var(--text-secondary);
+  text-decoration-color: var(--text-secondary);
+}
+.cm-skip-link:disabled { opacity: 0.35; cursor: default; }
 
 .cm-rotate-btns {
   display: flex;
@@ -3140,17 +3162,17 @@ kbd {
 
 /* ── "Try it" interactive hint inside tutorial card ─────── */
 .tut-try-hint {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
+  font-weight: 600;
   color: var(--accent-lt);
   background: var(--accent-dim);
   border: 1px solid rgba(124,111,247,0.25);
-  border-radius: 6px;
-  padding: 7px 10px;
+  border-radius: 20px;
+  padding: 4px 12px 4px 8px;
   margin-bottom: 14px;
-  line-height: 1.4;
 }
 .tut-try-arrow {
   font-size: 16px;
@@ -3185,6 +3207,13 @@ kbd {
   overflow-y: auto;
 }
 
+.tut-demo-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
 .tut-demo-badge {
   font-size: 10px;
   color: #fbbf24;
@@ -3197,86 +3226,209 @@ kbd {
   display: inline-block;
 }
 
-/* Demo image canvas */
+/* Mock CropModal tab bar */
+.tut-demo-cm-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.tut-demo-cm-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: default;
+  transition: color 0.12s, border-color 0.12s;
+}
+.tut-demo-cm-tab--active {
+  color: var(--accent-lt);
+  border-bottom-color: var(--accent-lt);
+  font-weight: 600;
+}
+
+/* Canvas: checkerboard transparency simulation */
 .tut-demo-canvas-wrap {
   position: relative;
   width: 100%;
   border-radius: 8px;
   overflow: hidden;
-  background: #0a0a18;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
   border: 1px solid var(--border);
-  aspect-ratio: 16/9;
 }
 
-.tut-demo-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.tut-demo-checker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  /* CSS checkerboard — simulates transparent background after detection */
+  background-color: #555;
+  background-image:
+    repeating-conic-gradient(#444 0% 25%, #666 0% 50%);
+  background-size: 14px 14px;
+}
+
+/* CSS picture frame around the artwork */
+.tut-demo-art-frame {
+  position: relative;
+  padding: 10px;
+  background: linear-gradient(135deg, #c9a84c, #7a5c1a 30%, #c9a84c 50%, #7a5c1a 70%, #c9a84c);
+  box-shadow:
+    inset 0 0 5px rgba(0,0,0,0.6),
+    0 6px 20px rgba(0,0,0,0.5);
+  border-radius: 2px;
+  max-width: 220px;
+}
+
+.tut-demo-art-img {
   display: block;
-  opacity: 0.92;
+  width: 100%;
+  height: auto;
+  max-height: 160px;
+  object-fit: cover;
+  /* Mask edges to simulate background-removed state */
+  mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, black 55%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, black 55%, transparent 100%);
+  border-radius: 1px;
 }
 
-/* Simulated corner warp handles */
-.tut-demo-handle {
+/* Simulated green Add-mode brush cursor */
+.tut-demo-brush-cursor {
   position: absolute;
-  width: 14px;
-  height: 14px;
+  top: 28px;
+  right: 36px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
-  border: 2px solid white;
-  cursor: grab;
-}
-.tut-demo-handle--tl { top: 8px;  left: 8px;  background: #f87171; }
-.tut-demo-handle--tr { top: 8px;  right: 8px; background: #4ade80; }
-.tut-demo-handle--bl { bottom: 8px; left: 8px;  background: #60a5fa; }
-.tut-demo-handle--br { bottom: 8px; right: 8px; background: #facc15; }
-
-.tut-demo-canvas-label {
-  position: absolute;
-  bottom: 6px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0,0,0,0.65);
-  color: rgba(255,255,255,0.8);
-  font-size: 10px;
-  padding: 3px 10px;
-  border-radius: 10px;
-  white-space: nowrap;
+  border: 2px solid #4ade80;
+  opacity: 0.85;
   pointer-events: none;
+  animation: tut-brush-blink 2s ease-in-out infinite;
+}
+@keyframes tut-brush-blink {
+  0%,100% { opacity: 0.85; transform: scale(1); }
+  50%      { opacity: 0.5;  transform: scale(1.05); }
 }
 
-/* Tool list */
-.tut-demo-tools {
+.tut-demo-canvas-caption {
+  font-size: 10px;
+  color: rgba(255,255,255,0.55);
+  text-align: center;
+  padding: 4px 0 6px;
+  background: rgba(0,0,0,0.3);
+  letter-spacing: 0.02em;
+}
+
+/* Brush controls panel */
+.tut-demo-brush-panel {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: 16px;
+  gap: 7px;
 }
-.tut-demo-tool {
+
+/* Brush mode button row */
+.tut-demo-brush-row {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 9px 11px;
-  background: var(--bg-hover);
-  border-radius: 8px;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tut-demo-mb {
+  background: var(--bg-card);
   border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: default;
+  white-space: nowrap;
 }
-.tut-demo-tool-icon {
-  font-size: 18px;
+.tut-demo-mb--smart {
+  background: rgba(124,111,247,0.18);
+  border-color: rgba(124,111,247,0.5);
+  color: var(--accent-lt);
+}
+.tut-demo-mb--add {
+  background: rgba(74,222,128,0.15);
+  border-color: rgba(74,222,128,0.45);
+  color: #4ade80;
+}
+.tut-demo-mb-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+/* Slider control rows */
+.tut-demo-ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tut-demo-ctrl-lbl {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 72px;
+}
+.tut-demo-slider {
+  flex: 1;
+  height: 3px;
+  accent-color: var(--accent);
+  cursor: default;
+  pointer-events: none;
+}
+.tut-demo-ctrl-val {
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 48px;
+  text-align: right;
+}
+
+/* AI Threshold interactive pip dots */
+.tut-demo-pips {
+  display: flex;
+  gap: 3px;
+  flex: 1;
+  align-items: center;
+}
+.tut-demo-pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
   flex-shrink: 0;
-  line-height: 1;
-  margin-top: 1px;
 }
-.tut-demo-tool-name {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 2px;
+.tut-demo-pip--on {
+  background: var(--accent);
+  border-color: var(--accent-lt);
 }
-.tut-demo-tool-desc {
+.tut-demo-pip:hover { border-color: var(--accent-lt); }
+
+/* Explanation text */
+.tut-demo-explain {
   font-size: 11px;
   color: var(--text-secondary);
-  line-height: 1.45;
+  line-height: 1.5;
+  background: var(--bg-hover);
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
 }
 
 /* ── Tutorial / Tips ctrl-btn variants ───────────────────── */

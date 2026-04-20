@@ -243,7 +243,6 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
       </div>
 
       <div className="cm-footer">
-        <button className="btn btn-ghost" onClick={onSkip} disabled={warping || isRotating}>Use Full Image</button>
         <div className="cm-rotate-btns">
           <button
             className="btn btn-ghost btn-sm"
@@ -260,6 +259,10 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
         </div>
         <button className="btn btn-primary" onClick={handleApply} disabled={warping || isRotating}>
           {warping ? `Warping… ${warpPct}%` : isRotating ? 'Rotating…' : '✓ Apply Warp'}
+        </button>
+        <button className="cm-skip-link" onClick={onSkip} disabled={warping || isRotating}
+          title="Skip perspective correction and use the photo as-is">
+          Skip warp
         </button>
       </div>
     </div>
@@ -743,7 +746,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
             ))}
           </div>
           <button className="btn btn-ghost ms-start-btn" onClick={runDetection}>✨ AI Detect Background</button>
-          <button className="btn btn-ghost ms-skip-btn" onClick={onSkip}>Use Full Image Instead</button>
+          <button className="cm-skip-link ms-skip-btn" onClick={onSkip}>Skip — use photo as-is</button>
         </div>
       )}
 
@@ -904,7 +907,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
           <p className="ms-error-detail">{loadMsg}</p>
           <div className="ms-error-btns">
             <button className="btn btn-ghost" onClick={() => setPhase('idle')}>Try Again</button>
-            <button className="btn btn-ghost" onClick={onSkip}>Use Full Image</button>
+            <button className="cm-skip-link" onClick={onSkip}>Skip — use photo as-is</button>
           </div>
         </div>
       )}
@@ -929,7 +932,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
         ) : phase === 'warp' ? (
           <>
             <button className="btn btn-ghost" onClick={() => setPhase('ready')} disabled={warpWarping}>↺ Back to Brush</button>
-            <button className="btn btn-ghost" onClick={onSkip} disabled={warpWarping}>Use Full Image</button>
+            <button className="cm-skip-link" onClick={onSkip} disabled={warpWarping}>Skip — use photo as-is</button>
             <button className="btn btn-primary" onClick={applyWarp} disabled={warpWarping}>
               {warpWarping ? `Warping… ${warpPct}%` : '✓ Apply Warp'}
             </button>

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 
 export default function Sidebar({
   pieces, selectedId, onSelect, onDelete, onEdit, onBringForward, onSendBackward,
@@ -7,10 +7,16 @@ export default function Sidebar({
   onAddPiece, onClearAll,
   library = {}, onAddFromLibrary, onDeleteFromLibrary,
   isOpen = false, onRequestClose,
+  forceSection = null,
 }) {
   const [layoutName, setLayoutName] = useState('')
   const [saveError, setSaveError]   = useState('')
   const [section, setSection]       = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'settings'
+
+  // Allow external callers (e.g. tutorial) to force-switch the active tab
+  useEffect(() => {
+    if (forceSection) setSection(forceSection)
+  }, [forceSection])
 
   const handleSave = () => {
     const name = layoutName.trim()
@@ -25,7 +31,7 @@ export default function Sidebar({
   return (
     <aside className={`sidebar${isOpen ? ' sidebar--open' : ''}`}>
       {/* Top tabs */}
-      <div className="sidebar-tabs">
+      <div className="sidebar-tabs" data-tutorial="sidebar-tabs">
         <button
           className={`tab-btn ${section === 'pieces' ? 'active' : ''}`}
           onClick={() => setSection('pieces')}
@@ -40,6 +46,7 @@ export default function Sidebar({
         >Layouts</button>
         <button
           className={`tab-btn ${section === 'settings' ? 'active' : ''}`}
+          data-tutorial="settings-tab"
           onClick={() => setSection('settings')}
         >Settings</button>
         {onRequestClose && (
@@ -268,7 +275,7 @@ export default function Sidebar({
             <span className="section-title">Settings</span>
           </div>
 
-          <div className="setting-group">
+          <div className="setting-group" data-tutorial="snap-setting">
             <div className="setting-row">
               <label className="setting-label">Snap to Grid</label>
               <button
@@ -308,9 +315,7 @@ export default function Sidebar({
             <div className="setting-label bold">Tips</div>
             <ul className="tips-list">
               <li>Drag pieces freely on the wall</li>
-              <li>Drag corner/edge handles to resize</li>
               <li>Upload a photo for each piece</li>
-              <li>Use layers (Forward/Back) to stack frames</li>
               <li>Save layouts to compare arrangements</li>
             </ul>
           </div>

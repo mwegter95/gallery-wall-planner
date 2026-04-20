@@ -7,6 +7,7 @@ export default function Wall({
   wallImage, onCalibrate,
   onUndo, canUndo, onLockToggle, onMoveStart, onResizeStart,
   onStartTutorial, tipsEnabled, onToggleTips, tutorialActive,
+  tutorialShowLock,
 }) {
   const containerRef = useRef(null)
   const [baseScale, setBaseScale] = useState(5)   // px per inch
@@ -82,15 +83,20 @@ export default function Wall({
           <span className="snap-badge">⊞ Snap {gridSize}"</span>
         )}
 
-        {/* Lock / Unlock button — only when a piece is selected */}
-        {selectedPiece && (
+        {/* Lock / Unlock button — shown when a piece is selected, or as a
+            disabled placeholder during the lock tutorial step */}
+        {(selectedPiece || tutorialShowLock) && (
           <button
-            className={`ctrl-btn ctrl-btn--lock ${selectedPiece.locked ? 'active' : ''}`}
+            className={`ctrl-btn ctrl-btn--lock ${selectedPiece?.locked ? 'active' : ''} ${!selectedPiece ? 'ctrl-btn--ghost' : ''}`}
             data-tutorial="ctrl-lock"
-            onClick={() => onLockToggle && onLockToggle(selectedId)}
-            title={selectedPiece.locked ? 'Unlock piece so it can be moved' : 'Lock piece in place'}
+            onClick={() => selectedPiece && onLockToggle && onLockToggle(selectedId)}
+            title={
+              !selectedPiece
+                ? 'Select a piece on the wall to lock it'
+                : selectedPiece.locked ? 'Unlock piece so it can be moved' : 'Lock piece in place'
+            }
           >
-            {selectedPiece.locked ? '🔒 Locked' : '🔓 Lock'}
+            🔓 Lock
           </button>
         )}
 

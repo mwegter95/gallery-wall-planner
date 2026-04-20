@@ -5,7 +5,7 @@ import AddPieceModal from './components/AddPieceModal'
 import WallSetup from './components/WallSetup'
 import WallManager from './components/WallManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
-import Tutorial, { TUTORIAL_STEP_COUNT } from './components/Tutorial'
+import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP } from './components/Tutorial'
 import * as api from './utils/api'
 import './App.css'
 
@@ -55,6 +55,7 @@ export default function App() {
   const [isSaving,       setIsSaving]       = useState(false)
   const [library,        setLibrary]        = useState({})
   const [sidebarOpen,    setSidebarOpen]    = useState(false)
+  const [sidebarForceSection, setSidebarForceSection] = useState(null)
   const [historyStack,   setHistoryStack]   = useState([])   // undo history (array of piece snapshots)
   const [tutorialStep,   setTutorialStep]   = useState(() =>
     localStorage.getItem(TUTORIAL_KEY) === 'true' ? null : 0
@@ -114,7 +115,11 @@ export default function App() {
       if (!activeId) {
         setWalls({})
         setActiveWallId(null)
-        setShowWallMgr(true)
+        // Don't auto-open WallManager during tutorial — it blocks the welcome step.
+        // Tutorial step 2 (wall-select) guides the user there when they're ready.
+        if (localStorage.getItem(TUTORIAL_KEY) === 'true') {
+          setShowWallMgr(true)
+        }
       } else {
         setActiveWallId(activeId)
       }
@@ -159,7 +164,7 @@ export default function App() {
         const ids = Object.keys(wallsObj)
         const activeId = (savedActive && wallsObj[savedActive]) ? savedActive : ids[0] || null
         if (!activeId) {
-          setShowWallMgr(true)
+          if (localStorage.getItem(TUTORIAL_KEY) === 'true') setShowWallMgr(true)
         } else {
           setActiveWallId(activeId)
         }
@@ -167,7 +172,7 @@ export default function App() {
       } else {
         setWalls({})
         setActiveWallId(null)
-        setShowWallMgr(true)
+        if (localStorage.getItem(TUTORIAL_KEY) === 'true') setShowWallMgr(true)
       }
       return null  // null signals the backend was unreachable
     } finally {
@@ -478,6 +483,9 @@ export default function App() {
   const handleStartTutorial = useCallback(() => {
     localStorage.removeItem(TUTORIAL_KEY)
     setTutorialStep(0)
+    setShowWallMgr(false)   // close any open modal so it doesn't block step 0
+    setShowSetup(false)
+    setShowAuth(false)
   }, [])
 
   const handleToggleTips = useCallback(() => {
@@ -834,6 +842,7 @@ export default function App() {
           onDeleteFromLibrary={deleteFromLibrary}
           isOpen={sidebarOpen}
           onRequestClose={() => setSidebarOpen(false)}
+          forceSection={sidebarForceSection}
         />
 
         <Wall
@@ -858,6 +867,7 @@ export default function App() {
           tipsEnabled={tipsEnabled}
           onToggleTips={handleToggleTips}
           tutorialActive={tutorialStep !== null}
+          tutorialShowLock={tutorialStep === TUTORIAL_LOCK_STEP}
         />
       </div>
 
@@ -917,6 +927,12 @@ export default function App() {
         activeWallImage={activeWallImage}
         currentLayout={currentLayout}
         wallLayouts={wallLayouts}
+        onSidebarSection={(sec) => {
+          setSidebarOpen(true)
+          setSidebarForceSection(sec)
+          // Clear force after a tick so user can freely switch tabs afterwards
+          setTimeout(() => setSidebarForceSection(null), 600)
+        }}
       />
     </div>
   )
