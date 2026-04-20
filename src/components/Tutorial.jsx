@@ -7,6 +7,9 @@ import { useState, useEffect } from 'react'
    Tips:      contextual, non-blocking just-in-time suggestions
    ═══════════════════════════════════════════════════════════════════ */
 
+// Placeholder art image for the demo overlay (Wikimedia public-domain painting)
+const DEMO_ART_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg'
+
 // ── Step definitions ──────────────────────────────────────────────
 const STEPS = [
   {
@@ -55,6 +58,7 @@ const STEPS = [
     desc: 'When you upload an art photo, powerful tools help you isolate the piece:\n\n**4-Corner Warp** — drag corners to straighten photos taken at an angle\n**Magic Select** — AI detects and removes the background automatically\n**Manual Brush** — paint to keep (Add mode) or erase (Erase mode) for fine detail\n**Sliders** — adjust brightness, contrast, saturation to match the real piece',
     mDesc: 'After uploading a photo:\n\n**4-Corner Warp** for angled shots\n**Magic Select** for auto background removal\n**Manual Brush** — Add or Erase mode for fine control\n**Sliders** to fine-tune the look',
     pos: 'bottom',
+    showDemo: true,   // trigger the demo overlay when modal isn't open
   },
   {
     id: 'drag',
@@ -197,18 +201,42 @@ function Fmt({ text }) {
   )
 }
 
-/** Compute tooltip card position near a DOMRect */
+/**
+ * Compute tutorial card position so it never overlaps the spotlight.
+ * Strategy: place card BELOW target if target is in the top half,
+ * ABOVE target if it's in the bottom half. Clamp to viewport edges.
+ */
 function cardPos(rect, pos, isMob) {
-  const W = isMob ? Math.min(310, window.innerWidth - 20) : Math.min(420, window.innerWidth - 32)
+  const W       = isMob ? Math.min(310, window.innerWidth - 20) : Math.min(420, window.innerWidth - 32)
+  const CARD_H  = isMob ? 280 : 320    // generous estimate — prevents overlap
+  const GAP     = 16
+  const VW      = window.innerWidth
+  const VH      = window.innerHeight
+
   if (!rect || pos === 'center') {
-    return { position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: W }
+    return { position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: W }
   }
-  const GAP = 12, VW = window.innerWidth, VH = window.innerHeight
-  let top = pos === 'bottom' ? rect.bottom + GAP : rect.top - GAP - 240
-  if (top + 240 > VH - 16) top = rect.top - 240 - GAP
-  if (top < 16) top = rect.bottom + GAP
+
+  // Decide: place below or above based on which half of screen the target is in
+  const spaceBelow = VH - rect.bottom - GAP
+  const spaceAbove = rect.top - GAP
+
+  let top
+  if (spaceBelow >= spaceAbove) {
+    // More room below → place card below the target
+    top = rect.bottom + GAP
+    if (top + CARD_H > VH - 8) top = rect.top - CARD_H - GAP   // overflow: flip to top
+  } else {
+    // More room above → place card above the target
+    top = rect.top - CARD_H - GAP
+    if (top < 8) top = rect.bottom + GAP   // overflow: flip to bottom
+  }
+  top = Math.max(8, Math.min(top, VH - CARD_H - 8))
+
+  // Horizontally: centre on target, clamp to viewport
   let left = rect.left + rect.width / 2 - W / 2
   left = Math.max(10, Math.min(left, VW - W - 10))
+
   return { position: 'fixed', top, left, width: W }
 }
 
@@ -220,8 +248,8 @@ function measureEl(selector, fallback) {
   return fb ? fb.getBoundingClientRect() : null
 }
 
-// ── Spotlight ─────────────────────────────────────────────────────
-function Spotlight({ rect, pad = 9, r = 8 }) {
+// ── Spotlight with pulsing interactive glow ───────────────────────
+function Spotlight({ rect, pad = 10, r = 8 }) {
   if (!rect) return null
   return (
     <div
@@ -253,11 +281,94 @@ function TipRing({ rect }) {
   )
 }
 
+// ── Demo overlay for the piece-photo step ────────────────────────
+function DemoPiecePhotoOverlay({ isMob, tutorialStep, onNext, onBack, onSkip }) {
+  const pct = ((tutorialStep + 1) / STEPS.length) * 100
+  const W   = isMob ? Math.min(340, window.innerWidth - 16) : 540
+
+  return (
+    <div className="tut-demo-backdrop">
+      <div className="tut-demo-modal" style={{ width: W }}>
+        {/* Progress bar */}
+        <div className="tut-prog-track">
+          <div className="tut-prog-fill" style={{ width: `${pct}%` }} />
+        </div>
+
+        <div className="tut-card-inner">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div className="tut-step-num">{tutorialStep + 1} / {STEPS.length}</div>
+            <span className="tut-demo-badge">📽 Demo mode</span>
+          </div>
+          <h3 className="tut-title">🎨 Piece Photo Editing Tools</h3>
+
+          {/* Demo image canvas area */}
+          <div className="tut-demo-canvas-wrap">
+            <img
+              src={DEMO_ART_URL}
+              alt="Demo artwork — Van Gogh Starry Night"
+              className="tut-demo-img"
+              crossOrigin="anonymous"
+            />
+            {/* Simulated corner-warp handles */}
+            <div className="tut-demo-handle tut-demo-handle--tl" title="Top-left corner — drag to warp" />
+            <div className="tut-demo-handle tut-demo-handle--tr" title="Top-right corner" />
+            <div className="tut-demo-handle tut-demo-handle--bl" title="Bottom-left corner" />
+            <div className="tut-demo-handle tut-demo-handle--br" title="Bottom-right corner" />
+            <div className="tut-demo-canvas-label">← Drag corners to straighten (4-Corner Warp)</div>
+          </div>
+
+          {/* Tool descriptions */}
+          <div className="tut-demo-tools">
+            <div className="tut-demo-tool">
+              <span className="tut-demo-tool-icon">⬡</span>
+              <div>
+                <div className="tut-demo-tool-name">4-Corner Warp</div>
+                <div className="tut-demo-tool-desc">Drag the colored corner dots to straighten photos taken at an angle</div>
+              </div>
+            </div>
+            <div className="tut-demo-tool">
+              <span className="tut-demo-tool-icon">✨</span>
+              <div>
+                <div className="tut-demo-tool-name">Magic Select</div>
+                <div className="tut-demo-tool-desc">AI automatically detects and removes the background from around your art</div>
+              </div>
+            </div>
+            <div className="tut-demo-tool">
+              <span className="tut-demo-tool-icon">🖌</span>
+              <div>
+                <div className="tut-demo-tool-name">Manual Brush</div>
+                <div className="tut-demo-tool-desc">Switch between Add and Erase mode to paint fine detail into the selection</div>
+              </div>
+            </div>
+            <div className="tut-demo-tool">
+              <span className="tut-demo-tool-icon">◐</span>
+              <div>
+                <div className="tut-demo-tool-name">Sliders</div>
+                <div className="tut-demo-tool-desc">Fine-tune brightness, contrast, and saturation to match the real piece</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Navigation */}
+          <div className="tut-nav">
+            <button className="tut-exit-btn" onClick={onSkip}>Exit tour</button>
+            <div className="tut-nav-right">
+              <button className="btn btn-ghost btn-sm" onClick={onBack}>← Back</button>
+              <button className="btn btn-primary btn-sm" onClick={onNext}>Next →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main Component ────────────────────────────────────────────────
 export default function Tutorial({
   tutorialStep,     // null = inactive, 0..N-1 = active
   onNext, onBack, onSkip,
   tipsEnabled,
+  showAddModal,     // true when AddPieceModal is open
   // App state for tips
   pieces, walls,
   activeWallId, activeWallImage,
@@ -276,6 +387,9 @@ export default function Tutorial({
     const step = STEPS[tutorialStep]
     if (!step) { setSpotRect(null); return }
 
+    // For piece-photo demo, no spotlight needed (demo modal takes over)
+    if (step.showDemo && !showAddModal) { setSpotRect(null); return }
+
     const measure = () => setSpotRect(measureEl(step.target, step.fallbackTarget))
     measure()
 
@@ -287,7 +401,7 @@ export default function Tutorial({
 
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
-  }, [isActive, tutorialStep])
+  }, [isActive, tutorialStep, showAddModal])
 
   /* ── Active tip ────────────────────────────────────────────── */
   const appState = { pieces, walls, activeWallId, activeWallImage, currentLayout, wallLayouts }
@@ -313,21 +427,38 @@ export default function Tutorial({
     const step = STEPS[tutorialStep]
     if (!step) return null
 
+    // Demo mode: piece-photo step without AddPieceModal open
+    if (step.showDemo && !showAddModal) {
+      return (
+        <>
+          <div className="tut-backdrop" />
+          <DemoPiecePhotoOverlay
+            isMob={isMob}
+            tutorialStep={tutorialStep}
+            onNext={onNext}
+            onBack={onBack}
+            onSkip={onSkip}
+          />
+        </>
+      )
+    }
+
     const desc  = isMob && step.mDesc ? step.mDesc : step.desc
     const style = cardPos(spotRect, step.pos, isMob)
     const pct   = ((tutorialStep + 1) / STEPS.length) * 100
     const isFirst = tutorialStep === 0
     const isLast  = tutorialStep === STEPS.length - 1
+    const hasTarget = Boolean(step.target) && Boolean(spotRect)
 
     return (
       <>
-        {/* Dim backdrop — pointer-events none so app stays usable */}
+        {/* Dim backdrop — pointer-events none so app stays interactive */}
         <div className="tut-backdrop" />
 
-        {/* Spotlight cutout */}
+        {/* Spotlight cutout with pulsing glow to indicate interactivity */}
         <Spotlight rect={spotRect} />
 
-        {/* Step card */}
+        {/* Step card — positioned above or below the target, never on top of it */}
         <div className="tut-card" style={style} role="dialog" aria-modal="false">
           {/* Progress bar */}
           <div className="tut-prog-track">
@@ -343,6 +474,15 @@ export default function Tutorial({
                 <p className="tut-fallback-note">{step.fallbackNote}</p>
               )}
             </div>
+
+            {/* "Try it" prompt when there's an interactive target */}
+            {hasTarget && (
+              <div className="tut-try-hint">
+                <span className="tut-try-arrow">↑</span>
+                {isMob ? 'Tap' : 'Click'} the highlighted button to try it, or hit{' '}
+                <strong>Next →</strong> to continue
+              </div>
+            )}
 
             <div className="tut-nav">
               <button className="tut-exit-btn" onClick={onSkip}>Exit tour</button>

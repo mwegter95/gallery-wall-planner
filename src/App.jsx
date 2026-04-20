@@ -910,6 +910,7 @@ export default function App() {
         onBack={handleTutorialBack}
         onSkip={handleTutorialSkip}
         tipsEnabled={tipsEnabled}
+        showAddModal={showAddModal}
         pieces={pieces}
         walls={walls}
         activeWallId={activeWallId}

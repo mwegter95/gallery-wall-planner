@@ -2934,15 +2934,30 @@ kbd {
 
 /* ── Spotlight cutout ────────────────────────────────────── */
 /* box-shadow creates the "everything else is dimmed" effect  */
+/* Pulsing border + glow makes it clear the element is clickable */
 .tut-spotlight {
   position: fixed;
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.72);
   z-index: 9401;
   pointer-events: none;
+  border: 2px solid rgba(124, 111, 247, 0.9);
+  animation: tut-spot-pulse 1.8s ease-in-out infinite;
   transition: top 0.28s cubic-bezier(0.4,0,0.2,1),
               left 0.28s cubic-bezier(0.4,0,0.2,1),
               width 0.28s cubic-bezier(0.4,0,0.2,1),
               height 0.28s cubic-bezier(0.4,0,0.2,1);
+}
+@keyframes tut-spot-pulse {
+  0%,100% {
+    border-color: rgba(124,111,247,0.9);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.72),
+                0 0  0  0   rgba(124,111,247,0.5);
+  }
+  50% {
+    border-color: rgba(155,143,255,1);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.72),
+                0 0 12px 5px rgba(124,111,247,0.45);
+  }
 }
 
 /* ── Tutorial card ───────────────────────────────────────── */
@@ -3113,6 +3128,147 @@ kbd {
 
 .tut-tip-ok {
   font-size: 11px !important;
+}
+
+/* ── "Try it" interactive hint inside tutorial card ─────── */
+.tut-try-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent-lt);
+  background: var(--accent-dim);
+  border: 1px solid rgba(124,111,247,0.25);
+  border-radius: 6px;
+  padding: 7px 10px;
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+.tut-try-arrow {
+  font-size: 16px;
+  animation: tut-bounce-up 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes tut-bounce-up {
+  0%,100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+
+/* ── Demo overlay (piece-photo step) ────────────────────── */
+.tut-demo-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;  /* card itself has pointer-events: all */
+}
+
+.tut-demo-modal {
+  background: var(--bg-card);
+  border: 1px solid rgba(124,111,247,0.35);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.7), 0 0 0 1px rgba(124,111,247,0.15);
+  overflow: hidden;
+  pointer-events: all;
+  animation: tut-in 0.2s ease;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.tut-demo-badge {
+  font-size: 10px;
+  color: #fbbf24;
+  background: rgba(251,191,36,0.12);
+  border: 1px solid rgba(251,191,36,0.3);
+  border-radius: 20px;
+  padding: 2px 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  display: inline-block;
+}
+
+/* Demo image canvas */
+.tut-demo-canvas-wrap {
+  position: relative;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0a0a18;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  aspect-ratio: 16/9;
+}
+
+.tut-demo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0.92;
+}
+
+/* Simulated corner warp handles */
+.tut-demo-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid white;
+  cursor: grab;
+}
+.tut-demo-handle--tl { top: 8px;  left: 8px;  background: #f87171; }
+.tut-demo-handle--tr { top: 8px;  right: 8px; background: #4ade80; }
+.tut-demo-handle--bl { bottom: 8px; left: 8px;  background: #60a5fa; }
+.tut-demo-handle--br { bottom: 8px; right: 8px; background: #facc15; }
+
+.tut-demo-canvas-label {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.65);
+  color: rgba(255,255,255,0.8);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Tool list */
+.tut-demo-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.tut-demo-tool {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  background: var(--bg-hover);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.tut-demo-tool-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  line-height: 1;
+  margin-top: 1px;
+}
+.tut-demo-tool-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+.tut-demo-tool-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
 /* ── Tutorial / Tips ctrl-btn variants ───────────────────── */
