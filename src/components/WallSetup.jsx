@@ -116,7 +116,7 @@ async function anyImageToJpeg(file) {
 }
 
 
-export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 128, wallHeight = 95, existingImageUrl = null }) {
+export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 120, wallHeight = 96, existingImageUrl = null }) {
   const imgRef            = useRef(null)
   const fileInputRef      = useRef(null)
   const photoWrapRef      = useRef(null)

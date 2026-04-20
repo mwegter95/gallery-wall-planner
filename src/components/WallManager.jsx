@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
-const DEFAULT_W = 128
-const DEFAULT_H = 95
+const DEFAULT_W = 120
+const DEFAULT_H = 96
 
 export default function WallManager({
   walls,

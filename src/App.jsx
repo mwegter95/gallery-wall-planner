@@ -287,8 +287,8 @@ export default function App() {
       const wall = {
         id,
         name: 'My Wall',
-        width:  dims?.width  || 128,
-        height: dims?.height || 95,
+        width:  dims?.width  || 120,
+        height: dims?.height || 96,
         createdAt: Date.now(),
       }
       setWalls(prev => ({ ...prev, [id]: wall }))
@@ -861,10 +861,10 @@ export default function App() {
           onDeselect={() => setSelectedId(null)}
           snapToGrid={snapToGrid}
           gridSize={gridSize}
-          wallWidth={activeWall?.width || 128}
-          wallHeight={activeWall?.height || 95}
+          wallWidth={activeWall?.width || 120}
+          wallHeight={activeWall?.height || 96}
           wallImage={activeWallImage}
-          onCalibrate={() => activeWallId ? openSetup() : setShowWallMgr(true)}
+          onCalibrate={openSetup}
           onUndo={handleUndo}
           canUndo={historyStack.length > 0}
           onLockToggle={handleLockToggle}
@@ -883,8 +883,8 @@ export default function App() {
           onApply={handleWallCalibrated}
           onClose={() => { setShowSetup(false); setSetupWallId(null); calibWallIdRef.current = null }}
           wallName={calibWall?.name || 'Wall'}
-          wallWidth={calibWall?.width || 128}
-          wallHeight={calibWall?.height || 95}
+          wallWidth={calibWall?.width || 120}
+          wallHeight={calibWall?.height || 96}
           existingImageUrl={calibWall?.imageUrl || null}
         />
       )}
