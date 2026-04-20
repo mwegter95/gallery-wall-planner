@@ -61,7 +61,7 @@ async function apiFetch(path, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'X-Device-Token': device,
-    ...(jwt ? { 'Authorization': `Bearer ${jwt}` } : {}),
+    ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
     ...(options.headers || {}),
   }
 
