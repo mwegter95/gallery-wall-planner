@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
 /* ═══════════════════════════════════════════════════════════════════
    TUTORIAL + TIPS SYSTEM
@@ -7,9 +7,71 @@ import { useState, useEffect } from 'react'
    Tips:      contextual, non-blocking just-in-time suggestions
    ═══════════════════════════════════════════════════════════════════ */
 
-// Demo art image: Vermeer's "Girl with a Pearl Earring" — public domain, Wikimedia Commons
-// Shown with a CSS frame so it looks like a real piece hanging on a wall
-const DEMO_ART_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/1665_Girl_with_a_Pearl_Earring.jpg/800px-1665_Girl_with_a_Pearl_Earring.jpg'
+// Demo artwork — drawn as inline SVG so it never has a broken-image state.
+// Scene: a still-life painting (flowers in a vase on a draped table) in a golden frame.
+// Clear foreground/background separation makes the edge and AI demos visually obvious.
+const ART_W = 160, ART_H = 200
+
+function DemoArtSVG({ style, className }) {
+  return (
+    <svg viewBox="0 0 160 200" xmlns="http://www.w3.org/2000/svg"
+         style={{ display: 'block', ...style }} className={className}>
+      {/* Frame */}
+      <rect width="160" height="200" fill="#7A5810" rx="3"/>
+      <rect x="4" y="4" width="152" height="192" fill="#C49A2A" rx="2"/>
+      <rect x="8" y="8" width="144" height="184" fill="#6A4E0E" rx="1"/>
+      {/* Painting background: deep studio blue */}
+      <rect x="11" y="11" width="138" height="178" fill="#1B2B4A"/>
+      {/* Table surface */}
+      <rect x="11" y="128" width="138" height="61" fill="#4A3B2A"/>
+      {/* White cloth on table */}
+      <path d="M 28 128 L 28 189 L 132 189 L 132 128 Q 110 120 80 118 Q 50 120 28 128 Z" fill="#F0EBE0"/>
+      <path d="M 28 128 Q 50 120 80 118 Q 110 120 132 128" fill="none" stroke="#D8D0C0" strokeWidth="1"/>
+      {/* Table edge highlight */}
+      <rect x="11" y="124" width="138" height="7" fill="#6A5540" rx="1"/>
+      {/* Vase — blue ceramic */}
+      <path d="M 68 128 Q 63 112 66 99 Q 68 88 80 86 Q 92 88 94 99 Q 97 112 92 128 Z" fill="#4A6E9A"/>
+      <ellipse cx="80" cy="86" rx="15" ry="5" fill="#608BB8"/>
+      <ellipse cx="80" cy="128" rx="13" ry="4" fill="#3A5E88"/>
+      <path d="M 67 110 Q 80 106 93 110" fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.5"/>
+      {/* Flower stems */}
+      <line x1="80" y1="86" x2="66" y2="62" stroke="#4A7A28" strokeWidth="2.5"/>
+      <line x1="80" y1="86" x2="80" y2="55" stroke="#4A7A28" strokeWidth="2.5"/>
+      <line x1="80" y1="86" x2="94" y2="60" stroke="#4A7A28" strokeWidth="2.5"/>
+      <line x1="80" y1="86" x2="58" y2="70" stroke="#4A7A28" strokeWidth="2"/>
+      <line x1="80" y1="86" x2="102" y2="68" stroke="#4A7A28" strokeWidth="2"/>
+      {/* Red rose left */}
+      <circle cx="66" cy="60" r="10" fill="#A01020"/>
+      <circle cx="66" cy="60" r="7"  fill="#C82030"/>
+      <circle cx="66" cy="60" r="4"  fill="#E84050"/>
+      {/* White daisy centre */}
+      <circle cx="80" cy="53" r="9"  fill="#F8F4EC"/>
+      <circle cx="80" cy="53" r="5"  fill="#FFD700"/>
+      {/* Orange flower right */}
+      <circle cx="94" cy="58" r="10" fill="#CC6000"/>
+      <circle cx="94" cy="58" r="6"  fill="#FF8C20"/>
+      {/* Small purple left */}
+      <circle cx="58" cy="68" r="7"  fill="#7B2D8B"/>
+      <circle cx="58" cy="68" r="4"  fill="#B060C8"/>
+      {/* Small green right */}
+      <circle cx="102" cy="66" r="7" fill="#1E7840"/>
+      <circle cx="102" cy="66" r="4" fill="#38B060"/>
+      {/* Leaves */}
+      <ellipse cx="63" cy="78" rx="9" ry="4" fill="#386820" transform="rotate(-28 63 78)"/>
+      <ellipse cx="97" cy="76" rx="9" ry="4" fill="#386820" transform="rotate(22 97 76)"/>
+    </svg>
+  )
+}
+
+/** Convert (clientX, clientY) to canvas pixel coords, accounting for display scaling */
+function canvasEventPos(e, canvas) {
+  const rect = canvas.getBoundingClientRect()
+  const pt   = e.touches ? e.touches[0] : e
+  return {
+    x: (pt.clientX - rect.left) * (canvas.width  / rect.width),
+    y: (pt.clientY - rect.top)  * (canvas.height / rect.height),
+  }
+}
 
 // ── Step definitions ──────────────────────────────────────────────
 const STEPS = [
@@ -53,13 +115,34 @@ const STEPS = [
     pos: 'bottom',
   },
   {
-    id: 'piece-photo',
+    id: 'piece-photo-warp',
     target: '[data-tutorial="header-add-piece"]',
-    title: '🎨 Photo Editing Tools',
-    desc: 'After uploading a photo two tabs open:\n\n**Perspective Crop** — drag 4 coloured corner handles to flatten perspective on angled shots, then hit Apply Warp\n**Magic Select** — ⚡ Edge Select traces colour from photo borders instantly. Adjust **Tolerance** to grow/shrink the selection. Run ✨ AI Detect for cleaner edges, then fine-tune with **AI Threshold** pip dots\n**Brush** — Smart (edge-aware) or Manual, in Add or Erase mode to paint over any mistakes\n**Sensitivity** — how similarly-coloured neighbouring pixels must be to join the Smart brush selection',
-    mDesc: 'After uploading a photo:\n\n**Perspective Crop** — drag corners to flatten perspective\n**Edge Select** — instant colour-boundary tracing, adjust Tolerance\n**AI Detect** — removes the background; use AI Threshold pips to tighten or loosen\n**Brush** — Smart or Manual, Add or Erase mode to clean up edges',
+    title: '📐 Perspective Warp',
+    desc: 'After uploading a photo, the **Perspective Crop** tab opens. Drag the four coloured corner handles to align exactly with the edges of the artwork in the photo. This flattens any camera angle or wall lean. Click **Apply Warp** when aligned — or **Skip warp** to use the photo as-is.',
+    mDesc: 'Drag the 4 coloured corners to align with the artwork edges, then Apply Warp. Skip warp uses the photo as-is.',
     pos: 'bottom',
-    showDemo: true,   // trigger the demo overlay when modal isn't open
+    showDemo: true,
+    demoType: 'warp',
+  },
+  {
+    id: 'piece-photo-edge',
+    target: '[data-tutorial="header-add-piece"]',
+    title: '✂️ Edge Selection',
+    desc: 'Switch to the **Magic Select** tab if your artwork has an irregular shape — oval frame, cut-out, or non-rectangular piece. Click **⚡ Edge Select** to flood-fill from the photo borders inward. Adjust **Tolerance** to grow or shrink the selection, then paint with the brush in **Add** or **Erase** mode to clean up any missed spots.',
+    mDesc: 'In Magic Select, ⚡ Edge Select traces from the borders. Adjust Tolerance, then brush to clean up.',
+    pos: 'bottom',
+    showDemo: true,
+    demoType: 'edge',
+  },
+  {
+    id: 'piece-photo-ai',
+    target: '[data-tutorial="header-add-piece"]',
+    title: '🤖 AI Background Removal',
+    desc: 'Click **✨ AI Detect** to automatically remove the background using AI. Adjust **AI Threshold** — lower means more aggressive removal (might clip the subject), higher is more conservative (may keep some background). Fine-tune remaining edges with the brush. The checkerboard areas will be transparent on the wall.',
+    mDesc: 'Tap ✨ AI Detect to auto-remove backgrounds. Adjust AI Threshold, then brush-fix any edges.',
+    pos: 'bottom',
+    showDemo: true,
+    demoType: 'ai',
   },
   {
     id: 'drag',
@@ -293,133 +376,303 @@ function TipRing({ rect }) {
   )
 }
 
-// ── Demo overlay for the piece-photo step ────────────────────────
-// Shows a realistic mock of the Magic Select "brush" phase — the state
-// AFTER edge-detection has run, so the user can see the actual controls
-// they'll use to refine the selection.
-function DemoPiecePhotoOverlay({ isMob, tutorialStep, onNext, onBack, onSkip }) {
-  const pct = ((tutorialStep + 1) / STEPS.length) * 100
-  const W   = isMob ? Math.min(340, window.innerWidth - 16) : 520
-
-  // Simulate interactive AI Threshold pip dots
-  const [thresh, setThresh] = useState(6)
-
+// ── Shared demo modal shell ───────────────────────────────────────
+function DemoShell({ W, tutorialStep, title, badge = '📽 Interactive', children, onNext, onBack, onSkip }) {
+  const pct     = ((tutorialStep + 1) / STEPS.length) * 100
+  const isFirst = tutorialStep === 0
+  const isLast  = tutorialStep === STEPS.length - 1
   return (
     <div className="tut-demo-backdrop">
       <div className="tut-demo-modal" style={{ width: W }}>
-        {/* Progress bar */}
         <div className="tut-prog-track">
           <div className="tut-prog-fill" style={{ width: `${pct}%` }} />
         </div>
-
         <div className="tut-card-inner">
-          {/* Header row */}
           <div className="tut-demo-header-row">
             <div className="tut-step-num">{tutorialStep + 1} / {STEPS.length}</div>
-            <span className="tut-demo-badge">📽 Demo</span>
+            <span className="tut-demo-badge">{badge}</span>
           </div>
-          <h3 className="tut-title">🎨 Photo Editing Tools</h3>
-
-          {/* Mock CropModal tab bar */}
-          <div className="tut-demo-cm-tabs">
-            <button className="tut-demo-cm-tab">✂️ Perspective Crop</button>
-            <button className="tut-demo-cm-tab tut-demo-cm-tab--active">✨ Magic Select</button>
-          </div>
-
-          {/* Canvas: checkerboard bg + framed painting with masked edges
-              Simulates "after Edge Select / AI detection" phase            */}
-          <div className="tut-demo-canvas-wrap">
-            {/* Checkerboard shows transparency around removed background */}
-            <div className="tut-demo-checker">
-              {/* CSS frame around the artwork */}
-              <div className="tut-demo-art-frame">
-                <img
-                  src={DEMO_ART_URL}
-                  alt="Vermeer — Girl with a Pearl Earring"
-                  className="tut-demo-art-img"
-                />
-              </div>
-              {/* Simulated green "Add" brush cursor */}
-              <div className="tut-demo-brush-cursor" />
-            </div>
-            <div className="tut-demo-canvas-caption">
-              After detection — checkerboard = transparent background
-            </div>
-          </div>
-
-          {/* Brush controls: accurate match to real MagicSelect UI */}
-          <div className="tut-demo-brush-panel">
-
-            {/* Row 1: brush type + mode */}
-            <div className="tut-demo-brush-row">
-              <button className="tut-demo-mb tut-demo-mb--smart">🪄 Smart</button>
-              <button className="tut-demo-mb">✏️ Manual</button>
-              <div className="tut-demo-mb-sep" />
-              <button className="tut-demo-mb tut-demo-mb--add">＋ Add</button>
-              <button className="tut-demo-mb">✕ Erase</button>
-              <div style={{ flex: 1 }} />
-              <button className="tut-demo-mb">⇄ Invert</button>
-            </div>
-
-            {/* Row 2: brush size */}
-            <div className="tut-demo-ctrl-row">
-              <span className="tut-demo-ctrl-lbl">Size</span>
-              <input type="range" className="tut-demo-slider" min={5} max={100} defaultValue={28} readOnly />
-              <span className="tut-demo-ctrl-val">28px</span>
-            </div>
-
-            {/* Row 3: sensitivity (smart brush — colour match tolerance) */}
-            <div className="tut-demo-ctrl-row">
-              <span className="tut-demo-ctrl-lbl" title="How similarly-coloured neighbouring pixels must be to join the selection">Sensitivity</span>
-              <input type="range" className="tut-demo-slider" min={0} max={80} defaultValue={28} readOnly />
-              <span className="tut-demo-ctrl-val">Balanced</span>
-            </div>
-
-            {/* Row 4: edge-detect Tolerance */}
-            <div className="tut-demo-ctrl-row">
-              <span className="tut-demo-ctrl-lbl" title="How loosely the edge flood-fill grows from photo borders">Tolerance</span>
-              <input type="range" className="tut-demo-slider" min={0} max={80} defaultValue={35} readOnly />
-              <span className="tut-demo-ctrl-val">Balanced</span>
-            </div>
-
-            {/* Row 5: AI Threshold pip dots (interactive in demo!) */}
-            <div className="tut-demo-ctrl-row">
-              <span className="tut-demo-ctrl-lbl" title="How strictly to apply the AI background mask">AI Threshold</span>
-              <div className="tut-demo-pips">
-                {Array.from({ length: 11 }, (_, i) => (
-                  <div
-                    key={i}
-                    className={`tut-demo-pip ${i <= thresh ? 'tut-demo-pip--on' : ''}`}
-                    onClick={() => setThresh(i)}
-                    title={`Set threshold to ${i}`}
-                  />
-                ))}
-              </div>
-              <span className="tut-demo-ctrl-val">
-                {thresh < 4 ? 'Tight' : thresh > 7 ? 'Loose' : 'Balanced'}
-              </span>
-            </div>
-          </div>
-
-          {/* Explanation */}
-          <div className="tut-demo-explain">
-            <strong>Perspective Crop</strong> tab: drag 4 coloured corners to straighten angled photos, then <em>Apply Warp</em>.
-            {' '}<strong>Magic Select</strong> tab: <em>⚡ Edge Select</em> traces colour from photo borders—adjust <strong>Tolerance</strong> to grow or shrink the selection.
-            Run <em>✨ AI Detect</em> for cleaner edges, then use <strong>AI Threshold</strong> and the <strong>brush</strong> to refine.
-            Paint in <em>Add</em> or <em>Erase</em> mode with Smart (edge-aware) or Manual brush.
-          </div>
-
-          {/* Navigation */}
+          <h3 className="tut-title">{title}</h3>
+          {children}
           <div className="tut-nav">
             <button className="tut-exit-btn" onClick={onSkip}>Exit tour</button>
             <div className="tut-nav-right">
-              <button className="btn btn-ghost btn-sm" onClick={onBack}>← Back</button>
-              <button className="btn btn-primary btn-sm" onClick={onNext}>Next →</button>
+              {!isFirst && <button className="btn btn-ghost btn-sm" onClick={onBack}>← Back</button>}
+              <button className="btn btn-primary btn-sm" onClick={onNext}>{isLast ? '✓ Done' : 'Next →'}</button>
             </div>
           </div>
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Demo Step 1: Perspective Warp ─────────────────────────────────
+// Four draggable corner handles with a dashed outline, clip-path updates
+// live. "Apply Warp" shows the corrected result; "Reset" restores skew.
+const INIT_CORNERS = {
+  tl: { x: 18, y: 24 },
+  tr: { x: 148, y: 11 },
+  br: { x: 153, y: 193 },
+  bl: { x:  9, y: 184 },
+}
+const CORNER_COLORS = { tl: '#FF6B6B', tr: '#FFD93D', br: '#6BCB77', bl: '#4D96FF' }
+
+function DemoWarpStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
+  const [corners, setCorners]   = useState(() => ({ ...INIT_CORNERS, tl: { ...INIT_CORNERS.tl }, tr: { ...INIT_CORNERS.tr }, br: { ...INIT_CORNERS.br }, bl: { ...INIT_CORNERS.bl } }))
+  const [dragging, setDragging] = useState(null)
+  const [warped, setWarped]     = useState(false)
+  const wrapRef = useRef(null)
+
+  const toLocal = useCallback((e) => {
+    const rect = wrapRef.current?.getBoundingClientRect()
+    if (!rect) return { x: 0, y: 0 }
+    const pt = e.touches ? e.touches[0] : e
+    const scaleX = ART_W / rect.width
+    const scaleY = ART_H / rect.height
+    return {
+      x: Math.round(Math.max(0, Math.min(ART_W, (pt.clientX - rect.left) * scaleX))),
+      y: Math.round(Math.max(0, Math.min(ART_H, (pt.clientY - rect.top)  * scaleY))),
+    }
+  }, [])
+
+  const onMove = useCallback((e) => {
+    if (!dragging) return
+    e.preventDefault()
+    setCorners(c => ({ ...c, [dragging]: toLocal(e) }))
+  }, [dragging, toLocal])
+
+  const onUp = useCallback(() => setDragging(null), [])
+
+  const { tl, tr, br, bl } = corners
+  const clipPoly = `polygon(${tl.x}px ${tl.y}px, ${tr.x}px ${tr.y}px, ${br.x}px ${br.y}px, ${bl.x}px ${bl.y}px)`
+  const outlinePts = `${tl.x},${tl.y} ${tr.x},${tr.y} ${br.x},${br.y} ${bl.x},${bl.y}`
+
+  return (
+    <DemoShell W={W} tutorialStep={tutorialStep} title="📐 Step 1: Perspective Warp"
+               onNext={onNext} onBack={onBack} onSkip={onSkip}>
+      <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
+        {warped
+          ? '✓ Perspective corrected — the painting is now viewed straight-on.'
+          : 'Drag the coloured corner handles to align with the edges of the artwork. The clip updates live so you can see the correction.'}
+      </p>
+      <div className="tut-demo-two-col">
+        {/* Image area */}
+        <div ref={wrapRef} className="tut-demo-img-wrap"
+             style={{ width: ART_W, height: ART_H, cursor: dragging ? 'grabbing' : 'default' }}
+             onMouseMove={onMove}  onTouchMove={onMove}
+             onMouseUp={onUp}      onTouchEnd={onUp}
+             onMouseLeave={onUp}>
+          <DemoArtSVG style={{ width: ART_W, height: ART_H, clipPath: warped ? 'none' : clipPoly }} />
+          {/* Dashed outline connecting corners */}
+          {!warped && (
+            <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+                 viewBox={`0 0 ${ART_W} ${ART_H}`} preserveAspectRatio="none">
+              <polygon points={outlinePts} fill="none"
+                       stroke="rgba(255,255,255,0.7)" strokeWidth="1.5" strokeDasharray="5,3"/>
+            </svg>
+          )}
+          {/* Corner handles */}
+          {!warped && Object.entries(corners).map(([key, pt]) => (
+            <div key={key} className="tut-demo-corner-handle"
+                 style={{ left: pt.x - 8, top: pt.y - 8, background: CORNER_COLORS[key] }}
+                 onMouseDown={e => { e.preventDefault(); setDragging(key) }}
+                 onTouchStart={e => { e.preventDefault(); setDragging(key) }} />
+          ))}
+          {warped && <div className="tut-demo-warp-badge">✓ Perspective corrected</div>}
+        </div>
+        {/* Controls */}
+        <div className="tut-demo-ctrl-panel">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {!warped
+              ? <button className="btn btn-primary btn-sm" onClick={() => setWarped(true)}>✓ Apply Warp</button>
+              : <button className="btn btn-ghost btn-sm" onClick={() => { setCorners({ tl:{...INIT_CORNERS.tl}, tr:{...INIT_CORNERS.tr}, br:{...INIT_CORNERS.br}, bl:{...INIT_CORNERS.bl} }); setWarped(false) }}>↺ Reset demo</button>
+            }
+            <button className="cm-skip-link" style={{ textAlign: 'left' }} onClick={onNext}>Skip warp →</button>
+          </div>
+          <p className="tut-demo-hint">
+            {warped
+              ? 'Apply Warp flattens the perspective for accurate scale on the wall.'
+              : 'Drag any coloured dot to a corner of the artwork, then Apply Warp.'}
+          </p>
+        </div>
+      </div>
+    </DemoShell>
+  )
+}
+
+// ── Demo Step 2: Edge Selection ───────────────────────────────────
+// Real <canvas> overlay on top of the painting SVG. Tolerance slider
+// redraws the initial edge-flood mask. User can actually paint on the
+// canvas in Add (green) or Erase mode to refine the selection.
+function DemoEdgeStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
+  const canvasRef    = useRef(null)
+  const drawingRef   = useRef(false)
+  const [mode, setMode]               = useState('add')
+  const [brushType, setBrushType]     = useState('smart')
+  const [brushSize, setBrushSize]     = useState(22)
+  const [tolerance, setTolerance]     = useState(28)
+  const [sensitivity, setSensitivity] = useState(25)
+
+  // Redraw initial selection mask whenever tolerance changes
+  const drawMask = useCallback((tol) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const cW = canvas.width, cH = canvas.height
+    ctx.clearRect(0, 0, cW, cH)
+    // How far the edge flood-fill has grown inward from each border
+    const thick = Math.round((tol / 80) * 36) + 5
+    ctx.fillStyle = 'rgba(72, 199, 116, 0.50)'
+    ctx.fillRect(0, 0, cW, thick)                          // top
+    ctx.fillRect(0, cH - thick, cW, thick)                 // bottom
+    ctx.fillRect(0, thick, thick, cH - thick * 2)          // left
+    ctx.fillRect(cW - thick, thick, thick, cH - thick * 2) // right
+  }, [])
+
+  useEffect(() => { drawMask(tolerance) }, [tolerance, drawMask])
+
+  const paint = useCallback((e) => {
+    if (!drawingRef.current) return
+    e.preventDefault()
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const pos = canvasEventPos(e, canvas)
+    ctx.globalCompositeOperation = mode === 'erase' ? 'destination-out' : 'source-over'
+    ctx.fillStyle = 'rgba(72, 199, 116, 0.55)'
+    ctx.beginPath()
+    ctx.arc(pos.x, pos.y, brushSize / 2, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.globalCompositeOperation = 'source-over'
+  }, [mode, brushSize])
+
+  return (
+    <DemoShell W={W} tutorialStep={tutorialStep} title="✂️ Step 2: Edge Selection"
+               onNext={onNext} onBack={onBack} onSkip={onSkip}>
+      <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
+        <strong>⚡ Edge Select</strong> floods from the photo borders inward — green shows what's selected.
+        Drag <strong>Tolerance</strong> to see the mask grow/shrink. Then <strong>paint directly on the image</strong> to add or erase.
+      </p>
+      <div className="tut-demo-two-col">
+        {/* Canvas area */}
+        <div className="tut-demo-img-wrap" style={{ position: 'relative', width: ART_W, height: ART_H, flexShrink: 0 }}>
+          <DemoArtSVG style={{ width: ART_W, height: ART_H, display: 'block' }} />
+          <canvas ref={canvasRef} width={ART_W} height={ART_H}
+                  className="tut-demo-edge-canvas"
+                  style={{ cursor: mode === 'erase' ? 'cell' : 'crosshair', touchAction: 'none' }}
+                  onMouseDown={e => { drawingRef.current = true; paint(e) }}
+                  onMouseMove={paint}
+                  onMouseUp={() => { drawingRef.current = false }}
+                  onMouseLeave={() => { drawingRef.current = false }}
+                  onTouchStart={e => { drawingRef.current = true; paint(e) }}
+                  onTouchMove={paint}
+                  onTouchEnd={() => { drawingRef.current = false }} />
+        </div>
+        {/* Controls */}
+        <div className="tut-demo-ctrl-panel">
+          {/* Brush type */}
+          <div className="tut-demo-brush-row">
+            <button className={`tut-demo-mb ${brushType === 'smart'  ? 'tut-demo-mb--smart'  : ''}`} onClick={() => setBrushType('smart')}>🪄 Smart</button>
+            <button className={`tut-demo-mb ${brushType === 'manual' ? 'tut-demo-mb--smart'  : ''}`} onClick={() => setBrushType('manual')}>✏️ Manual</button>
+          </div>
+          {/* Add / Erase */}
+          <div className="tut-demo-brush-row" style={{ marginTop: 4 }}>
+            <button className={`tut-demo-mb ${mode === 'add'   ? 'tut-demo-mb--add'   : ''}`} onClick={() => setMode('add')}>＋ Add</button>
+            <button className={`tut-demo-mb ${mode === 'erase' ? 'tut-demo-mb--erase' : ''}`} onClick={() => setMode('erase')}>✕ Erase</button>
+          </div>
+          {/* Size */}
+          <div className="tut-demo-ctrl-row" style={{ marginTop: 6 }}>
+            <span className="tut-demo-ctrl-lbl">Size</span>
+            <input type="range" className="tut-demo-slider" min={8} max={60} value={brushSize}
+                   onChange={e => setBrushSize(Number(e.target.value))} />
+            <span className="tut-demo-ctrl-val">{brushSize}px</span>
+          </div>
+          {/* Sensitivity */}
+          <div className="tut-demo-ctrl-row">
+            <span className="tut-demo-ctrl-lbl" title="How similarly-coloured adjacent pixels must be to join the Smart brush stroke">Sensitivity</span>
+            <input type="range" className="tut-demo-slider" min={0} max={80} value={sensitivity}
+                   onChange={e => setSensitivity(Number(e.target.value))} />
+            <span className="tut-demo-ctrl-val">{sensitivity}</span>
+          </div>
+          {/* Tolerance — affects the initial mask */}
+          <div className="tut-demo-ctrl-row">
+            <span className="tut-demo-ctrl-lbl" title="How far Edge Select floods inward from the photo borders">Tolerance</span>
+            <input type="range" className="tut-demo-slider" min={0} max={80} value={tolerance}
+                   onChange={e => setTolerance(Number(e.target.value))} />
+            <span className="tut-demo-ctrl-val">{tolerance}</span>
+          </div>
+          <p className="tut-demo-hint" style={{ marginTop: 4 }}>
+            Green = selected area. Drag Tolerance to see the edge grow. Paint on the image to add or erase selection.
+          </p>
+        </div>
+      </div>
+    </DemoShell>
+  )
+}
+
+// ── Demo Step 3: AI Background Removal ───────────────────────────
+// Painting shown on a checkerboard background with a CSS mask-image.
+// AI Threshold pips change the mask size — lower = more removed.
+function aiMaskCSS(thresh) {
+  // thresh 0–10. Lower = more aggressive = smaller visible ellipse.
+  const sz = 38 + thresh * 4  // 38–78 %
+  const soft = thresh < 3 ? 6 : thresh < 7 ? 14 : 20
+  return `radial-gradient(ellipse ${sz}% ${sz + 8}% at 50% 52%, black ${sz - soft}%, transparent ${sz + soft}%)`
+}
+function aiLabel(t) {
+  if (t <= 1) return 'Very tight — may clip the subject'
+  if (t <= 3) return 'Tight'
+  if (t <= 6) return 'Balanced ✓'
+  if (t <= 8) return 'Loose — may keep background'
+  return 'Very loose — little removed'
+}
+
+function DemoAIStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
+  const [thresh, setThresh] = useState(6)
+  const mask = thresh >= 10 ? 'none' : aiMaskCSS(thresh)
+  return (
+    <DemoShell W={W} tutorialStep={tutorialStep} title="🤖 Step 3: AI Background Removal"
+               onNext={onNext} onBack={onBack} onSkip={onSkip}>
+      <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
+        <strong>✨ AI Detect</strong> auto-removes backgrounds. Click the <strong>AI Threshold</strong> dots
+        below to see how aggressiveness changes the mask — lower removes more, higher keeps more.
+        Checkerboard = transparent.
+      </p>
+      <div className="tut-demo-two-col">
+        {/* Image on checkerboard with CSS mask */}
+        <div className="tut-demo-img-wrap" style={{ position: 'relative', width: ART_W, height: ART_H, flexShrink: 0 }}>
+          <div className="tut-demo-checker" style={{ position: 'absolute', inset: 0, borderRadius: 4 }} />
+          <DemoArtSVG style={{
+            width: ART_W, height: ART_H, display: 'block',
+            position: 'relative', zIndex: 1,
+            WebkitMaskImage: mask,
+            maskImage: mask,
+          }} />
+        </div>
+        {/* Controls */}
+        <div className="tut-demo-ctrl-panel">
+          <div className="tut-demo-ctrl-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
+            <span className="tut-demo-ctrl-lbl" style={{ marginBottom: 2 }}>AI Threshold</span>
+            <div className="tut-demo-pips">
+              {Array.from({ length: 11 }, (_, i) => (
+                <div key={i}
+                     className={`tut-demo-pip ${i <= thresh ? 'tut-demo-pip--on' : ''}`}
+                     onClick={() => setThresh(i)}
+                     title={`Threshold ${i}`} />
+              ))}
+            </div>
+            <span className="tut-demo-ctrl-val" style={{ fontSize: 11 }}>{aiLabel(thresh)}</span>
+          </div>
+          <p className="tut-demo-hint" style={{ marginTop: 8 }}>
+            {thresh <= 3 && <><strong>⚠</strong> Very tight — might cut into the subject. Try raising to 5–7.<br/></>}
+            {thresh > 3 && thresh <= 7 && <><strong>✓</strong> Good balance. Use the brush to touch up any edges AI missed.<br/></>}
+            {thresh > 7 && <><strong>⚠</strong> Loose — some background kept. Lower threshold or use Edge Select.<br/></>}
+            After AI Detect, switch to the brush in Edge Selection to fix any remaining imperfections.
+          </p>
+        </div>
+      </div>
+    </DemoShell>
   )
 }
 
@@ -510,17 +763,14 @@ export default function Tutorial({
     const step = STEPS[tutorialStep]
     if (!step) return null
 
-    // Demo mode: piece-photo step without AddPieceModal open
+    // Demo mode: photo-editing steps when AddPieceModal is not open
     if (step.showDemo && !showAddModal) {
-      return (
-        <DemoPiecePhotoOverlay
-          isMob={isMob}
-          tutorialStep={tutorialStep}
-          onNext={onNext}
-          onBack={onBack}
-          onSkip={onSkip}
-        />
-      )
+      const W     = isMob ? Math.min(360, window.innerWidth - 12) : 520
+      const props = { W, isMob, tutorialStep, onNext, onBack, onSkip }
+      if (step.demoType === 'warp') return <DemoWarpStep  {...props} />
+      if (step.demoType === 'edge') return <DemoEdgeStep  {...props} />
+      if (step.demoType === 'ai')   return <DemoAIStep    {...props} />
+      return null
     }
 
     const desc  = isMob && step.mDesc ? step.mDesc : step.desc

@@ -3431,6 +3431,90 @@ kbd {
   border: 1px solid var(--border);
 }
 
+/* ── New interactive demo components ────────────────────── */
+
+/* Two-column layout: image left, controls right. Wraps to column on mobile */
+.tut-demo-two-col {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+/* Container that holds the DemoArtSVG (and any overlays) */
+.tut-demo-img-wrap {
+  position: relative;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.45);
+  flex-shrink: 0;
+}
+
+/* Controls panel that sits beside the image */
+.tut-demo-ctrl-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Small hint text below controls */
+.tut-demo-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 6px 0 0;
+}
+
+/* ── Warp demo ─────────────────────────────────────── */
+.tut-demo-corner-handle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.9);
+  cursor: grab;
+  z-index: 10;
+  box-shadow: 0 1px 5px rgba(0,0,0,0.5);
+  transition: transform 0.08s;
+}
+.tut-demo-corner-handle:active { cursor: grabbing; transform: scale(1.25); }
+
+.tut-demo-warp-badge {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.48);
+  color: #4ade80;
+  font-weight: 700;
+  font-size: 13px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+/* ── Edge demo ─────────────────────────────────────── */
+.tut-demo-edge-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── AI demo: override .tut-demo-explain to not add margin when used inline ── */
+.tut-demo-ctrl-panel .tut-demo-explain {
+  margin-bottom: 0;
+}
+
+/* ── Erase mode button ─────────────────────────────── */
+.tut-demo-mb--erase {
+  background: rgba(239,68,68,0.18) !important;
+  color: #f87171 !important;
+  border-color: rgba(239,68,68,0.4) !important;
+}
+
 /* ── Tutorial / Tips ctrl-btn variants ───────────────────── */
 .ctrl-btn--tutorial.active {
   color: #a78bfa;
