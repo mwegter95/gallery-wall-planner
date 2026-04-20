@@ -40,10 +40,21 @@ export default function Wall({
   for (let i = 0; i <= wallWidth; i += 12) {
     footTicks.push({ pos: i * scale, label: `${i / 12}'` })
   }
-  // Vertical ruler: 0' at the bottom (floor), wallHeight/12 at the top
+  // Vertical ruler: top tick = actual wall height, then whole-foot marks up from floor
   const footTicksH = []
-  for (let i = 0; i <= wallHeight; i += 12) {
-    footTicksH.push({ pos: i * scale, label: `${(wallHeight - i) / 12}'` })
+  const totalFeetV  = wallHeight / 12
+  const wholeFeetV  = Math.floor(totalFeetV)
+  // Top tick: show actual height (decimal only when wall isn't an exact number of feet)
+  footTicksH.push({
+    pos: 0,
+    label: Number.isInteger(totalFeetV) ? `${totalFeetV}'` : `${totalFeetV.toFixed(1)}'`,
+  })
+  // Whole-foot marks counting up from the floor (0' at floor, 1', 2', …)
+  for (let f = 0; f <= wholeFeetV; f++) {
+    const posFromTop = (wallHeight - f * 12) * scale
+    if (posFromTop > 0.5) {          // skip if it would overlap the top tick
+      footTicksH.push({ pos: posFromTop, label: `${f}'` })
+    }
   }
 
   const handleBgClick = useCallback((e) => {

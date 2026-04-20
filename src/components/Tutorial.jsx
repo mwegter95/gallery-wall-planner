@@ -63,6 +63,258 @@ function DemoArtSVG({ style, className }) {
   )
 }
 
+/* ─────────────────────────────────────────────────────────
+   MEASURE PREP ILLUSTRATIONS
+   Two SVG panels used in the "measure first" tutorial step.
+   ───────────────────────────────────────────────────────── */
+
+// Yellow tape-measure palette
+const TAPE_FILL   = '#F0D830'
+const TAPE_STROKE = '#A88A00'
+const TAPE_TICK   = '#7A6400'
+const EXT_LINE    = '#56567A'
+
+/** Dimension tape helper — draws a tape measure (body + ticks + arrowheads) + extension lines.
+ *  orientation: 'h' | 'v'
+ *  a, b: start and end positions along the main axis
+ *  cross: position on the cross axis (centre of the tape)
+ *  extA, extB: how far back the dashed extension lines reach (in the cross direction)
+ */
+function TapeH({ x1, x2, y, extY1, extY2 }) {
+  const mid  = (x1 + x2) / 2
+  const span = x2 - x1
+  // Extension lines
+  const ext1 = <line key="e1" x1={x1} y1={extY1} x2={x1} y2={y - 1} stroke={EXT_LINE} strokeWidth="0.8" strokeDasharray="3,2"/>
+  const ext2 = <line key="e2" x1={x2} y1={extY1} x2={x2} y2={y - 1} stroke={EXT_LINE} strokeWidth="0.8" strokeDasharray="3,2"/>
+  // Tape body
+  const tape = <rect key="tb" x={x1} y={y - 4} width={span} height={8} rx="2" fill={TAPE_FILL} stroke={TAPE_STROKE} strokeWidth="0.5"/>
+  // Ticks
+  const numTicks = Math.floor(span / 18)
+  const step = span / (numTicks + 1)
+  const ticks = Array.from({ length: numTicks }, (_, i) => (
+    <line key={`t${i}`} x1={x1 + step * (i + 1)} y1={y - 4} x2={x1 + step * (i + 1)} y2={y - 1} stroke={TAPE_TICK} strokeWidth="0.9"/>
+  ))
+  // Arrowheads
+  const arrL = <polygon key="al" points={`${x1},${y} ${x1+7},${y-3} ${x1+7},${y+3}`} fill={TAPE_STROKE}/>
+  const arrR = <polygon key="ar" points={`${x2},${y} ${x2-7},${y-3} ${x2-7},${y+3}`} fill={TAPE_STROKE}/>
+  return <>{ext1}{ext2}{tape}{...ticks}{arrL}{arrR}</>
+}
+
+function TapeV({ y1, y2, x, extX1, extX2 }) {
+  const mid  = (y1 + y2) / 2
+  const span = y2 - y1
+  const ext1 = <line key="e1" x1={extX1} y1={y1} x2={x - 1} y2={y1} stroke={EXT_LINE} strokeWidth="0.8" strokeDasharray="3,2"/>
+  const ext2 = <line key="e2" x1={extX1} y1={y2} x2={x - 1} y2={y2} stroke={EXT_LINE} strokeWidth="0.8" strokeDasharray="3,2"/>
+  const tape = <rect key="tb" x={x - 4} y={y1} width={8} height={span} rx="2" fill={TAPE_FILL} stroke={TAPE_STROKE} strokeWidth="0.5"/>
+  const numTicks = Math.floor(span / 18)
+  const step = span / (numTicks + 1)
+  const ticks = Array.from({ length: numTicks }, (_, i) => (
+    <line key={`t${i}`} x1={x - 4} y1={y1 + step * (i + 1)} x2={x - 1} y2={y1 + step * (i + 1)} stroke={TAPE_TICK} strokeWidth="0.9"/>
+  ))
+  const arrT = <polygon key="at" points={`${x},${y1} ${x-3},${y1+7} ${x+3},${y1+7}`} fill={TAPE_STROKE}/>
+  const arrB = <polygon key="ab" points={`${x},${y2} ${x-3},${y2-7} ${x+3},${y2-7}`} fill={TAPE_STROKE}/>
+  return <>{ext1}{ext2}{tape}{...ticks}{arrT}{arrB}</>
+}
+
+/** Framed art piece with H + V tape measures */
+function MeasureArtSVG() {
+  // Frame: (28,20) → (152,168) = 124 × 148
+  const FX1=28, FY1=20, FX2=152, FY2=168
+  // Tape positions
+  const HY = FY2 + 18          // tape sits below the frame
+  const VX = FX2 + 16          // tape sits right of the frame
+  return (
+    <svg viewBox="0 0 200 220" xmlns="http://www.w3.org/2000/svg"
+         style={{ display: 'block', width: '100%', height: 'auto' }}>
+      <rect width="200" height="220" fill="#13121E" rx="6"/>
+      {/* Section label */}
+      <text x="90" y="13" textAnchor="middle" fill="#7070A0" fontSize="8.5"
+            fontFamily="ui-sans-serif,sans-serif" fontWeight="600" letterSpacing="0.06em">
+        EACH ART PIECE
+      </text>
+      {/* ── Frame ── */}
+      <rect x={FX1} y={FY1} width={FX2-FX1} height={FY2-FY1} rx="3" fill="#7A5810"/>
+      <rect x={FX1+4} y={FY1+4} width={FX2-FX1-8} height={FY2-FY1-8} rx="2" fill="#C49A2A"/>
+      <rect x={FX1+8} y={FY1+8} width={FX2-FX1-16} height={FY2-FY1-16} rx="1" fill="#5A3E0C"/>
+      {/* Canvas */}
+      <rect x={FX1+11} y={FY1+11} width={FX2-FX1-22} height={FY2-FY1-22} fill="#1B2B4A"/>
+      {/* Landscape painting inside frame */}
+      <rect x={FX1+11} y={FY1+11} width={FX2-FX1-22} height={52} fill="#1E3A6A"/>
+      <ellipse cx="72" cy="45" rx="13" ry="5" fill="rgba(255,255,255,0.10)"/>
+      <ellipse cx="118" cy="50" rx="16" ry="5" fill="rgba(255,255,255,0.07)"/>
+      <ellipse cx="60" cy="84" rx="30" ry="13" fill="#2D5820"/>
+      <ellipse cx="110" cy="87" rx="36" ry="11" fill="#366228"/>
+      <rect x={FX1+11} y="92" width={FX2-FX1-22} height={FY2-FY1-11-73} fill="#1C3A16"/>
+      {/* ── Width tape ── */}
+      <TapeH x1={FX1} x2={FX2} y={HY} extY1={FY2} extY2={HY}/>
+      <text x={(FX1+FX2)/2} y={HY+17} textAnchor="middle" fill={TAPE_FILL}
+            fontSize="8.5" fontFamily="ui-monospace,monospace">Width — inches</text>
+      {/* ── Height tape ── */}
+      <TapeV y1={FY1} y2={FY2} x={VX} extX1={FX2} extX2={VX}/>
+      <text x={VX+13} y={(FY1+FY2)/2} textAnchor="middle" fill={TAPE_FILL}
+            fontSize="8.5" fontFamily="ui-monospace,monospace"
+            transform={`rotate(90, ${VX+13}, ${(FY1+FY2)/2})`}>Height — inches</text>
+    </svg>
+  )
+}
+
+/** Room wall scene with dresser + lamp, H + V tape measures */
+function MeasureWallSVG() {
+  // Wall bounds: (34,20) → (204,156) = 170 × 136
+  const WX1=34, WY1=20, WX2=204, WY2=156
+  const FLOOR_H = 18
+  // Tapes
+  const HY  = WY2 + FLOOR_H + 14  // below floor
+  const VX  = WX1 - 16             // left of wall
+  return (
+    <svg viewBox="0 0 240 220" xmlns="http://www.w3.org/2000/svg"
+         style={{ display: 'block', width: '100%', height: 'auto' }}>
+      <rect width="240" height="220" fill="#13121E" rx="6"/>
+      {/* Section label */}
+      <text x="119" y="13" textAnchor="middle" fill="#7070A0" fontSize="8.5"
+            fontFamily="ui-sans-serif,sans-serif" fontWeight="600" letterSpacing="0.06em">
+        YOUR WALL
+      </text>
+      {/* ── Wall surface ── */}
+      <rect x={WX1} y={WY1} width={WX2-WX1} height={WY2-WY1} fill="#C0B09A"/>
+      {/* subtle vertical seam / texture lines */}
+      {[80,126,170].map(x => (
+        <line key={x} x1={x} y1={WY1} x2={x} y2={WY2} stroke="rgba(0,0,0,0.04)" strokeWidth="1"/>
+      ))}
+      {/* ── Floor ── */}
+      <rect x={WX1} y={WY2} width={WX2-WX1} height={FLOOR_H} fill="#8B7050"/>
+      {/* floor plank lines */}
+      {[3,8,13].map(dy => (
+        <line key={dy} x1={WX1} y1={WY2+dy} x2={WX2} y2={WY2+dy} stroke="rgba(255,255,255,0.08)" strokeWidth="0.6"/>
+      ))}
+      {/* ── Baseboard ── */}
+      <rect x={WX1} y={WY2-8} width={WX2-WX1} height={10} fill="#E0D8CC" stroke="#C4BCAF" strokeWidth="0.5"/>
+      {/* ── Dresser ── */}
+      {/* top plate */}
+      <rect x="72" y="94" width="87" height="6" rx="1" fill="#9E6E48"/>
+      {/* body */}
+      <rect x="74" y="99" width="83" height="57" rx="2" fill="#7D5535"/>
+      {/* drawer dividers */}
+      <line x1="74" y1="118" x2="157" y2="118" stroke="#5A3A22" strokeWidth="1"/>
+      <line x1="74" y1="137" x2="157" y2="137" stroke="#5A3A22" strokeWidth="1"/>
+      {/* drawer handles */}
+      {[109,128,147].map(cy => (
+        <ellipse key={cy} cx="115" cy={cy} rx="5" ry="2.5" fill="#C49A3A" stroke="#A07A20" strokeWidth="0.5"/>
+      ))}
+      {/* legs */}
+      <rect x="77" y="154" width="7" height="5" rx="1" fill="#5A3A22"/>
+      <rect x="148" y="154" width="7" height="5" rx="1" fill="#5A3A22"/>
+      {/* ── Floor lamp ── */}
+      {/* base */}
+      <ellipse cx="183" cy="154" rx="9" ry="3.5" fill="#484865"/>
+      {/* pole */}
+      <rect x="181" y="58" width="4" height="97" rx="1" fill="#606080"/>
+      {/* shade outer */}
+      <path d="M 169,58 L 197,58 L 191,80 L 174,80 Z" fill="#F0D070"/>
+      {/* shade inner highlight */}
+      <path d="M 171,58 L 195,58 L 190,78 L 176,78 Z" fill="#FFE090"/>
+      {/* lamp glow */}
+      <ellipse cx="183" cy="80" rx="20" ry="7" fill="rgba(255,230,120,0.13)"/>
+      {/* ── Width tape (wall width) ── */}
+      <TapeH x1={WX1} x2={WX2} y={HY} extY1={WY2+FLOOR_H} extY2={HY}/>
+      <text x={(WX1+WX2)/2} y={HY+17} textAnchor="middle" fill={TAPE_FILL}
+            fontSize="8.5" fontFamily="ui-monospace,monospace">Wall width — inches</text>
+      {/* ── Height tape (wall height only — not floor) ── */}
+      <TapeV y1={WY1} y2={WY2} x={VX} extX1={WX1} extX2={VX}/>
+      <text x={VX-13} y={(WY1+WY2)/2} textAnchor="middle" fill={TAPE_FILL}
+            fontSize="8.5" fontFamily="ui-monospace,monospace"
+            transform={`rotate(-90, ${VX-13}, ${(WY1+WY2)/2})`}>Wall height — inches</text>
+    </svg>
+  )
+}
+
+/** Two-panel SVG showing how to frame a photo: subject centred with space around it to crop */
+function StraightOnSVG() {
+  const GN = '#4ade80'
+  const GD = 'rgba(74,222,128,0.55)'
+
+  // Reusable corner L-mark renderer
+  const LMark = ({ cx, cy, hd, vd }) => (
+    <>
+      <line x1={cx} y1={cy} x2={cx + hd * 7} y2={cy}        stroke={GN} strokeWidth="1.8"/>
+      <line x1={cx} y1={cy} x2={cx}           y2={cy + vd*7} stroke={GN} strokeWidth="1.8"/>
+    </>
+  )
+
+  return (
+    <svg viewBox="0 0 260 120" xmlns="http://www.w3.org/2000/svg"
+         style={{ display: 'block', width: '100%', height: 'auto' }}>
+
+      {/* ── Left panel: art piece ── */}
+      <rect x="2" y="2" width="122" height="116" rx="6" fill="#12111F"/>
+      {/* Lens dot */}
+      <circle cx="63" cy="8.5" r="2.5" fill="#2A2A45"/>
+      <text x="63" y="17" textAnchor="middle" fill="#555588" fontSize="7"
+            fontFamily="ui-sans-serif,sans-serif" fontWeight="700" letterSpacing="0.06em">ART PIECE</text>
+      {/* Frame (the subject) */}
+      <rect x="27" y="21" width="72" height="80" rx="2" fill="#7A5810"/>
+      <rect x="31" y="25" width="64" height="72" rx="1.5" fill="#C49A2A"/>
+      <rect x="35" y="29" width="56" height="64" rx="1" fill="#5A3E0C"/>
+      <rect x="38" y="32" width="50" height="58" fill="#1B2B4A"/>
+      <rect x="38" y="32" width="50" height="24" fill="#1E3A6A"/>
+      <ellipse cx="53" cy="57" rx="17" ry="8" fill="#2D5820"/>
+      <ellipse cx="78" cy="59" rx="20" ry="7" fill="#356228"/>
+      <rect x="38" y="61" width="50" height="29" fill="#1C3A16"/>
+      {/* Crop guide (green dashed) */}
+      <rect x="14" y="11" width="98" height="97" rx="3"
+            fill="rgba(74,222,128,0.05)" stroke={GN} strokeWidth="1.2" strokeDasharray="5,3"/>
+      {/* Corner L-marks */}
+      <LMark cx={14}  cy={11}  hd={1}  vd={1} />
+      <LMark cx={112} cy={11}  hd={-1} vd={1} />
+      <LMark cx={14}  cy={108} hd={1}  vd={-1}/>
+      <LMark cx={112} cy={108} hd={-1} vd={-1}/>
+      {/* Space-indicating arrows between crop guide and panel edge */}
+      <text x="8"   y="62" textAnchor="middle" fill={GD} fontSize="9">←</text>
+      <text x="119" y="62" textAnchor="middle" fill={GD} fontSize="9">→</text>
+      <text x="63"  y="9"  textAnchor="middle" fill={GD} fontSize="8">↑</text>
+      <text x="63"  y="117" textAnchor="middle" fill={GD} fontSize="8">↓</text>
+
+      {/* ── Right panel: wall scene ── */}
+      <rect x="136" y="2" width="122" height="116" rx="6" fill="#12111F"/>
+      <circle cx="197" cy="8.5" r="2.5" fill="#2A2A45"/>
+      <text x="197" y="17" textAnchor="middle" fill="#555588" fontSize="7"
+            fontFamily="ui-sans-serif,sans-serif" fontWeight="700" letterSpacing="0.06em">WALL</text>
+      {/* Wall surface */}
+      <rect x="153" y="21" width="88" height="74" fill="#C0B09A"/>
+      {/* Floor */}
+      <rect x="153" y="95" width="88" height="13" fill="#8B7050"/>
+      {/* Baseboard */}
+      <rect x="153" y="92" width="88" height="5" fill="#DDD5C8"/>
+      {/* Mini dresser */}
+      <rect x="174" y="65" width="30" height="25" rx="1" fill="#7D5535"/>
+      <rect x="172" y="63" width="34" height="4" rx="1" fill="#9A6A45"/>
+      <line x1="174" y1="74" x2="204" y2="74" stroke="#5A3A22" strokeWidth="0.8"/>
+      <ellipse cx="189" cy="70" rx="3" ry="1.5" fill="#C49A3A"/>
+      <ellipse cx="189" cy="80" rx="3" ry="1.5" fill="#C49A3A"/>
+      {/* Mini floor lamp */}
+      <ellipse cx="223" cy="91" rx="5" ry="2" fill="#484865"/>
+      <rect x="221" y="37" width="3" height="55" fill="#606080"/>
+      <path d="M 213,37 L 232,37 L 229,49 L 216,49 Z" fill="#F0D070"/>
+      {/* Small art piece on wall */}
+      <rect x="156" y="28" width="22" height="28" rx="1" fill="#7A5810"/>
+      <rect x="158" y="30" width="18" height="24" fill="#1B2B4A"/>
+      {/* Crop guide */}
+      <rect x="143" y="11" width="108" height="97" rx="3"
+            fill="rgba(74,222,128,0.05)" stroke={GN} strokeWidth="1.2" strokeDasharray="5,3"/>
+      {/* Corner L-marks */}
+      <LMark cx={143} cy={11}  hd={1}  vd={1} />
+      <LMark cx={251} cy={11}  hd={-1} vd={1} />
+      <LMark cx={143} cy={108} hd={1}  vd={-1}/>
+      <LMark cx={251} cy={108} hd={-1} vd={-1}/>
+      {/* Space arrows */}
+      <text x="139" y="62" textAnchor="middle" fill={GD} fontSize="9">←</text>
+      <text x="256" y="62" textAnchor="middle" fill={GD} fontSize="9">→</text>
+      <text x="197" y="9"  textAnchor="middle" fill={GD} fontSize="8">↑</text>
+      <text x="197" y="117" textAnchor="middle" fill={GD} fontSize="8">↓</text>
+    </svg>
+  )
+}
+
 /** Convert (clientX, clientY) to canvas pixel coords, accounting for display scaling */
 function canvasEventPos(e, canvas) {
   const rect = canvas.getBoundingClientRect()
@@ -80,6 +332,22 @@ const STEPS = [
     target: null,
     title: '👋 Welcome to Gallery Wall Planner',
     desc: 'Plan your perfect gallery wall before putting a single nail in. Calibrate your wall with a photo, add your art pieces, drag them to true scale — then hang with confidence.',
+    pos: 'center',
+  },
+  {
+    id: 'measure-prep',
+    target: null,
+    title: '📏 Measure Everything First',
+    showDemo: true,
+    demoType: 'measure',
+    pos: 'center',
+  },
+  {
+    id: 'photo-prep',
+    target: null,
+    title: '📸 Take a Straight-On Photo',
+    showDemo: true,
+    demoType: 'photo',
     pos: 'center',
   },
   {
@@ -405,6 +673,54 @@ function DemoShell({ W, tutorialStep, title, badge = '📽 Interactive', childre
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Prep Step 1: Measure Everything ──────────────────────────────────
+function DemoMeasureStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
+  return (
+    <DemoShell W={W} tutorialStep={tutorialStep} title="📏 Measure Everything First"
+               badge="📋 Before You Start" onNext={onNext} onBack={onBack} onSkip={onSkip}>
+      <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
+        The app lays pieces out at <strong>real-world scale</strong>, so you'll need two sets of measurements in inches. Grab a tape measure before you start:
+      </p>
+      <div className="tut-measure-panels">
+        <div className="tut-measure-panel">
+          <MeasureArtSVG />
+          <p className="tut-measure-caption">
+            Measure <strong>each piece of art</strong> — width and height, edge-to-edge (include the frame if you're hanging the frame).
+          </p>
+        </div>
+        <div className="tut-measure-panel">
+          <MeasureWallSVG />
+          <p className="tut-measure-caption">
+            Measure your <strong>wall</strong> — the full width and height of the section you're hanging on.
+          </p>
+        </div>
+      </div>
+      <div className="tut-measure-tip-row">
+        <span className="tut-measure-photo-icon">📝</span>
+        <span>
+          Make sure to write your measurements down! Or, use my favorite hack — <strong>take a picture of the measuring tape right next to the wall or piece</strong> so you always have it.
+        </span>
+      </div>
+    </DemoShell>
+  )
+}
+
+// ── Prep Step 2: Take a Straight-On Photo ────────────────────────────
+function DemoPhotoStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
+  return (
+    <DemoShell W={W} tutorialStep={tutorialStep} title="📸 Take a Straight-On Photo"
+               badge="📋 Before You Start" onNext={onNext} onBack={onBack} onSkip={onSkip}>
+      <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
+        You'll upload a photo of your wall (and optionally each piece). A flat, head-on shot gives the best results — but more importantly, <strong>leave space around all sides</strong> of the subject so you can crop tight in the next step.
+      </p>
+      <StraightOnSVG />
+      <p className="tut-demo-explain" style={{ margin: '8px 0 0', fontSize: 11 }}>
+        The green dashes show where you'll crop. Anything outside them gets trimmed — so the more breathing room you give yourself, the more control you have.
+      </p>
+    </DemoShell>
   )
 }
 
@@ -768,9 +1084,11 @@ export default function Tutorial({
     if (step.showDemo && !showAddModal) {
       const W     = isMob ? Math.min(360, window.innerWidth - 12) : 520
       const props = { W, isMob, tutorialStep, onNext, onBack, onSkip }
-      if (step.demoType === 'warp') return <DemoWarpStep  {...props} />
-      if (step.demoType === 'edge') return <DemoEdgeStep  {...props} />
-      if (step.demoType === 'ai')   return <DemoAIStep    {...props} />
+      if (step.demoType === 'measure') return <DemoMeasureStep {...props} />
+      if (step.demoType === 'photo')   return <DemoPhotoStep   {...props} />
+      if (step.demoType === 'warp')   return <DemoWarpStep    {...props} />
+      if (step.demoType === 'edge')   return <DemoEdgeStep    {...props} />
+      if (step.demoType === 'ai')     return <DemoAIStep      {...props} />
       return null
     }
 

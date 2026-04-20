@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from 'react'
 export default function Sidebar({
   pieces, selectedId, onSelect, onDelete, onEdit, onBringForward, onSendBackward,
   snapToGrid, onSnapToggle, gridSize, onGridSizeChange,
-  layouts, wallName, currentLayout, onSaveLayout, onLoadLayout, onDeleteLayout,
+  layouts, wallName, currentLayout, onSaveLayout, saveFlash = false, onLoadLayout, onDeleteLayout,
   onAddPiece, onClearAll,
   library = {}, onAddFromLibrary, onDeleteFromLibrary,
   isOpen = false, onRequestClose,
@@ -207,13 +207,18 @@ export default function Sidebar({
           {currentLayout && (
             <div className="layout-current-banner">
               <span className="layout-current-name">✓ {currentLayout}</span>
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={() => onSaveLayout(currentLayout)}
-                title="Save current arrangement into this layout"
-              >
-                💾 Overwrite
-              </button>
+              {saveFlash
+                ? <span className="layout-saved-flash">✓ Saved!</span>
+                : (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => onSaveLayout(currentLayout)}
+                    title="Save current arrangement into this layout"
+                  >
+                    💾 Overwrite
+                  </button>
+                )
+              }
             </div>
           )}
 
@@ -228,7 +233,10 @@ export default function Sidebar({
               onChange={e => { setLayoutName(e.target.value); setSaveError('') }}
               onKeyDown={e => e.key === 'Enter' && handleSave()}
             />
-            <button className="btn btn-primary btn-sm" onClick={handleSave}>Save</button>
+            {saveFlash
+              ? <span className="layout-saved-flash">✓ Saved!</span>
+              : <button className="btn btn-primary btn-sm" onClick={handleSave}>Save</button>
+            }
             {saveError && <span className="field-error">{saveError}</span>}
           </div>
           </div>

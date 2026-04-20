@@ -3526,6 +3526,85 @@ kbd {
   border-color: rgba(239,68,68,0.4) !important;
 }
 
+/* ── Measure-prep step ───────────────────────────────────── */
+.tut-measure-panels {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.tut-measure-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tut-measure-panel svg {
+  border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.45);
+}
+
+.tut-measure-caption {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+  text-align: center;
+}
+
+.tut-measure-photo-icon { font-size: 18px; flex-shrink: 0; line-height: 1.3; }
+
+.tut-measure-tip-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: rgba(124,111,247,0.10);
+  border: 1px solid rgba(124,111,247,0.25);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-top: 10px;
+}
+.tut-measure-tip-row strong { color: var(--text-primary); }
+
+@media (max-width: 480px) {
+  .tut-measure-panels { flex-direction: column; }
+  .tut-measure-panel svg { max-height: 160px; }
+}
+
+/* ── Save-flash: green confirmation on the header button ─────────── */
+.btn--saved {
+  color: #4ade80 !important;
+  border-color: rgba(74,222,128,0.4) !important;
+  background: rgba(74,222,128,0.08) !important;
+  pointer-events: none;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+
+/* Inline "✓ Saved!" flash in the sidebar layouts section */
+.layout-saved-flash {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4ade80;
+  letter-spacing: 0.02em;
+  padding: 3px 8px;
+  background: rgba(74,222,128,0.10);
+  border: 1px solid rgba(74,222,128,0.35);
+  border-radius: 6px;
+  white-space: nowrap;
+  animation: savedFlashIn 0.18s ease;
+}
+@keyframes savedFlashIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+
 /* ── Tutorial / Tips ctrl-btn variants ───────────────────── */
 .ctrl-btn--tutorial.active {
   color: #a78bfa;

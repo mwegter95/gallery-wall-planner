@@ -53,6 +53,7 @@ export default function App() {
   const [saveAsName,     setSaveAsName]     = useState('')
   const [saveAsError,    setSaveAsError]    = useState('')
   const [isSaving,       setIsSaving]       = useState(false)
+  const [saveFlash,      setSaveFlash]      = useState(false)
   const [library,        setLibrary]        = useState({})
   const [sidebarOpen,    setSidebarOpen]    = useState(false)
   const [sidebarForceSection, setSidebarForceSection] = useState(null)
@@ -63,7 +64,8 @@ export default function App() {
   const [tipsEnabled,    setTipsEnabled]    = useState(() =>
     localStorage.getItem(TIPS_KEY) !== 'false'    // default: true
   )
-  const saveMenuRef    = useRef(null)
+  const saveMenuRef      = useRef(null)
+  const saveFlashTimer   = useRef(null)
   const hasLoadedRef   = useRef(false)   // becomes true after first successful backend load
   const piecesRef      = useRef(pieces)  // always-current pieces for stable pushHistory callback
   const calibWallIdRef = useRef(null)    // ref-based tracking of which wall is being calibrated
@@ -652,6 +654,9 @@ export default function App() {
       console.error('Save layout failed:', err)
     } finally {
       setIsSaving(false)
+      setSaveFlash(true)
+      if (saveFlashTimer.current) clearTimeout(saveFlashTimer.current)
+      saveFlashTimer.current = setTimeout(() => setSaveFlash(false), 2200)
     }
   }, [activeWallId, pieces])
 
@@ -754,16 +759,19 @@ export default function App() {
           {/* Save Layout — always visible — shows popover */}
           <div className="header-save-wrap" ref={saveMenuRef} data-tutorial="header-save">
             <button
-              className="btn btn-ghost btn-sm"
+              className={`btn btn-ghost btn-sm${saveFlash ? ' btn--saved' : ''}`}
               onClick={() => {
-                if (pieces.length === 0 || isSaving) return
+                if (pieces.length === 0 || isSaving || saveFlash) return
                 setSaveMenuOpen(v => !v)
                 setSaveAsError('')
               }}
               disabled={pieces.length === 0 || isSaving}
               title="Save current layout"
             >
-              {isSaving ? '⏳' : '💾'}<span className="btn-label">{isSaving ? ' Saving…' : ` ${currentLayout ? currentLayout : 'Save Layout'}`}</span>
+              {isSaving ? '⏳' : saveFlash ? '✓' : '💾'}
+              <span className="btn-label">
+                {isSaving ? ' Saving…' : saveFlash ? ' Saved!' : ` ${currentLayout || 'Save Layout'}`}
+              </span>
             </button>
             {saveMenuOpen && (
               <div className="header-save-menu">
@@ -836,6 +844,7 @@ export default function App() {
           wallName={activeWall?.name}
           currentLayout={currentLayout}
           onSaveLayout={saveLayout}
+          saveFlash={saveFlash}
           onLoadLayout={loadLayout}
           onDeleteLayout={deleteLayout}
           onAddPiece={() => setShowAddModal(true)}
