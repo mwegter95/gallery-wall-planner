@@ -6,6 +6,7 @@ const DEFAULT_H = 95
 export default function WallManager({
   walls,
   wallImages = {},
+  allLayouts = {},
   activeWallId,
   onSelect,
   onCreate,
@@ -60,6 +61,7 @@ export default function WallManager({
 
           {wallList.map((wall) => {
             const isActive = wall.id === activeWallId
+            const layoutCount = Object.keys(allLayouts[wall.id] || {}).length
 
             return (
               <div key={wall.id} className={`wm-wall-row ${isActive ? 'wm-wall-row--active' : ''}`}>
@@ -96,6 +98,9 @@ export default function WallManager({
                     </span>
                   )}
                   <span className="wm-wall-dims">{wall.width}" × {wall.height}"</span>
+                  <span className="wm-layout-count">
+                    {layoutCount === 0 ? 'No saved layouts' : `${layoutCount} layout${layoutCount !== 1 ? 's' : ''}`}
+                  </span>
                   {!wallImages[wall.id] && (
                     <span className="wm-no-photo">No photo yet</span>
                   )}

@@ -2181,6 +2181,10 @@ kbd {
   color: var(--text-muted);
   font-family: ui-monospace, monospace;
 }
+.wm-layout-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
 .wm-no-photo {
   font-size: 11px;
   color: var(--warning, #f59e0b);

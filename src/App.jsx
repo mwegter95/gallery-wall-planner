@@ -778,6 +778,7 @@ export default function App() {
         <WallManager
           walls={walls}
           wallImages={wallImages}
+          allLayouts={allLayouts}
           activeWallId={activeWallId}
           onSelect={handleSelectWall}
           onCreate={handleCreateWall}
