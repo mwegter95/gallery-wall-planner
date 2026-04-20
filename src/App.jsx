@@ -122,12 +122,27 @@ export default function App() {
         const wallsObj   = snap.walls      || {}
         const layoutsObj = snap.allLayouts || {}
         const libObj     = snap.library    || {}
+        // Apply fixUrl to all image paths so relative /uploads/... URLs become absolute
+        for (const w of Object.values(wallsObj)) {
+          if (w.imageUrl) w.imageUrl = api.fixUrl(w.imageUrl)
+        }
+        for (const p of Object.values(libObj)) {
+          if (p.image) p.image = api.fixUrl(p.image)
+        }
+        for (const wl of Object.values(layoutsObj)) {
+          for (const pieces of Object.values(wl)) {
+            for (const p of pieces) { if (p.image) p.image = api.fixUrl(p.image) }
+          }
+        }
         setWalls(wallsObj)
         setAllLayouts(layoutsObj)
         setLibrary(libObj)
         // Restore unsaved canvas pieces so work survives refresh while offline
         if (snap.activePieces?.length > 0) {
-          setPieces(snap.activePieces)
+          const fixedPieces = snap.activePieces.map(p =>
+            p.image ? { ...p, image: api.fixUrl(p.image) } : p
+          )
+          setPieces(fixedPieces)
           setCurrentLayout(snap.currentLayout || '')
         }
         const savedActive = snap.activeWallId || localStorage.getItem(ACTIVE_WALL_KEY)
@@ -377,8 +392,12 @@ export default function App() {
     // ── Step 3: Restore unsaved canvas pieces (pieces placed but not yet in a
     //    named layout). loadAppState doesn't touch pieces state, but we want the
     //    user's in-progress work to still be on the canvas after login. ──────────
+    //    Apply fixUrl so any relative /uploads/... paths become absolute.
     if (localSnap?.activePieces?.length > 0) {
-      setPieces(localSnap.activePieces)
+      const fixedPieces = localSnap.activePieces.map(p =>
+        p.image ? { ...p, image: api.fixUrl(p.image) } : p
+      )
+      setPieces(fixedPieces)
       setCurrentLayout(localSnap.currentLayout || '')
     }
   }, [loadAppState])
