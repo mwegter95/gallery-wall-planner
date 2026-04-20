@@ -430,16 +430,13 @@ export default function Tutorial({
     // Demo mode: piece-photo step without AddPieceModal open
     if (step.showDemo && !showAddModal) {
       return (
-        <>
-          <div className="tut-backdrop" />
-          <DemoPiecePhotoOverlay
-            isMob={isMob}
-            tutorialStep={tutorialStep}
-            onNext={onNext}
-            onBack={onBack}
-            onSkip={onSkip}
-          />
-        </>
+        <DemoPiecePhotoOverlay
+          isMob={isMob}
+          tutorialStep={tutorialStep}
+          onNext={onNext}
+          onBack={onBack}
+          onSkip={onSkip}
+        />
       )
     }
 
@@ -452,10 +449,7 @@ export default function Tutorial({
 
     return (
       <>
-        {/* Dim backdrop — pointer-events none so app stays interactive */}
-        <div className="tut-backdrop" />
-
-        {/* Spotlight cutout with pulsing glow to indicate interactivity */}
+        {/* Spotlight highlight ring — no backdrop, nothing is dimmed */}
         <Spotlight rect={spotRect} />
 
         {/* Step card — positioned above or below the target, never on top of it */}

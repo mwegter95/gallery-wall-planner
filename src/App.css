@@ -2923,51 +2923,59 @@ kbd {
    TUTORIAL + TIPS
    ══════════════════════════════════════════════════════════════ */
 
-/* ── Tutorial backdrop (non-blocking dim layer) ─────────── */
+/* ── Tutorial backdrop — NOT rendered; kept only as reference ─ */
+/* The dark overlay approach was removed because it:            */
+/*   1. Makes highlighted buttons look dimmed even though they  */
+/*      are clickable.                                          */
+/*   2. Covers any modal that opens when the user clicks a      */
+/*      highlighted button (AuthModal, WallManager, etc.)       */
+/* Instead we use a pulsing highlight ring + a floating card.  */
 .tut-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.70);
-  z-index: 9400;
-  pointer-events: none;   /* app stays interactive during tour */
+  display: none;   /* intentionally hidden — do not re-enable */
 }
 
-/* ── Spotlight cutout ────────────────────────────────────── */
-/* box-shadow creates the "everything else is dimmed" effect  */
-/* Pulsing border + glow makes it clear the element is clickable */
+/* ── Spotlight highlight ring ────────────────────────────── */
+/* Sits on top of everything, no background, no dimming.     */
+/* A pulsing border makes the target element obvious without */
+/* obscuring anything.                                        */
 .tut-spotlight {
   position: fixed;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.72);
-  z-index: 9401;
+  z-index: 9500;           /* above modals so the ring is always visible */
   pointer-events: none;
-  border: 2px solid rgba(124, 111, 247, 0.9);
+  border-radius: 8px;
+  border: 2.5px solid var(--accent-lt);
+  background: rgba(124, 111, 247, 0.07);   /* very faint tint inside ring */
   animation: tut-spot-pulse 1.8s ease-in-out infinite;
-  transition: top 0.28s cubic-bezier(0.4,0,0.2,1),
+  transition: top  0.28s cubic-bezier(0.4,0,0.2,1),
               left 0.28s cubic-bezier(0.4,0,0.2,1),
-              width 0.28s cubic-bezier(0.4,0,0.2,1),
+              width  0.28s cubic-bezier(0.4,0,0.2,1),
               height 0.28s cubic-bezier(0.4,0,0.2,1);
 }
 @keyframes tut-spot-pulse {
   0%,100% {
     border-color: rgba(124,111,247,0.9);
-    box-shadow: 0 0 0 9999px rgba(0,0,0,0.72),
-                0 0  0  0   rgba(124,111,247,0.5);
+    box-shadow: 0 0  0  0   rgba(124,111,247,0.45),
+                0 0 10px 2px rgba(124,111,247,0.25);
   }
   50% {
     border-color: rgba(155,143,255,1);
-    box-shadow: 0 0 0 9999px rgba(0,0,0,0.72),
-                0 0 12px 5px rgba(124,111,247,0.45);
+    box-shadow: 0 0  0  7px rgba(124,111,247,0),
+                0 0 18px 6px rgba(124,111,247,0.4);
   }
 }
 
 /* ── Tutorial card ───────────────────────────────────────── */
+/* Needs to stand out without a backdrop — use strong shadow  */
+/* and a solid background.                                    */
 .tut-card {
   position: fixed;         /* coordinates set inline by JS    */
-  z-index: 9500;
-  background: var(--bg-card);
-  border: 1px solid rgba(124,111,247,0.35);
+  z-index: 9600;           /* above the spotlight ring         */
+  background: var(--bg-dark);
+  border: 1.5px solid rgba(124,111,247,0.5);
   border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(124,111,247,0.15);
+  box-shadow: 0 16px 52px rgba(0,0,0,0.85),
+              0  4px 16px rgba(0,0,0,0.5),
+              0  0   0 1px rgba(124,111,247,0.2);
   overflow: hidden;
   animation: tut-in 0.18s ease;
   pointer-events: all;
@@ -3060,7 +3068,7 @@ kbd {
 .tut-tip-ring {
   position: fixed;
   border-radius: 8px;
-  z-index: 9300;
+  z-index: 9500;
   pointer-events: none;
   border: 2px solid var(--accent-lt);
   animation: tut-ring-pulse 1.8s ease-in-out infinite;
@@ -3073,7 +3081,7 @@ kbd {
 /* ── Tip card ─────────────────────────────────────────────── */
 .tut-tip-card {
   position: fixed;
-  z-index: 9500;
+  z-index: 9600;
   background: var(--bg-card);
   border: 1px solid rgba(124,111,247,0.3);
   border-radius: 10px;
@@ -3158,7 +3166,7 @@ kbd {
 .tut-demo-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 9500;
+  z-index: 9600;
   display: flex;
   align-items: center;
   justify-content: center;
