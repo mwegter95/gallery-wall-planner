@@ -215,6 +215,7 @@ const STEPS = [
 
 export const TUTORIAL_STEP_COUNT = STEPS.length
 export const TUTORIAL_LOCK_STEP  = STEPS.findIndex(s => s.id === 'lock')
+export const TUTORIAL_GRID_STEP  = STEPS.findIndex(s => s.id === 'grid')
 
 // ── Tips definitions ──────────────────────────────────────────────
 const TIPS = [

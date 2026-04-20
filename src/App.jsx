@@ -5,7 +5,7 @@ import AddPieceModal from './components/AddPieceModal'
 import WallSetup from './components/WallSetup'
 import WallManager from './components/WallManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
-import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP } from './components/Tutorial'
+import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP } from './components/Tutorial'
 import * as api from './utils/api'
 import './App.css'
 
@@ -462,6 +462,8 @@ export default function App() {
   const handleTutorialNext = useCallback(() => {
     setTutorialStep(prev => {
       if (prev === null) return null
+      // Close sidebar when leaving the grid/snap step (it was force-opened for that step)
+      if (prev === TUTORIAL_GRID_STEP) setSidebarOpen(false)
       const next = prev + 1
       if (next >= TUTORIAL_STEP_COUNT) {
         localStorage.setItem(TUTORIAL_KEY, 'true')
@@ -472,7 +474,12 @@ export default function App() {
   }, [])
 
   const handleTutorialBack = useCallback(() => {
-    setTutorialStep(prev => (prev !== null && prev > 0 ? prev - 1 : prev))
+    setTutorialStep(prev => {
+      if (prev === null || prev <= 0) return prev
+      // Close sidebar when leaving the grid/snap step in either direction
+      if (prev === TUTORIAL_GRID_STEP) setSidebarOpen(false)
+      return prev - 1
+    })
   }, [])
 
   const handleTutorialSkip = useCallback(() => {

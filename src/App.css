@@ -3024,7 +3024,7 @@ kbd {
 }
 
 .tut-step-num {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--accent-lt);
   font-family: ui-monospace, monospace;
   margin-bottom: 6px;
@@ -3032,17 +3032,17 @@ kbd {
 }
 
 .tut-title {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 700;
   color: var(--text-primary);
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   line-height: 1.3;
 }
 
 .tut-desc {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
-  line-height: 1.55;
+  line-height: 1.6;
   margin-bottom: 16px;
 }
 .tut-p {
@@ -3421,9 +3421,9 @@ kbd {
 
 /* Explanation text */
 .tut-demo-explain {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.55;
   background: var(--bg-hover);
   border-radius: 7px;
   padding: 8px 10px;
