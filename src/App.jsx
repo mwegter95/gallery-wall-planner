@@ -316,16 +316,46 @@ export default function App() {
       try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
     })()
 
-    // ── Step 1: Unconditionally upsert ALL local snapshot data to the backend.
-    //    The server uses ON CONFLICT DO UPDATE so duplicate pushes are safe.
-    //    We await all writes so the subsequent loadAppState sees the full picture. ──
-    if (localSnap) {
+    // ── Step 1: Fetch server's current state so we know what already exists.
+    //    Only push local items whose IDs are NOT on the server — this prevents
+    //    stale local snapshots from overwriting richer server data (e.g. after
+    //    a bulk migration that populated images/transparency the local snap lacks).
+    let serverState = null
+    try { serverState = await api.loadState() } catch { /* offline — skip merge */ }
+
+    if (localSnap && serverState) {
       const pushOps = []
+      const serverWalls   = serverState.walls   || {}
+      const serverLayouts = serverState.layouts || {}
+      const serverLib     = serverState.library || {}
 
       for (const wall of Object.values(localSnap.walls || {})) {
-        // Don't push walls that carry a data-URL imageUrl — strip it first
-        // (the image upload path handles that separately; walls with data-URL
-        //  imageUrls are oversized and the upload would have failed anyway).
+        if (serverWalls[wall.id]) continue  // server already has this wall — don't overwrite
+        const wallToSync = { ...wall }
+        if (wallToSync.imageUrl?.startsWith('data:')) delete wallToSync.imageUrl
+        pushOps.push(api.putWall(wallToSync))
+      }
+      for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
+        const serverWallLayouts = serverLayouts[wallId] || {}
+        for (const [name, pcs] of Object.entries(wLayouts || {})) {
+          if (serverWallLayouts[name]) continue  // layout already on server — skip
+          pushOps.push(api.putLayout(wallId, name, pcs))
+        }
+      }
+      for (const piece of Object.values(localSnap.library || {})) {
+        if (serverLib[piece.id]) continue  // library piece already on server — skip
+        pushOps.push(api.putLibraryPiece(piece))
+      }
+
+      if (pushOps.length > 0) {
+        const results = await Promise.allSettled(pushOps)
+        const failures = results.filter(r => r.status === 'rejected')
+        if (failures.length) console.warn('Some sync writes failed:', failures)
+      }
+    } else if (localSnap && !serverState) {
+      // Offline or server unreachable — push everything as before so work isn't lost
+      const pushOps = []
+      for (const wall of Object.values(localSnap.walls || {})) {
         const wallToSync = { ...wall }
         if (wallToSync.imageUrl?.startsWith('data:')) delete wallToSync.imageUrl
         pushOps.push(api.putWall(wallToSync))
@@ -338,12 +368,7 @@ export default function App() {
       for (const piece of Object.values(localSnap.library || {})) {
         pushOps.push(api.putLibraryPiece(piece))
       }
-
-      if (pushOps.length > 0) {
-        const results = await Promise.allSettled(pushOps)
-        const failures = results.filter(r => r.status === 'rejected')
-        if (failures.length) console.warn('Some sync writes failed:', failures)
-      }
+      if (pushOps.length > 0) await Promise.allSettled(pushOps)
     }
 
     // ── Step 2: Reload full state from backend (now includes all synced data) ──
