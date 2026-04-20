@@ -5,8 +5,12 @@ import AddPieceModal from './components/AddPieceModal'
 import WallSetup from './components/WallSetup'
 import WallManager from './components/WallManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
+import Tutorial, { TUTORIAL_STEP_COUNT } from './components/Tutorial'
 import * as api from './utils/api'
 import './App.css'
+
+const TUTORIAL_KEY = 'gwp-tutorial-done'
+const TIPS_KEY     = 'gwp-tips-enabled'
 
 /* ── Only tiny UI preference stays in localStorage ─────── */
 const ACTIVE_WALL_KEY    = 'gwp-active-wall'
@@ -52,6 +56,12 @@ export default function App() {
   const [library,        setLibrary]        = useState({})
   const [sidebarOpen,    setSidebarOpen]    = useState(false)
   const [historyStack,   setHistoryStack]   = useState([])   // undo history (array of piece snapshots)
+  const [tutorialStep,   setTutorialStep]   = useState(() =>
+    localStorage.getItem(TUTORIAL_KEY) === 'true' ? null : 0
+  )
+  const [tipsEnabled,    setTipsEnabled]    = useState(() =>
+    localStorage.getItem(TIPS_KEY) !== 'false'    // default: true
+  )
   const saveMenuRef    = useRef(null)
   const hasLoadedRef   = useRef(false)   // becomes true after first successful backend load
   const piecesRef      = useRef(pieces)  // always-current pieces for stable pushHistory callback
@@ -443,6 +453,41 @@ export default function App() {
     })
   }, [])
 
+  /* ── Tutorial / Tips ──────────────────────────────────── */
+  const handleTutorialNext = useCallback(() => {
+    setTutorialStep(prev => {
+      if (prev === null) return null
+      const next = prev + 1
+      if (next >= TUTORIAL_STEP_COUNT) {
+        localStorage.setItem(TUTORIAL_KEY, 'true')
+        return null
+      }
+      return next
+    })
+  }, [])
+
+  const handleTutorialBack = useCallback(() => {
+    setTutorialStep(prev => (prev !== null && prev > 0 ? prev - 1 : prev))
+  }, [])
+
+  const handleTutorialSkip = useCallback(() => {
+    localStorage.setItem(TUTORIAL_KEY, 'true')
+    setTutorialStep(null)
+  }, [])
+
+  const handleStartTutorial = useCallback(() => {
+    localStorage.removeItem(TUTORIAL_KEY)
+    setTutorialStep(0)
+  }, [])
+
+  const handleToggleTips = useCallback(() => {
+    setTipsEnabled(prev => {
+      const next = !prev
+      localStorage.setItem(TIPS_KEY, String(next))
+      return next
+    })
+  }, [])
+
   /* ── Piece operations ─────────────────────────────── */
   const addPiece = useCallback((data) => {
     pushHistory()
@@ -678,6 +723,7 @@ export default function App() {
         <div className="header-brand">
           <button
             className="hamburger-btn"
+            data-tutorial="sidebar-toggle"
             onClick={() => setSidebarOpen(v => !v)}
             aria-label="Toggle sidebar"
           >☰</button>
@@ -685,6 +731,7 @@ export default function App() {
           <span className="brand-name">Gallery Wall Planner</span>
           <button
             className="wall-badge wall-badge--btn"
+            data-tutorial="header-wall-badge"
             onClick={() => setShowWallMgr(true)}
             title="Manage walls"
           >
@@ -694,7 +741,7 @@ export default function App() {
         </div>
         <div className="header-actions">
           {/* Save Layout — always visible — shows popover */}
-          <div className="header-save-wrap" ref={saveMenuRef}>
+          <div className="header-save-wrap" ref={saveMenuRef} data-tutorial="header-save">
             <button
               className="btn btn-ghost btn-sm"
               onClick={() => {
@@ -739,19 +786,22 @@ export default function App() {
 
           <button
             className={`btn btn-ghost btn-sm ${!activeWallImage ? 'btn-calibrate-pulse' : ''}`}
+            data-tutorial="header-calibrate"
             onClick={() => openSetup()}
             title={activeWallImage ? 'Re-calibrate wall perspective' : 'Calibrate wall perspective'}
           >
             {activeWallImage ? '⚙' : '📐'}<span className="btn-label"> {activeWallImage ? 'Recalibrate' : 'Calibrate Wall'}</span>
           </button>
-          <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
+          <button className="btn btn-primary" data-tutorial="header-add-piece" onClick={() => setShowAddModal(true)}>
             +<span className="btn-label"> Add Piece</span>
           </button>
-          <UserBadge
-            user={authUser}
-            onLoginClick={() => setShowAuth(true)}
-            onLogout={handleLogout}
-          />
+          <div data-tutorial="header-login">
+            <UserBadge
+              user={authUser}
+              onLoginClick={() => setShowAuth(true)}
+              onLogout={handleLogout}
+            />
+          </div>
         </div>
       </header>
 
@@ -804,6 +854,10 @@ export default function App() {
           onLockToggle={handleLockToggle}
           onMoveStart={pushHistory}
           onResizeStart={pushHistory}
+          onStartTutorial={handleStartTutorial}
+          tipsEnabled={tipsEnabled}
+          onToggleTips={handleToggleTips}
+          tutorialActive={tutorialStep !== null}
         />
       </div>
 
@@ -848,6 +902,21 @@ export default function App() {
           resetToken={resetToken}
         />
       )}
+
+      {/* Tutorial + Tips overlay — renders above everything else */}
+      <Tutorial
+        tutorialStep={tutorialStep}
+        onNext={handleTutorialNext}
+        onBack={handleTutorialBack}
+        onSkip={handleTutorialSkip}
+        tipsEnabled={tipsEnabled}
+        pieces={pieces}
+        walls={walls}
+        activeWallId={activeWallId}
+        activeWallImage={activeWallImage}
+        currentLayout={currentLayout}
+        wallLayouts={wallLayouts}
+      />
     </div>
   )
 }

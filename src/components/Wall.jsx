@@ -6,6 +6,7 @@ export default function Wall({
   snapToGrid, gridSize, wallWidth, wallHeight,
   wallImage, onCalibrate,
   onUndo, canUndo, onLockToggle, onMoveStart, onResizeStart,
+  onStartTutorial, tipsEnabled, onToggleTips, tutorialActive,
 }) {
   const containerRef = useRef(null)
   const [baseScale, setBaseScale] = useState(5)   // px per inch
@@ -63,6 +64,7 @@ export default function Wall({
         </div>
         <button
           className={`ctrl-btn ${showRulers ? 'active' : ''}`}
+          data-tutorial="ctrl-rulers"
           onClick={() => setShowRulers(r => !r)}
           title="Toggle rulers"
         >
@@ -70,6 +72,7 @@ export default function Wall({
         </button>
         <button
           className={`ctrl-btn ${showGrid ? 'active' : ''}`}
+          data-tutorial="ctrl-grid"
           onClick={() => setShowGrid(g => !g)}
           title="Toggle inch/foot measurement grid"
         >
@@ -83,6 +86,7 @@ export default function Wall({
         {selectedPiece && (
           <button
             className={`ctrl-btn ctrl-btn--lock ${selectedPiece.locked ? 'active' : ''}`}
+            data-tutorial="ctrl-lock"
             onClick={() => onLockToggle && onLockToggle(selectedId)}
             title={selectedPiece.locked ? 'Unlock piece so it can be moved' : 'Lock piece in place'}
           >
@@ -93,11 +97,32 @@ export default function Wall({
         {/* Undo button */}
         <button
           className="ctrl-btn ctrl-btn--undo"
+          data-tutorial="ctrl-undo"
           onClick={onUndo}
           disabled={!canUndo}
           title="Undo last action (add, move, resize, lock, delete)"
         >
           ↩ Undo
+        </button>
+
+        {/* Tutorial button */}
+        <button
+          className={`ctrl-btn ctrl-btn--tutorial ${tutorialActive ? 'active' : ''}`}
+          data-tutorial="ctrl-tutorial"
+          onClick={onStartTutorial}
+          title="Start guided tutorial"
+        >
+          🎓 Tutorial
+        </button>
+
+        {/* Tips toggle */}
+        <button
+          className={`ctrl-btn ctrl-btn--tips ${tipsEnabled ? 'active' : ''}`}
+          data-tutorial="ctrl-tips"
+          onClick={onToggleTips}
+          title={tipsEnabled ? 'Tips are on — click to turn off' : 'Tips are off — click to turn on'}
+        >
+          💡 Tips
         </button>
 
         <span className="piece-count">{pieces.length} piece{pieces.length !== 1 ? 's' : ''}</span>
@@ -136,6 +161,7 @@ export default function Wall({
               {/* The actual wall */}
               <div
                 className="wall"
+                data-tutorial="wall-area"
                 style={{
                   width: wPx,
                   height: hPx,

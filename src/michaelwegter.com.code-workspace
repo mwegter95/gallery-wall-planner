@@ -1,14 +1,17 @@
 {
-	"folders": [
-		{
-			"path": ".."
-		},
-		{
-			"path": "../../mw-backend"
-		},
-		{
-			"path": "../../michaelwegter.com"
-		}
-	],
-	"settings": {}
+  "folders": [
+    {
+      "path": "..",
+    },
+    {
+      "path": "../../mw-backend",
+    },
+    {
+      "path": "../../michaelwegter.com",
+    },
+    {
+      "path": "../../seo-analyzer-app",
+    },
+  ],
+  "settings": {},
 }

@@ -2917,3 +2917,224 @@ kbd {
   .header-actions { gap: 2px; }
   .header-actions .btn { padding: 6px 7px; }
 }
+
+
+/* ══════════════════════════════════════════════════════════════
+   TUTORIAL + TIPS
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Tutorial backdrop (non-blocking dim layer) ─────────── */
+.tut-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.70);
+  z-index: 9400;
+  pointer-events: none;   /* app stays interactive during tour */
+}
+
+/* ── Spotlight cutout ────────────────────────────────────── */
+/* box-shadow creates the "everything else is dimmed" effect  */
+.tut-spotlight {
+  position: fixed;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.72);
+  z-index: 9401;
+  pointer-events: none;
+  transition: top 0.28s cubic-bezier(0.4,0,0.2,1),
+              left 0.28s cubic-bezier(0.4,0,0.2,1),
+              width 0.28s cubic-bezier(0.4,0,0.2,1),
+              height 0.28s cubic-bezier(0.4,0,0.2,1);
+}
+
+/* ── Tutorial card ───────────────────────────────────────── */
+.tut-card {
+  position: fixed;         /* coordinates set inline by JS    */
+  z-index: 9500;
+  background: var(--bg-card);
+  border: 1px solid rgba(124,111,247,0.35);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(124,111,247,0.15);
+  overflow: hidden;
+  animation: tut-in 0.18s ease;
+  pointer-events: all;
+}
+@keyframes tut-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+
+/* Progress bar at very top of card */
+.tut-prog-track {
+  height: 3px;
+  background: rgba(124,111,247,0.18);
+}
+.tut-prog-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-lt));
+  transition: width 0.3s ease;
+  border-radius: 0 2px 2px 0;
+}
+
+.tut-card-inner {
+  padding: 18px 20px 16px;
+}
+
+.tut-step-num {
+  font-size: 10px;
+  color: var(--accent-lt);
+  font-family: ui-monospace, monospace;
+  margin-bottom: 6px;
+  letter-spacing: 0.05em;
+}
+
+.tut-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 10px;
+  line-height: 1.3;
+}
+
+.tut-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 16px;
+}
+.tut-p {
+  margin: 0 0 5px;
+}
+.tut-p:last-child { margin-bottom: 0; }
+
+.tut-fallback-note {
+  margin-top: 10px !important;
+  font-size: 12px;
+  color: var(--accent-lt);
+  background: var(--accent-dim);
+  border-radius: 6px;
+  padding: 7px 10px;
+  border: 1px solid rgba(124,111,247,0.2);
+}
+
+/* Navigation row */
+.tut-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.tut-nav-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tut-exit-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: color 0.12s;
+}
+.tut-exit-btn:hover { color: var(--danger); }
+
+/* ── Tip pulsing ring (non-blocking) ─────────────────────── */
+.tut-tip-ring {
+  position: fixed;
+  border-radius: 8px;
+  z-index: 9300;
+  pointer-events: none;
+  border: 2px solid var(--accent-lt);
+  animation: tut-ring-pulse 1.8s ease-in-out infinite;
+}
+@keyframes tut-ring-pulse {
+  0%,100% { box-shadow: 0 0 0 0   rgba(124,111,247,0.55); opacity: 1; }
+  50%      { box-shadow: 0 0 0 7px rgba(124,111,247,0);    opacity: 0.8; }
+}
+
+/* ── Tip card ─────────────────────────────────────────────── */
+.tut-tip-card {
+  position: fixed;
+  z-index: 9500;
+  background: var(--bg-card);
+  border: 1px solid rgba(124,111,247,0.3);
+  border-radius: 10px;
+  padding: 14px 16px 12px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+  pointer-events: all;
+  animation: tut-in 0.15s ease;
+}
+
+.tut-tip-x {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  transition: color 0.12s, background 0.12s;
+}
+.tut-tip-x:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.tut-tip-badge {
+  font-size: 10px;
+  color: var(--accent-lt);
+  background: var(--accent-dim);
+  border-radius: 20px;
+  padding: 2px 8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  display: inline-block;
+  margin-bottom: 6px;
+}
+
+.tut-tip-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 5px;
+  padding-right: 20px; /* space for × button */
+}
+
+.tut-tip-body {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+
+.tut-tip-ok {
+  font-size: 11px !important;
+}
+
+/* ── Tutorial / Tips ctrl-btn variants ───────────────────── */
+.ctrl-btn--tutorial.active {
+  color: #a78bfa;
+  border-color: rgba(167,139,250,0.5);
+  background: rgba(167,139,250,0.12);
+}
+.ctrl-btn--tips.active {
+  color: #fbbf24;
+  border-color: rgba(251,191,36,0.4);
+  background: rgba(251,191,36,0.1);
+}
+
+/* ── Mobile tweaks ───────────────────────────────────────── */
+@media (max-width: 768px) {
+  .tut-card-inner { padding: 14px 14px 12px; }
+  .tut-title { font-size: 14px; }
+  .tut-desc  { font-size: 12px; }
+  .tut-exit-btn { font-size: 11px; }
+
+  /* Hide text labels on Tutorial/Tips buttons, keep emoji only */
+  .ctrl-btn--tutorial::after { content: ''; }
+  .ctrl-btn--tips::after     { content: ''; }
+}
