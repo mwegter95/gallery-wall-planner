@@ -311,7 +311,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
             </div>
             <p className="ws-subtitle">
               Upload a photo of your wall taken straight-on. In the next step you’ll drag
-              the 4 corner handles to mark the exact boundary of the <strong>{wallWidth}″ × {wallHeight}″</strong> wall area.
+              the 4 corner handles to mark the exact boundary of the wall area.
             </p>
           </div>
 
@@ -360,7 +360,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
             <h2>Calibrate — {wallName}</h2>
           </div>
           <p className="ws-subtitle">
-            Drag the four colored handles to the exact corners of your <strong>{wallWidth}″ × {wallHeight}″</strong> wall.
+            Drag the four colored handles to the exact corners of your wall.
             The app will correct the perspective so pieces are placed to true scale.
           </p>
         </div>

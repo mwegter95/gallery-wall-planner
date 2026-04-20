@@ -5,6 +5,7 @@ export default function Wall({
   pieces, selectedId, onSelect, onMove, onResize, onDeselect,
   snapToGrid, gridSize, wallWidth, wallHeight,
   wallImage, onCalibrate,
+  onUndo, canUndo, onLockToggle, onMoveStart, onResizeStart,
 }) {
   const containerRef = useRef(null)
   const [baseScale, setBaseScale] = useState(5)   // px per inch
@@ -46,6 +47,9 @@ export default function Wall({
     if (e.target === e.currentTarget) onDeselect()
   }, [onDeselect])
 
+  /* Currently selected piece object */
+  const selectedPiece = pieces.find(p => p.id === selectedId) || null
+
   return (
     <div className="wall-container" ref={containerRef}>
       {/* Controls bar */}
@@ -74,6 +78,28 @@ export default function Wall({
         {snapToGrid && (
           <span className="snap-badge">⊞ Snap {gridSize}"</span>
         )}
+
+        {/* Lock / Unlock button — only when a piece is selected */}
+        {selectedPiece && (
+          <button
+            className={`ctrl-btn ctrl-btn--lock ${selectedPiece.locked ? 'active' : ''}`}
+            onClick={() => onLockToggle && onLockToggle(selectedId)}
+            title={selectedPiece.locked ? 'Unlock piece so it can be moved' : 'Lock piece in place'}
+          >
+            {selectedPiece.locked ? '🔒 Locked' : '🔓 Lock'}
+          </button>
+        )}
+
+        {/* Undo button */}
+        <button
+          className="ctrl-btn ctrl-btn--undo"
+          onClick={onUndo}
+          disabled={!canUndo}
+          title="Undo last action (add, move, resize, lock, delete)"
+        >
+          ↩ Undo
+        </button>
+
         <span className="piece-count">{pieces.length} piece{pieces.length !== 1 ? 's' : ''}</span>
       </div>
 
@@ -217,6 +243,9 @@ export default function Wall({
                     wallWidth={wallWidth}
                     wallHeight={wallHeight}
                     resizable={false}
+                    onMoveStart={onMoveStart}
+                    onResizeStart={onResizeStart}
+                    onLockToggle={onLockToggle}
                   />
                 ))}
 
@@ -225,10 +254,15 @@ export default function Wall({
                   <div className="wall-empty">
                     <div className="wall-empty-icon">🖼️</div>
                     <p>
-                      Click <strong>📐 Calibrate Wall</strong> to correct the photo perspective,
-                      then <strong>+ Add Piece</strong> to start placing art.
+                      Tap <strong>📐 Calibrate Wall</strong> to upload a photo and correct the perspective,
+                      then add pieces to start arranging your gallery wall.
                     </p>
-                    <button className="btn btn-primary" style={{ marginTop: 8 }} onClick={onCalibrate}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ marginTop: 8 }}
+                      onClick={(e) => { e.stopPropagation(); onCalibrate(); }}
+                    >
                       📐 Calibrate Wall Now
                     </button>
                     <p className="wall-empty-sub" style={{ marginTop: 6 }}>
@@ -241,7 +275,7 @@ export default function Wall({
                 {wallImage && pieces.length === 0 && (
                   <div className="wall-empty">
                     <div className="wall-empty-icon">🖼️</div>
-                    <p>Click <strong>+ Add Piece</strong> to start placing art on your wall</p>
+                    <p>Tap the <strong>+</strong> button in the menu above to add your first piece</p>
                     <p className="wall-empty-sub">Wall is {wallWidth}" × {wallHeight}" ({(wallWidth/12).toFixed(1)}′ × {(wallHeight/12).toFixed(1)}′)</p>
                   </div>
                 )}

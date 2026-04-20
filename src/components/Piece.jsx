@@ -32,7 +32,7 @@ function useWindowDrag(onMove, onEnd) {
 
 export default function Piece({
   piece, scale, isSelected, onSelect, onMove, onResize, wallWidth, wallHeight,
-  resizable,
+  resizable, onMoveStart, onResizeStart, onLockToggle,
 }) {
   const dragRef = useRef(null)
 
@@ -59,31 +59,38 @@ export default function Piece({
     if (e.button !== 0) return
     e.stopPropagation()
     onSelect()
+    if (piece.locked) return   // locked: allow selection but no drag
+    onMoveStart && onMoveStart()
     const wallEl = e.currentTarget.parentElement
     const wallRect = wallEl.getBoundingClientRect()
     const ox = (e.clientX - wallRect.left) / scale - piece.x
     const oy = (e.clientY - wallRect.top)  / scale - piece.y
     dragRef.current = { wallRect, ox, oy }
     startDragMove(e)
-  }, [onSelect, scale, piece.x, piece.y, startDragMove])
+  }, [onSelect, scale, piece.x, piece.y, piece.locked, onMoveStart, startDragMove])
 
   /* ── Touch drag to move ──────────────────────────────── */
   const handlePieceTouchStart = useCallback((e) => {
     if (e.touches.length !== 1) return
     e.stopPropagation()
+    if (piece.locked) {
+      // Locked: select on tap but let touch fall through to scroll (no preventDefault)
+      onSelect()
+      return
+    }
     e.preventDefault()  // stop scroll gesture from starting when grabbing a piece
     const touch = e.touches[0]
     onSelect()
+    onMoveStart && onMoveStart()
     const wallEl = e.currentTarget.parentElement
     const wallRect = wallEl.getBoundingClientRect()
     const ox = (touch.clientX - wallRect.left) / scale - piece.x
     const oy = (touch.clientY - wallRect.top)  / scale - piece.y
-    const ref = { wallRect, ox, oy, moved: false }
+    const ref = { wallRect, ox, oy }
 
     const handleTouchMove = (ev) => {
       if (ev.touches.length !== 1) return
       ev.preventDefault()  // prevent scroll while dragging a piece
-      ref.moved = true
       const t = ev.touches[0]
       const mx = (t.clientX - ref.wallRect.left) / scale
       const my = (t.clientY - ref.wallRect.top)  / scale
@@ -97,7 +104,7 @@ export default function Piece({
     }
     window.addEventListener('touchmove', handleTouchMove, { passive: false })
     window.addEventListener('touchend', handleTouchEnd, { passive: true })
-  }, [onSelect, scale, piece.x, piece.y, piece.width, piece.height, wallWidth, wallHeight, onMove])
+  }, [onSelect, scale, piece.x, piece.y, piece.width, piece.height, piece.locked, wallWidth, wallHeight, onMove, onMoveStart])
 
   /* ── Resize handles ────────────────────────────────── */
   const resizeRef = useRef(null)
@@ -137,6 +144,7 @@ export default function Piece({
     if (e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
+    onResizeStart && onResizeStart()
     const wallEl = e.currentTarget.closest('.wall')
     const wallRect = wallEl.getBoundingClientRect()
     resizeRef.current = {
@@ -145,15 +153,13 @@ export default function Piece({
       sw: piece.width, sh: piece.height,
     }
     startDragResize(e)
-  }, [piece, startDragResize])
+  }, [piece, onResizeStart, startDragResize])
 
   /* ── Render ────────────────────────────────────────── */
 
-
   return (
     <div
-      className={`piece${isSelected ? ' piece--selected' : ''}${piece.transparent ? ' piece--transparent' : ''}`}
-
+      className={`piece${isSelected ? ' piece--selected' : ''}${piece.transparent ? ' piece--transparent' : ''}${piece.locked ? ' piece--locked' : ''}`}
       onMouseDown={handlePieceMouseDown}
       onTouchStart={handlePieceTouchStart}
       onContextMenu={(e) => e.preventDefault()}
@@ -168,14 +174,21 @@ export default function Piece({
         backgroundSize:     piece.transparent ? 'contain' : 'cover',
         backgroundRepeat:   'no-repeat',
         backgroundPosition: 'center',
-        cursor: 'grab',
+        cursor: piece.locked ? 'default' : 'grab',
         zIndex: isSelected ? 50 : 1,
         userSelect: 'none',
-        touchAction: 'none',
+        touchAction: piece.locked ? 'auto' : 'none',  // allow scroll pass-through when locked
       }}
     >
       {/* Overlay tint so image is legible */}
       {piece.image && !piece.transparent && <div className="piece-img-tint" />}
+
+      {/* Lock icon overlay */}
+      {piece.locked && (
+        <div className="piece-lock-icon" title="Locked — click to select, then use Lock button to unlock">
+          🔒
+        </div>
+      )}
 
       {/* Selection border + resize handles (only when resizable=true) */}
       {isSelected && (

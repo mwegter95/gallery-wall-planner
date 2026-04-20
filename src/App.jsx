@@ -51,8 +51,14 @@ export default function App() {
   const [isSaving,       setIsSaving]       = useState(false)
   const [library,        setLibrary]        = useState({})
   const [sidebarOpen,    setSidebarOpen]    = useState(false)
-  const saveMenuRef  = useRef(null)
-  const hasLoadedRef = useRef(false)   // becomes true after first successful backend load
+  const [historyStack,   setHistoryStack]   = useState([])   // undo history (array of piece snapshots)
+  const saveMenuRef    = useRef(null)
+  const hasLoadedRef   = useRef(false)   // becomes true after first successful backend load
+  const piecesRef      = useRef(pieces)  // always-current pieces for stable pushHistory callback
+  const calibWallIdRef = useRef(null)    // ref-based tracking of which wall is being calibrated
+
+  /* Keep piecesRef in sync */
+  useEffect(() => { piecesRef.current = pieces }, [pieces])
 
   /* ── Load all state from backend (called on boot and after auth change) ─── */
   const loadAppState = useCallback(async () => {
@@ -243,12 +249,28 @@ export default function App() {
 
   /* ── Wall calibration ─────────────────────────────── */
   const handleWallCalibrated = useCallback(async (dataUrl, _corners, dims) => {
-    const id = setupWallId || activeWallId
-    if (!id) { setShowSetup(false); setSetupWallId(null); return }
+    // Use ref first (most reliable), then fall back to state values
+    let id = calibWallIdRef.current || setupWallId || activeWallId
+    if (!id) {
+      // Last resort: auto-create a wall so the calibration isn't lost
+      id = genId()
+      const wall = {
+        id,
+        name: 'My Wall',
+        width:  dims?.width  || 128,
+        height: dims?.height || 95,
+        createdAt: Date.now(),
+      }
+      setWalls(prev => ({ ...prev, [id]: wall }))
+      setActiveWallId(id)
+      localStorage.setItem(ACTIVE_WALL_KEY, id)
+      api.putWall(wall).catch(console.error)
+    }
+
     // If the user edited the wall dimensions inside WallSetup, save them now
     if (dims && (dims.width || dims.height)) {
       setWalls(prev => {
-        const existing = prev[id] || {}
+        const existing = prev[id] || { id }
         const updated = {
           ...existing,
           ...(dims.width  ? { width:  dims.width  } : {}),
@@ -261,16 +283,23 @@ export default function App() {
     try {
       const { url } = await api.uploadWallImage(id, dataUrl)
       setWalls(prev => {
-        const updated = { ...prev[id], imageUrl: url }
+        const existing = prev[id] || { id }
+        const updated = { ...existing, imageUrl: url }
         api.putWall(updated).catch(console.error)
         return { ...prev, [id]: updated }
       })
     } catch (err) {
       console.error('Wall image upload failed:', err)
-      setWalls(prev => ({ ...prev, [id]: { ...prev[id], imageUrl: dataUrl } }))
+      setWalls(prev => {
+        const existing = prev[id] || { id }
+        return { ...prev, [id]: { ...existing, imageUrl: dataUrl } }
+      })
     }
+    // Close setup and ensure the wall view is shown (not WallManager)
     setShowSetup(false)
     setSetupWallId(null)
+    setShowWallMgr(false)
+    calibWallIdRef.current = null
   }, [setupWallId, activeWallId])
 
   /* ── Auth callbacks ───────────────────────────────────── */
@@ -339,12 +368,40 @@ export default function App() {
   }, [loadAppState])
 
   const openSetup = useCallback((wallId = null) => {
-    setSetupWallId(wallId || activeWallId)
+    const id = wallId || activeWallId
+    if (!id) {
+      // No wall exists yet — show the wall manager instead
+      setShowWallMgr(true)
+      return
+    }
+    calibWallIdRef.current = id
+    setSetupWallId(id)
     setShowSetup(true)
   }, [activeWallId])
 
+  /* ── Undo history ─────────────────────────────────── */
+  // Stable callback — uses piecesRef so it never goes stale between renders
+  const pushHistory = useCallback(() => {
+    setHistoryStack(prev => {
+      const snapshot = piecesRef.current.map(p => ({ ...p }))
+      const next = [...prev, snapshot]
+      return next.length > 100 ? next.slice(-100) : next
+    })
+  }, [])
+
+  const handleUndo = useCallback(() => {
+    setHistoryStack(prev => {
+      if (prev.length === 0) return prev
+      const snapshot = prev[prev.length - 1]
+      setPieces(snapshot)
+      setSelectedId(null)
+      return prev.slice(0, -1)
+    })
+  }, [])
+
   /* ── Piece operations ─────────────────────────────── */
   const addPiece = useCallback((data) => {
+    pushHistory()
     const piece = {
       id: genId(),
       x: 8, y: 8,
@@ -354,13 +411,14 @@ export default function App() {
     setPieces(p => [...p, piece])
     setColorIdx(i => i + 1)
     setSelectedId(piece.id)
-  }, [colorIdx])
+  }, [colorIdx, pushHistory])
 
   const updatePiece = useCallback((id, updates) =>
     setPieces(p => p.map(pc => pc.id === id ? { ...pc, ...updates } : pc)),
   [])
 
   const deletePiece = useCallback((id) => {
+    pushHistory()
     setPieces(p => {
       const piece = p.find(pc => pc.id === id)
       if (piece?.image?.startsWith('/uploads/')) {
@@ -369,7 +427,12 @@ export default function App() {
       return p.filter(pc => pc.id !== id)
     })
     setSelectedId(s => s === id ? null : s)
-  }, [])
+  }, [pushHistory])
+
+  const handleLockToggle = useCallback((id) => {
+    pushHistory()
+    setPieces(prev => prev.map(p => p.id === id ? { ...p, locked: !p.locked } : p))
+  }, [pushHistory])
 
   const bringForward = useCallback((id) => {
     setPieces(p => {
@@ -692,13 +755,18 @@ export default function App() {
           wallHeight={activeWall?.height || 95}
           wallImage={activeWallImage}
           onCalibrate={() => activeWallId ? openSetup() : setShowWallMgr(true)}
+          onUndo={handleUndo}
+          canUndo={historyStack.length > 0}
+          onLockToggle={handleLockToggle}
+          onMoveStart={pushHistory}
+          onResizeStart={pushHistory}
         />
       </div>
 
       {showSetup && (
         <WallSetup
           onApply={handleWallCalibrated}
-          onClose={() => { setShowSetup(false); setSetupWallId(null) }}
+          onClose={() => { setShowSetup(false); setSetupWallId(null); calibWallIdRef.current = null }}
           wallName={calibWall?.name || 'Wall'}
           wallWidth={calibWall?.width || 128}
           wallHeight={calibWall?.height || 95}
