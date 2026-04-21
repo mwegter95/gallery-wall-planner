@@ -512,8 +512,9 @@ const TIPS = [
     condition: ({ pieces, wallLayouts }) =>
       pieces.length === 0 && Object.keys(wallLayouts || {}).length > 0,
     target: '[data-tutorial="sidebar-toggle"]',
+    desktopTarget: '[data-tutorial="layouts-tab"]',
     title: '📂 You Have Saved Layouts',
-    desc: 'Open the sidebar → Layouts tab to load a previously saved arrangement.',
+    desc: 'Click the Layouts tab in the sidebar to load a previously saved arrangement.',
     mDesc: 'Tap ☰ → Layouts to load a saved arrangement for this wall.',
     pos: 'bottom',
   },
@@ -1065,7 +1066,9 @@ export default function Tutorial({
   useEffect(() => {
     if (!activeTip?.target) { setTipRect(null); return }
     const measure = () => {
-      const el = document.querySelector(activeTip.target)
+      const mob = window.innerWidth <= 768
+      const sel = (!mob && activeTip.desktopTarget) ? activeTip.desktopTarget : activeTip.target
+      const el  = document.querySelector(sel)
       setTipRect(el ? el.getBoundingClientRect() : null)
     }
     measure()

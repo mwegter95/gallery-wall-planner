@@ -74,7 +74,7 @@ export default function App() {
   useEffect(() => { piecesRef.current = pieces }, [pieces])
 
   /* ── Load all state from backend (called on boot and after auth change) ─── */
-  const loadAppState = useCallback(async () => {
+  const loadAppState = useCallback(async ({ restoreSession = true } = {}) => {
     setIsLoading(true)
     try {
       const fetchedData = await api.loadState()
@@ -121,6 +121,19 @@ export default function App() {
         // and returning users can open it manually via the wall name badge.
       } else {
         setActiveWallId(activeId)
+        // Restore active pieces from session snapshot (survives refresh when online)
+        if (restoreSession) {
+          const sessionSnap = (() => {
+            try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
+          })()
+          if (sessionSnap?.activePieces?.length > 0 && sessionSnap.activeWallId === activeId) {
+            const fixedPieces = sessionSnap.activePieces.map(p =>
+              p.image ? { ...p, image: api.fixUrl(p.image) } : p
+            )
+            setPieces(fixedPieces)
+            setCurrentLayout(sessionSnap.currentLayout || '')
+          }
+        }
       }
 
       // Return raw fetched data so callers (e.g. handleAuthSuccess) can compare
@@ -222,6 +235,17 @@ export default function App() {
       .filter(w => w.imageUrl)
       .map(w => [w.id, w.imageUrl])
   )
+
+  const hasUnsavedChanges = pieces.length > 0 && (() => {
+    if (!currentLayout) return true
+    const saved = wallLayouts[currentLayout]
+    if (!saved || saved.length !== pieces.length) return true
+    const map = Object.fromEntries(saved.map(p => [p.id, p]))
+    return pieces.some(p => {
+      const s = map[p.id]
+      return !s || s.x !== p.x || s.y !== p.y || s.width !== p.width || s.height !== p.height
+    })
+  })()
 
   /* ── Wall manager operations ──────────────────────── */
   const handleSelectWall = useCallback((id) => {
@@ -421,7 +445,7 @@ export default function App() {
     setPieces([])
     setCurrentLayout('')
     // Re-fetch state now that JWT is cleared (returns to device data)
-    loadAppState()
+    loadAppState({ restoreSession: false })
   }, [loadAppState])
 
   const openSetup = useCallback((wallId = null) => {
@@ -675,6 +699,17 @@ export default function App() {
     setCurrentLayout(name)
   }, [wallLayouts])
 
+  const discardChanges = useCallback(() => {
+    pushHistory()
+    if (currentLayout && wallLayouts[currentLayout]) {
+      setPieces(wallLayouts[currentLayout].map(p => ({ ...p })))
+    } else {
+      setPieces([])
+      setCurrentLayout('')
+    }
+    setSelectedId(null)
+  }, [currentLayout, wallLayouts, pushHistory])
+
   const deleteLayout = useCallback((name) => {
     const layoutPieces = wallLayouts[name] || []
     layoutPieces
@@ -855,6 +890,8 @@ export default function App() {
           isOpen={sidebarOpen}
           onRequestClose={() => setSidebarOpen(false)}
           forceSection={sidebarForceSection}
+          hasUnsavedChanges={hasUnsavedChanges}
+          onDiscardChanges={discardChanges}
         />
 
         <Wall

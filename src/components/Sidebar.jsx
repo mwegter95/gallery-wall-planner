@@ -8,6 +8,7 @@ export default function Sidebar({
   library = {}, onAddFromLibrary, onDeleteFromLibrary,
   isOpen = false, onRequestClose,
   forceSection = null,
+  hasUnsavedChanges = false, onDiscardChanges,
 }) {
   const [layoutName, setLayoutName] = useState('')
   const [saveError, setSaveError]   = useState('')
@@ -42,6 +43,7 @@ export default function Sidebar({
         >Library{Object.keys(library).length > 0 && <span className="count-badge">{Object.keys(library).length}</span>}</button>
         <button
           className={`tab-btn ${section === 'layouts' ? 'active' : ''}`}
+          data-tutorial="layouts-tab"
           onClick={() => setSection('layouts')}
         >Layouts</button>
         <button
@@ -219,6 +221,21 @@ export default function Sidebar({
                   </button>
                 )
               }
+            </div>
+          )}
+
+          {hasUnsavedChanges && (
+            <div className="layout-discard-row">
+              <span className="layout-discard-label">
+                {currentLayout ? 'Unsaved changes' : 'Unsaved canvas'}
+              </span>
+              <button
+                className="btn btn-ghost btn-sm layout-discard-btn"
+                onClick={onDiscardChanges}
+                title={currentLayout ? `Revert to last saved "${currentLayout}"` : 'Clear unsaved pieces from canvas'}
+              >
+                ↺ Discard
+              </button>
             </div>
           )}
 

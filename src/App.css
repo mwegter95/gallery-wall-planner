@@ -3607,6 +3607,31 @@ kbd {
   to   { opacity: 1; transform: scale(1); }
 }
 
+/* ── Discard changes row in sidebar layouts tab ──────────── */
+.layout-discard-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(238,85,85,0.07);
+  border: 1px solid rgba(238,85,85,0.22);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.layout-discard-label {
+  font-size: 11px;
+  color: #f87171;
+  font-weight: 500;
+}
+.layout-discard-btn {
+  font-size: 11px;
+  color: #f87171 !important;
+  border-color: rgba(238,85,85,0.35) !important;
+  padding: 2px 8px !important;
+}
+.layout-discard-btn:hover {
+  background: rgba(238,85,85,0.12) !important;
+}
 
 /* ── Tutorial / Tips ctrl-btn variants ───────────────────── */
 .ctrl-btn--tutorial.active {
