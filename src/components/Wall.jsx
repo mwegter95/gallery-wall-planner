@@ -35,11 +35,20 @@ export default function Wall({
   const wPx   = wallWidth  * scale
   const hPx   = wallHeight * scale
 
-  /* Ruler ticks every 12" (1 foot) */
+  /* Ruler ticks every 12" (1 foot) + final edge tick if wall isn't an exact # of feet */
+  const totalFeetH = wallWidth / 12
   const footTicks = []
   for (let i = 0; i <= wallWidth; i += 12) {
     footTicks.push({ pos: i * scale, label: `${i / 12}'` })
   }
+  // Final right-edge tick when width is not an exact foot multiple
+  if (wallWidth % 12 !== 0) {
+    footTicks.push({
+      pos: wallWidth * scale,
+      label: `${totalFeetH.toFixed(1)}'`,
+    })
+  }
+
   // Vertical ruler: top tick = actual wall height, then whole-foot marks up from floor
   const footTicksH = []
   const totalFeetV  = wallHeight / 12

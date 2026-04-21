@@ -18,6 +18,11 @@ const LOCAL_SNAPSHOT_KEY = 'gwp-local-snapshot'
 
 const genId = () => Math.random().toString(36).slice(2, 10)
 
+/** Kick off parallel image fetches so CSS backgroundImage paints them all at once */
+function preloadPieceImages(pieces) {
+  pieces.forEach(p => { if (p.image) { new Image().src = p.image } })
+}
+
 const PALETTE = [
   '#8B7D6B', '#6B8E9F', '#9E8B6A', '#7B9E87',
   '#A08080', '#8B9E7B', '#7B8B9E', '#C4A882',
@@ -130,6 +135,7 @@ export default function App() {
             const fixedPieces = sessionSnap.activePieces.map(p =>
               p.image ? { ...p, image: api.fixUrl(p.image) } : p
             )
+            preloadPieceImages(fixedPieces)
             setPieces(fixedPieces)
             setCurrentLayout(sessionSnap.currentLayout || '')
           }
@@ -169,6 +175,7 @@ export default function App() {
           const fixedPieces = snap.activePieces.map(p =>
             p.image ? { ...p, image: api.fixUrl(p.image) } : p
           )
+          preloadPieceImages(fixedPieces)
           setPieces(fixedPieces)
           setCurrentLayout(snap.currentLayout || '')
         }
@@ -434,6 +441,7 @@ export default function App() {
       const fixedPieces = localSnap.activePieces.map(p =>
         p.image ? { ...p, image: api.fixUrl(p.image) } : p
       )
+      preloadPieceImages(fixedPieces)
       setPieces(fixedPieces)
       setCurrentLayout(localSnap.currentLayout || '')
     }
@@ -694,6 +702,7 @@ export default function App() {
   const loadLayout = useCallback((name) => {
     const savedPieces = wallLayouts[name]
     if (!savedPieces) return
+    preloadPieceImages(savedPieces)
     setPieces(savedPieces)
     setSelectedId(null)
     setCurrentLayout(name)
