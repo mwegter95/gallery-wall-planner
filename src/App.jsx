@@ -15,6 +15,8 @@ const TIPS_KEY     = 'gwp-tips-enabled'
 /* ── Only tiny UI preference stays in localStorage ─────── */
 const ACTIVE_WALL_KEY    = 'gwp-active-wall'
 const LOCAL_SNAPSHOT_KEY = 'gwp-local-snapshot'
+// Separate key written at logout so the auto-save effect can't overwrite it
+const LOGIN_RESTORE_KEY  = 'gwp-login-restore'
 
 const genId = () => Math.random().toString(36).slice(2, 10)
 
@@ -390,9 +392,17 @@ export default function App() {
     url.searchParams.delete('reset_token')
     window.history.replaceState({}, '', url.toString())
 
-    // Read local snapshot BEFORE loading from backend
+    // Read working-state snapshot — prefer the logout-time copy (saved before the
+    // auto-save effect can overwrite it with empty pieces) over the live snapshot.
     const localSnap = (() => {
-      try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
+      try {
+        const loginRestore = localStorage.getItem(LOGIN_RESTORE_KEY)
+        if (loginRestore) {
+          localStorage.removeItem(LOGIN_RESTORE_KEY)   // one-shot: clear after reading
+          return JSON.parse(loginRestore)
+        }
+        return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null')
+      } catch { return null }
     })()
 
     // ── Step 1: Fetch server's current state so we know what already exists.
@@ -491,6 +501,12 @@ export default function App() {
   }, [loadAppState])
 
   const handleLogout = useCallback(() => {
+    // Capture current working state SYNCHRONOUSLY before state changes trigger
+    // the auto-save effect (which would overwrite the snapshot with empty pieces).
+    const currentSnap = localStorage.getItem(LOCAL_SNAPSHOT_KEY)
+    if (currentSnap) {
+      try { localStorage.setItem(LOGIN_RESTORE_KEY, currentSnap) } catch {}
+    }
     api.authLogout()
     setAuthUser(null)
     setPieces([])

@@ -657,7 +657,7 @@ kbd {
   border: 1px solid var(--border);
   border-bottom: none;
   border-radius: 4px 4px 0 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .ruler-v {
