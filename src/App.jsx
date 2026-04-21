@@ -15,8 +15,11 @@ const TIPS_KEY     = 'gwp-tips-enabled'
 /* ── Only tiny UI preference stays in localStorage ─────── */
 const ACTIVE_WALL_KEY    = 'gwp-active-wall'
 const LOCAL_SNAPSHOT_KEY = 'gwp-local-snapshot'
-// Separate key written at logout so the auto-save effect can't overwrite it
+// Saved at logout so the auto-save effect can't overwrite it with empty state
 const LOGIN_RESTORE_KEY  = 'gwp-login-restore'
+// Minimal { wallId, layoutName } — written whenever user is on a named layout,
+// never touched by logout or auto-save, used to land on right layout after login
+const LAST_ACTIVE_KEY    = 'gwp-last-active'
 
 const genId = () => Math.random().toString(36).slice(2, 10)
 
@@ -241,6 +244,14 @@ export default function App() {
     } catch { /* storage full - ignore */ }
   }, [walls, allLayouts, library, pieces, activeWallId, currentLayout])
 
+  /* ── Track last named layout — survives logout/login ──── */
+  useEffect(() => {
+    if (!activeWallId || !currentLayout) return
+    try {
+      localStorage.setItem(LAST_ACTIVE_KEY, JSON.stringify({ wallId: activeWallId, layoutName: currentLayout }))
+    } catch {}
+  }, [activeWallId, currentLayout])
+
   /* ── Close save menu on outside click ────────────────── */
   useEffect(() => {
     if (!saveMenuOpen) return
@@ -463,12 +474,40 @@ export default function App() {
     // ── Step 2: Reload full state from backend (now includes all synced data) ──
     const freshData = await loadAppState()
 
-    // ── Step 3: Restore the user's last working state ───────────────────────
-    // loadAppState handles the restoreSession logic, but as a safety-net we also
-    // try here with the freshly-loaded server data (covers cases where wall-ID
-    // comparison inside loadAppState didn't match, or snap had no activePieces).
-    if (localSnap?.activePieces?.length > 0) {
-      // Unsaved canvas work — put it back
+    // ── Step 3: Land the user on their last layout ──────────────────────────
+    // Primary: LAST_ACTIVE_KEY holds { wallId, layoutName } and is written
+    // every time the user is on a named layout — never touched by logout or
+    // auto-save, so it's always reliable.
+    // Secondary: if localSnap has unsaved pieces beyond the saved layout,
+    // restore those on top of the layout load (captures in-progress edits).
+    const lastActive = (() => {
+      try { return JSON.parse(localStorage.getItem(LAST_ACTIVE_KEY) || 'null') } catch { return null }
+    })()
+
+    if (lastActive?.wallId && lastActive?.layoutName && freshData) {
+      const wallId = freshData.walls?.[lastActive.wallId]
+        ? lastActive.wallId
+        : Object.keys(freshData.walls || {})[0]
+      const layoutPieces = freshData.layouts?.[wallId]?.[lastActive.layoutName]
+      if (layoutPieces?.length > 0) {
+        setActiveWallId(wallId)
+        localStorage.setItem(ACTIVE_WALL_KEY, wallId)
+        preloadPieceImages(layoutPieces)
+        setPieces(layoutPieces)
+        setCurrentLayout(lastActive.layoutName)
+
+        // If the user also had unsaved edits on top of that layout, restore those
+        const unsavedPieces = localSnap?.activePieces
+        if (unsavedPieces?.length > 0 && localSnap?.currentLayout === lastActive.layoutName) {
+          const fixedPieces = unsavedPieces.map(p =>
+            p.image ? { ...p, image: api.fixUrl(p.image) } : p
+          )
+          preloadPieceImages(fixedPieces)
+          setPieces(fixedPieces)
+        }
+      }
+    } else if (localSnap?.activePieces?.length > 0) {
+      // Fallback: no LAST_ACTIVE_KEY yet, but we have a snapshot with pieces
       const fixedPieces = localSnap.activePieces.map(p =>
         p.image ? { ...p, image: api.fixUrl(p.image) } : p
       )
@@ -480,23 +519,6 @@ export default function App() {
       preloadPieceImages(fixedPieces)
       setPieces(fixedPieces)
       setCurrentLayout(localSnap.currentLayout || '')
-    } else if (localSnap?.currentLayout && freshData) {
-      // No unsaved pieces — load last named layout from server so they land
-      // on their previous work without having to click through Layouts tab
-      const snapWall = localSnap.activeWallId
-      const wallId = (snapWall && freshData.walls?.[snapWall])
-        ? snapWall
-        : Object.keys(freshData.walls || {})[0]
-      const layoutPieces = freshData.layouts?.[wallId]?.[localSnap.currentLayout]
-      if (layoutPieces?.length > 0) {
-        if (wallId) {
-          setActiveWallId(wallId)
-          localStorage.setItem(ACTIVE_WALL_KEY, wallId)
-        }
-        preloadPieceImages(layoutPieces)
-        setPieces(layoutPieces)
-        setCurrentLayout(localSnap.currentLayout)
-      }
     }
   }, [loadAppState])
 

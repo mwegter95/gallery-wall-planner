@@ -48,9 +48,13 @@ export default function Wall({
   for (let i = 0; i <= wallWidth; i += 12) {
     footTicks.push({ pos: i * scale, label: fmtFtIn(i) })
   }
-  // Final right-edge tick when width is not an exact foot multiple — label flipped left
+  // If width isn't an exact foot, add the fractional right-edge tick
   if (wallWidth % 12 !== 0) {
-    footTicks.push({ pos: wallWidth * scale, label: fmtFtIn(wallWidth), isEdge: true })
+    footTicks.push({ pos: wallWidth * scale, label: fmtFtIn(wallWidth) })
+  }
+  // Always flip the very last tick's label leftward so it never overflows the ruler
+  if (footTicks.length > 0) {
+    footTicks[footTicks.length - 1] = { ...footTicks[footTicks.length - 1], isEdge: true }
   }
 
   // Vertical ruler: top tick = actual wall height, then whole-foot marks up from floor

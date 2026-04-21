@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 
 export default function Sidebar({
   pieces, selectedId, onSelect, onDelete, onEdit, onBringForward, onSendBackward,
@@ -18,6 +18,11 @@ export default function Sidebar({
   useEffect(() => {
     if (forceSection) setSection(forceSection)
   }, [forceSection])
+
+  // Preload all library thumbnail images so the Library tab paints instantly
+  useEffect(() => {
+    Object.values(library).forEach(p => { if (p.image) { new Image().src = p.image } })
+  }, [library])
 
   const handleSave = () => {
     const name = layoutName.trim()
