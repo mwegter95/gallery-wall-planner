@@ -1,6 +1,14 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import Piece from './Piece'
 
+/** Convert a total-inch measurement to a "X' Y"" label (e.g. 150 → "12' 6\"") */
+function fmtFtIn(inches) {
+  const ft = Math.floor(inches / 12)
+  const i  = Math.round(inches % 12)
+  if (i === 0) return `${ft}'`
+  return `${ft}' ${i}"`
+}
+
 export default function Wall({
   pieces, selectedId, onSelect, onMove, onResize, onDeselect,
   snapToGrid, gridSize, wallWidth, wallHeight,
@@ -36,28 +44,20 @@ export default function Wall({
   const hPx   = wallHeight * scale
 
   /* Ruler ticks every 12" (1 foot) + final edge tick if wall isn't an exact # of feet */
-  const totalFeetH = wallWidth / 12
   const footTicks = []
   for (let i = 0; i <= wallWidth; i += 12) {
-    footTicks.push({ pos: i * scale, label: `${i / 12}'` })
+    footTicks.push({ pos: i * scale, label: fmtFtIn(i) })
   }
-  // Final right-edge tick when width is not an exact foot multiple
+  // Final right-edge tick when width is not an exact foot multiple — label flipped left
   if (wallWidth % 12 !== 0) {
-    footTicks.push({
-      pos: wallWidth * scale,
-      label: `${totalFeetH.toFixed(1)}'`,
-    })
+    footTicks.push({ pos: wallWidth * scale, label: fmtFtIn(wallWidth), isEdge: true })
   }
 
   // Vertical ruler: top tick = actual wall height, then whole-foot marks up from floor
   const footTicksH = []
-  const totalFeetV  = wallHeight / 12
-  const wholeFeetV  = Math.floor(totalFeetV)
-  // Top tick: show actual height (decimal only when wall isn't an exact number of feet)
-  footTicksH.push({
-    pos: 0,
-    label: Number.isInteger(totalFeetV) ? `${totalFeetV}'` : `${totalFeetV.toFixed(1)}'`,
-  })
+  const wholeFeetV  = Math.floor(wallHeight / 12)
+  // Top tick: actual wall height in ft+in (e.g. "9' 6"")
+  footTicksH.push({ pos: 0, label: fmtFtIn(wallHeight), isEdge: true })
   // Whole-foot marks counting up from the floor (0' at floor, 1', 2', …)
   for (let f = 0; f <= wholeFeetV; f++) {
     const posFromTop = (wallHeight - f * 12) * scale
@@ -166,7 +166,7 @@ export default function Wall({
             {showRulers && (
               <div className="ruler ruler-h" style={{ width: wPx, marginLeft: 28 }}>
                 {footTicks.map(t => (
-                  <div key={t.pos} className="ruler-tick" style={{ left: t.pos }}>
+                  <div key={t.pos} className={`ruler-tick${t.isEdge ? ' ruler-tick--edge' : ''}`} style={{ left: t.pos }}>
                     <span className="ruler-label">{t.label}</span>
                   </div>
                 ))}
@@ -178,7 +178,7 @@ export default function Wall({
               {showRulers && (
                 <div className="ruler ruler-v" style={{ height: hPx }}>
                   {footTicksH.map(t => (
-                    <div key={t.pos} className="ruler-tick-v" style={{ top: t.pos }}>
+                    <div key={t.pos} className={`ruler-tick-v${t.isEdge ? ' ruler-tick--edge' : ''}`} style={{ top: t.pos }}>
                       <span className="ruler-label-v">{t.label}</span>
                     </div>
                   ))}

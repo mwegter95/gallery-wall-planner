@@ -683,6 +683,19 @@ kbd {
 
 .ruler-label { font-size: 8px; color: var(--text-muted); font-family: ui-monospace, monospace; white-space: nowrap; }
 
+/* Edge ticks (right end of H ruler, top of V ruler): flip label inward so it
+   doesn't overflow the ruler's overflow:hidden boundary */
+.ruler-tick--edge.ruler-tick {
+  padding-left: 0;
+  padding-right: 3px;
+  justify-content: flex-end;
+}
+.ruler-tick--edge.ruler-tick-v {
+  padding-left: 0;
+  padding-right: 2px;
+  text-align: right;
+}
+
 .ruler-tick-v {
   position: absolute;
   left: 0;

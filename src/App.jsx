@@ -131,13 +131,33 @@ export default function App() {
           const sessionSnap = (() => {
             try { return JSON.parse(localStorage.getItem(LOCAL_SNAPSHOT_KEY) || 'null') } catch { return null }
           })()
-          if (sessionSnap?.activePieces?.length > 0 && sessionSnap.activeWallId === activeId) {
+          if (sessionSnap?.activePieces?.length > 0) {
+            // If snapshot is for a wall that exists, switch to it (handles multi-wall case)
+            const snapWall = sessionSnap.activeWallId
+            if (snapWall && wallsObj[snapWall] && snapWall !== activeId) {
+              setActiveWallId(snapWall)
+              localStorage.setItem(ACTIVE_WALL_KEY, snapWall)
+            }
             const fixedPieces = sessionSnap.activePieces.map(p =>
               p.image ? { ...p, image: api.fixUrl(p.image) } : p
             )
             preloadPieceImages(fixedPieces)
             setPieces(fixedPieces)
             setCurrentLayout(sessionSnap.currentLayout || '')
+          } else if (sessionSnap?.currentLayout) {
+            // No unsaved pieces — load the last named layout they were viewing from server data
+            const snapWall = sessionSnap.activeWallId
+            const wallId = (snapWall && wallsObj[snapWall]) ? snapWall : activeId
+            const layoutPieces = layoutsObj[wallId]?.[sessionSnap.currentLayout]
+            if (layoutPieces?.length > 0) {
+              if (wallId !== activeId) {
+                setActiveWallId(wallId)
+                localStorage.setItem(ACTIVE_WALL_KEY, wallId)
+              }
+              preloadPieceImages(layoutPieces)
+              setPieces(layoutPieces)
+              setCurrentLayout(sessionSnap.currentLayout)
+            }
           }
         }
       }
@@ -431,19 +451,42 @@ export default function App() {
     }
 
     // ── Step 2: Reload full state from backend (now includes all synced data) ──
-    await loadAppState()
+    const freshData = await loadAppState()
 
-    // ── Step 3: Restore unsaved canvas pieces (pieces placed but not yet in a
-    //    named layout). loadAppState doesn't touch pieces state, but we want the
-    //    user's in-progress work to still be on the canvas after login. ──────────
-    //    Apply fixUrl so any relative /uploads/... paths become absolute.
+    // ── Step 3: Restore the user's last working state ───────────────────────
+    // loadAppState handles the restoreSession logic, but as a safety-net we also
+    // try here with the freshly-loaded server data (covers cases where wall-ID
+    // comparison inside loadAppState didn't match, or snap had no activePieces).
     if (localSnap?.activePieces?.length > 0) {
+      // Unsaved canvas work — put it back
       const fixedPieces = localSnap.activePieces.map(p =>
         p.image ? { ...p, image: api.fixUrl(p.image) } : p
       )
+      const snapWall = localSnap.activeWallId
+      if (snapWall && freshData?.walls?.[snapWall]) {
+        setActiveWallId(snapWall)
+        localStorage.setItem(ACTIVE_WALL_KEY, snapWall)
+      }
       preloadPieceImages(fixedPieces)
       setPieces(fixedPieces)
       setCurrentLayout(localSnap.currentLayout || '')
+    } else if (localSnap?.currentLayout && freshData) {
+      // No unsaved pieces — load last named layout from server so they land
+      // on their previous work without having to click through Layouts tab
+      const snapWall = localSnap.activeWallId
+      const wallId = (snapWall && freshData.walls?.[snapWall])
+        ? snapWall
+        : Object.keys(freshData.walls || {})[0]
+      const layoutPieces = freshData.layouts?.[wallId]?.[localSnap.currentLayout]
+      if (layoutPieces?.length > 0) {
+        if (wallId) {
+          setActiveWallId(wallId)
+          localStorage.setItem(ACTIVE_WALL_KEY, wallId)
+        }
+        preloadPieceImages(layoutPieces)
+        setPieces(layoutPieces)
+        setCurrentLayout(localSnap.currentLayout)
+      }
     }
   }, [loadAppState])
 
