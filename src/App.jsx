@@ -24,8 +24,17 @@ const LAST_ACTIVE_KEY    = 'gwp-last-active'
 const genId = () => Math.random().toString(36).slice(2, 10)
 
 /** Kick off parallel image fetches so CSS backgroundImage paints them all at once */
-function preloadPieceImages(pieces) {
-  pieces.forEach(p => { if (p.image) { new Image().src = p.image } })
+async function preloadPieceImages(pieces) {
+  const urls = [...new Set(pieces.map(p => p.image).filter(Boolean))]
+  if (urls.length === 0) return
+  await Promise.allSettled(
+    urls.map(url => new Promise(resolve => {
+      const img = new Image()
+      img.onload  = resolve
+      img.onerror = resolve  // don't block on a failed load
+      img.src = url
+    }))
+  )
 }
 
 const PALETTE = [
@@ -146,7 +155,7 @@ export default function App() {
             const fixedPieces = sessionSnap.activePieces.map(p =>
               p.image ? { ...p, image: api.fixUrl(p.image) } : p
             )
-            preloadPieceImages(fixedPieces)
+            await preloadPieceImages(fixedPieces)
             setPieces(fixedPieces)
             setCurrentLayout(sessionSnap.currentLayout || '')
           } else if (sessionSnap?.currentLayout) {
@@ -159,7 +168,7 @@ export default function App() {
                 setActiveWallId(wallId)
                 localStorage.setItem(ACTIVE_WALL_KEY, wallId)
               }
-              preloadPieceImages(layoutPieces)
+              await preloadPieceImages(layoutPieces)
               setPieces(layoutPieces)
               setCurrentLayout(sessionSnap.currentLayout)
             }
@@ -200,7 +209,7 @@ export default function App() {
           const fixedPieces = snap.activePieces.map(p =>
             p.image ? { ...p, image: api.fixUrl(p.image) } : p
           )
-          preloadPieceImages(fixedPieces)
+          await preloadPieceImages(fixedPieces)
           setPieces(fixedPieces)
           setCurrentLayout(snap.currentLayout || '')
         }
@@ -492,9 +501,6 @@ export default function App() {
       if (layoutPieces?.length > 0) {
         setActiveWallId(wallId)
         localStorage.setItem(ACTIVE_WALL_KEY, wallId)
-        preloadPieceImages(layoutPieces)
-        setPieces(layoutPieces)
-        setCurrentLayout(lastActive.layoutName)
 
         // If the user also had unsaved edits on top of that layout, restore those
         const unsavedPieces = localSnap?.activePieces
@@ -502,9 +508,13 @@ export default function App() {
           const fixedPieces = unsavedPieces.map(p =>
             p.image ? { ...p, image: api.fixUrl(p.image) } : p
           )
-          preloadPieceImages(fixedPieces)
+          await preloadPieceImages(fixedPieces)
           setPieces(fixedPieces)
+        } else {
+          await preloadPieceImages(layoutPieces)
+          setPieces(layoutPieces)
         }
+        setCurrentLayout(lastActive.layoutName)
       }
     } else if (localSnap?.activePieces?.length > 0) {
       // Fallback: no LAST_ACTIVE_KEY yet, but we have a snapshot with pieces
@@ -516,7 +526,7 @@ export default function App() {
         setActiveWallId(snapWall)
         localStorage.setItem(ACTIVE_WALL_KEY, snapWall)
       }
-      preloadPieceImages(fixedPieces)
+      await preloadPieceImages(fixedPieces)
       setPieces(fixedPieces)
       setCurrentLayout(localSnap.currentLayout || '')
     }
@@ -780,10 +790,10 @@ export default function App() {
     saveLayout(name)
   }, [saveAsName, saveLayout])
 
-  const loadLayout = useCallback((name) => {
+  const loadLayout = useCallback(async (name) => {
     const savedPieces = wallLayouts[name]
     if (!savedPieces) return
-    preloadPieceImages(savedPieces)
+    await preloadPieceImages(savedPieces)
     setPieces(savedPieces)
     setSelectedId(null)
     setCurrentLayout(name)

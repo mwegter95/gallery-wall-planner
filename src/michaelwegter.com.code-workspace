@@ -12,6 +12,9 @@
     {
       "path": "../../seo-analyzer-app",
     },
+    {
+      "path": "../../spotify-super-user-tools",
+    },
   ],
   "settings": {},
 }
