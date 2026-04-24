@@ -746,7 +746,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
             ))}
           </div>
           <button className="btn btn-ghost ms-start-btn" onClick={runDetection}>✨ AI Detect Background</button>
-          <button className="cm-skip-link ms-skip-btn" onClick={onSkip}>Skip — use photo as-is</button>
+          <button className="cm-skip-link ms-skip-btn" onClick={onSkip}>Skip (use photo as-is)</button>
         </div>
       )}
 
@@ -907,7 +907,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
           <p className="ms-error-detail">{loadMsg}</p>
           <div className="ms-error-btns">
             <button className="btn btn-ghost" onClick={() => setPhase('idle')}>Try Again</button>
-            <button className="cm-skip-link" onClick={onSkip}>Skip — use photo as-is</button>
+            <button className="cm-skip-link" onClick={onSkip}>Skip (use photo as-is)</button>
           </div>
         </div>
       )}
@@ -932,13 +932,13 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
         ) : phase === 'warp' ? (
           <>
             <button className="btn btn-ghost" onClick={() => setPhase('ready')} disabled={warpWarping}>↺ Back to Brush</button>
-            <button className="cm-skip-link" onClick={onSkip} disabled={warpWarping}>Skip — use photo as-is</button>
+            <button className="cm-skip-link" onClick={onSkip} disabled={warpWarping}>Skip (use photo as-is)</button>
             <button className="btn btn-primary" onClick={applyWarp} disabled={warpWarping}>
               {warpWarping ? `Warping… ${warpPct}%` : '✓ Apply Warp'}
             </button>
           </>
         ) : phase === 'loading' || phase === 'edge-computing' ? (
-          <span className="ms-footer-note">Processing in browser — please wait…</span>
+          <span className="ms-footer-note">Processing in browser, please wait…</span>
         ) : (
           <button className="btn btn-ghost" onClick={onSkip}>Use Full Image</button>
         )}

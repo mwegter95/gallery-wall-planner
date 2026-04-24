@@ -307,7 +307,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
           <div className="ws-header">
             <div className="ws-title-row">
               <span className="ws-icon">📸</span>
-              <h2>Upload Wall Photo — {wallName}</h2>
+              <h2>Upload Wall Photo: {wallName}</h2>
             </div>
             <p className="ws-subtitle">
               Upload a photo of your wall taken straight-on. In the next step you’ll drag
@@ -357,7 +357,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
         <div className="ws-header">
           <div className="ws-title-row">
             <span className="ws-icon">📐</span>
-            <h2>Calibrate — {wallName}</h2>
+            <h2>Calibrate: {wallName}</h2>
           </div>
           <p className="ws-subtitle">
             Drag the four colored handles to the exact corners of your wall.
@@ -450,7 +450,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
               <div className="ws-preview-badge">✓ Corrected Wall Preview</div>
               <img src={previewUrl} className="ws-preview-img" alt="Corrected wall" />
               <div className="ws-preview-meta">
-                {editWidth}" × {editHeight}" — perspective corrected &amp; ready to use
+                {editWidth}" × {editHeight}" · perspective corrected &amp; ready to use
               </div>
             </div>
           )}

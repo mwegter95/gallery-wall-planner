@@ -185,7 +185,7 @@ export default function Piece({
 
       {/* Lock icon overlay */}
       {piece.locked && (
-        <div className="piece-lock-icon" title="Locked — click to select, then use Lock button to unlock">
+        <div className="piece-lock-icon" title="Locked: click to select, then use Lock button to unlock">
           🔒
         </div>
       )}

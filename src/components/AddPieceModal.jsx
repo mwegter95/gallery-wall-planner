@@ -293,7 +293,7 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
                 <div className="image-placeholder">
                   <span className="upload-icon">📷</span>
                   <span>Click to upload a photo of this piece</span>
-                  <span className="upload-sub">JPG · PNG · WEBP · HEIC — all supported</span>
+                  <span className="upload-sub">Supported: JPG · PNG · WEBP · HEIC</span>
                 </div>
               )}
             </div>

@@ -151,7 +151,7 @@ export default function Wall({
           className={`ctrl-btn ctrl-btn--tips ${tipsEnabled ? 'active' : ''}`}
           data-tutorial="ctrl-tips"
           onClick={onToggleTips}
-          title={tipsEnabled ? 'Tips are on — click to turn off' : 'Tips are off — click to turn on'}
+          title={tipsEnabled ? 'Tips are on (click to turn off)' : 'Tips are off (click to turn on)'}
         >
           💡 Tips
         </button>

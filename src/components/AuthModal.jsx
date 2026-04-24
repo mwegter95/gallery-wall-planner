@@ -189,12 +189,12 @@ export default function AuthModal({ onSuccess, onClose, resetToken = null }) {
 
         {view === 'register' && (
           <p className="auth-privacy-note">
-            🔒 Your password is hashed and never stored in plain text. Photo uploads are encrypted at rest. Your walls and layouts are only accessible to you — no one else can view your data.
+            🔒 Your password is hashed and never stored in plain text. Photo uploads are encrypted at rest. Your walls and layouts are only accessible to you. No one else can view your data.
           </p>
         )}
         {(view === 'login' || view === 'register') && (
           <p className="auth-device-note">
-            No account needed — your layouts are already saved on this device.
+            No account needed. Your layouts are already saved on this device.
           </p>
         )}
       </div>

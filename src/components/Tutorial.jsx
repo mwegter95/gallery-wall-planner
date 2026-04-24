@@ -148,12 +148,12 @@ function MeasureArtSVG() {
       {/* ── Width tape ── */}
       <TapeH x1={FX1} x2={FX2} y={HY} extY1={FY2} extY2={HY}/>
       <text x={(FX1+FX2)/2} y={HY+17} textAnchor="middle" fill={TAPE_FILL}
-            fontSize="8.5" fontFamily="ui-monospace,monospace">Width — inches</text>
+            fontSize="8.5" fontFamily="ui-monospace,monospace">Width (inches)</text>
       {/* ── Height tape ── */}
       <TapeV y1={FY1} y2={FY2} x={VX} extX1={FX2} extX2={VX}/>
       <text x={VX+13} y={(FY1+FY2)/2} textAnchor="middle" fill={TAPE_FILL}
             fontSize="8.5" fontFamily="ui-monospace,monospace"
-            transform={`rotate(90, ${VX+13}, ${(FY1+FY2)/2})`}>Height — inches</text>
+            transform={`rotate(90, ${VX+13}, ${(FY1+FY2)/2})`}>Height (inches)</text>
     </svg>
   )
 }
@@ -218,12 +218,12 @@ function MeasureWallSVG() {
       {/* ── Width tape (wall width) ── */}
       <TapeH x1={WX1} x2={WX2} y={HY} extY1={WY2+FLOOR_H} extY2={HY}/>
       <text x={(WX1+WX2)/2} y={HY+17} textAnchor="middle" fill={TAPE_FILL}
-            fontSize="8.5" fontFamily="ui-monospace,monospace">Wall width — inches</text>
+            fontSize="8.5" fontFamily="ui-monospace,monospace">Wall width (inches)</text>
       {/* ── Height tape (wall height only — not floor) ── */}
       <TapeV y1={WY1} y2={WY2} x={VX} extX1={WX1} extX2={VX}/>
       <text x={VX-13} y={(WY1+WY2)/2} textAnchor="middle" fill={TAPE_FILL}
             fontSize="8.5" fontFamily="ui-monospace,monospace"
-            transform={`rotate(-90, ${VX-13}, ${(WY1+WY2)/2})`}>Wall height — inches</text>
+            transform={`rotate(-90, ${VX-13}, ${(WY1+WY2)/2})`}>Wall height (inches)</text>
     </svg>
   )
 }
@@ -331,7 +331,7 @@ const STEPS = [
     id: 'welcome',
     target: null,
     title: '👋 Welcome to Gallery Wall Planner',
-    desc: 'Plan your perfect gallery wall before putting a single nail in. Calibrate your wall with a photo, add your art pieces, drag them to true scale — then hang with confidence.',
+    desc: 'Plan your perfect gallery wall before putting a single nail in. Calibrate your wall with a photo, add your art pieces, drag them to true scale, then hang with confidence.',
     pos: 'center',
   },
   {
@@ -354,7 +354,7 @@ const STEPS = [
     id: 'account',
     target: '[data-tutorial="header-login"]',
     title: '☁ Save Your Work Across Devices',
-    desc: 'Creating an account syncs your walls and layouts to any device — phone, tablet, or desktop. Your password is hashed and never stored in plain text, photo uploads are encrypted at rest, and your walls are only accessible to you — no one else can view your data.',
+    desc: 'Creating an account syncs your walls and layouts to any device (phone, tablet, or desktop). Your password is hashed and never stored in plain text, photo uploads are encrypted at rest, and your walls are only accessible to you. No one else can view your data.',
     mDesc: 'Tap the profile icon (top-right) to log in. This syncs your walls and layouts securely across all your devices.',
     pos: 'bottom',
   },
@@ -363,7 +363,7 @@ const STEPS = [
     target: '[data-tutorial="header-wall-badge"]',
     title: '🏠 Create & Switch Walls',
     desc: 'Click the wall name to open Wall Manager. Create walls for different rooms, switch between them, rename or delete them. Each wall has its own calibrated photo and set of saved layouts.',
-    mDesc: 'Tap the wall name to open Wall Manager — create new rooms, switch between them, and each gets its own layouts.',
+    mDesc: 'Tap the wall name to open Wall Manager: create new rooms, switch between them, and each gets its own layouts.',
     pos: 'bottom',
   },
   {
@@ -378,7 +378,7 @@ const STEPS = [
     id: 'add-piece',
     target: '[data-tutorial="header-add-piece"]',
     title: '+ Add a Piece of Art',
-    desc: 'Click "+ Add Piece" to add art to your wall. Give it a name, enter its real-world width and height in inches, and pick a color — or upload a photo of the actual artwork for a realistic preview.',
+    desc: 'Click "+ Add Piece" to add art to your wall. Give it a name, enter its real-world width and height in inches, and pick a color. Or upload a photo of the actual artwork for a realistic preview.',
     mDesc: 'Tap + to add a piece. Set its name, real-world size in inches, choose a color, or upload a photo.',
     pos: 'bottom',
   },
@@ -386,7 +386,7 @@ const STEPS = [
     id: 'piece-photo-warp',
     target: '[data-tutorial="header-add-piece"]',
     title: '📐 Perspective Warp',
-    desc: 'After uploading a photo, the **Perspective Crop** tab opens. Drag the four coloured corner handles to align exactly with the edges of the artwork in the photo. This flattens any camera angle or wall lean. Click **Apply Warp** when aligned — or **Skip warp** to use the photo as-is.',
+    desc: 'After uploading a photo, the **Perspective Crop** tab opens. Drag the four coloured corner handles to align exactly with the edges of the artwork in the photo. This flattens any camera angle or wall lean. Click **Apply Warp** when aligned, or **Skip warp** to use the photo as-is.',
     mDesc: 'Drag the 4 coloured corners to align with the artwork edges, then Apply Warp. Skip warp uses the photo as-is.',
     pos: 'bottom',
     showDemo: true,
@@ -396,7 +396,7 @@ const STEPS = [
     id: 'piece-photo-edge',
     target: '[data-tutorial="header-add-piece"]',
     title: '✂️ Edge Selection',
-    desc: 'Switch to the **Magic Select** tab if your artwork has an irregular shape — oval frame, cut-out, or non-rectangular piece. Click **⚡ Edge Select** to flood-fill from the photo borders inward. Adjust **Tolerance** to grow or shrink the selection, then paint with the brush in **Add** or **Erase** mode to clean up any missed spots.',
+    desc: 'Switch to the **Magic Select** tab if your artwork has an irregular shape (oval frame, cut-out, or non-rectangular piece). Click **⚡ Edge Select** to flood-fill from the photo borders inward. Adjust **Tolerance** to grow or shrink the selection, then paint with the brush in **Add** or **Erase** mode to clean up any missed spots.',
     mDesc: 'In Magic Select, ⚡ Edge Select traces from the borders. Adjust Tolerance, then brush to clean up.',
     pos: 'bottom',
     showDemo: true,
@@ -406,7 +406,7 @@ const STEPS = [
     id: 'piece-photo-ai',
     target: '[data-tutorial="header-add-piece"]',
     title: '🤖 AI Background Removal',
-    desc: 'Click **✨ AI Detect** to automatically remove the background using AI. Adjust **AI Threshold** — lower means more aggressive removal (might clip the subject), higher is more conservative (may keep some background). Fine-tune remaining edges with the brush. The checkerboard areas will be transparent on the wall.',
+    desc: 'Click **✨ AI Detect** to automatically remove the background using AI. Adjust **AI Threshold**: lower means more aggressive removal (might clip the subject), higher is more conservative (may keep some background). Fine-tune remaining edges with the brush. The checkerboard areas will be transparent on the wall.',
     mDesc: 'Tap ✨ AI Detect to auto-remove backgrounds. Adjust AI Threshold, then brush-fix any edges.',
     pos: 'bottom',
     showDemo: true,
@@ -416,7 +416,7 @@ const STEPS = [
     id: 'drag',
     target: '[data-tutorial="wall-area"]',
     title: '✋ Drag Pieces to Arrange',
-    desc: 'Click and drag any piece to position it on the wall. The wall is rendered at true scale based on your calibrated dimensions — the spacing you see is the spacing you\'ll get.\n\nClick a piece to select it. Click the empty wall background to deselect.',
+    desc: 'Click and drag any piece to position it on the wall. The wall is rendered at true scale based on your calibrated dimensions, so the spacing you see is the spacing you\'ll get.\n\nClick a piece to select it. Click the empty wall background to deselect.',
     mDesc: 'Touch and drag pieces to arrange them. The wall is true scale! Tap a piece to select it, tap empty wall to deselect.',
     pos: 'center',
   },
@@ -424,7 +424,7 @@ const STEPS = [
     id: 'save-layout',
     target: '[data-tutorial="header-save"]',
     title: '💾 Save Your Layout',
-    desc: 'Click "Save Layout" and give the current arrangement a name. Save multiple layouts per wall to compare ideas — "Option A", "Symmetrical", "Gallery Style". Load and switch between them anytime.',
+    desc: 'Click "Save Layout" and give the current arrangement a name. Save multiple layouts per wall to compare ideas: "Option A", "Symmetrical", "Gallery Style". Load and switch between them anytime.',
     mDesc: 'Tap Save Layout to save this arrangement with a name. Create multiple versions to compare ideas.',
     pos: 'bottom',
   },
@@ -433,15 +433,15 @@ const STEPS = [
     target: '[data-tutorial="sidebar-toggle"]',          // mobile: hamburger button
     desktopTarget: '[data-tutorial="sidebar-tabs"]',     // desktop: the sidebar tabs row (always visible)
     title: '☰ The Sidebar',
-    desc: 'The sidebar is always open on the left. Use the tabs to switch between sections:\n\n**Pieces** — reorder layers, edit individual pieces, delete them\n**Snap to Grid** — enable snapping with a grid interval for precise placement\n**Layouts** — load, rename, or delete saved arrangements\n**Library** — pieces you\'ve added are saved here so you can reuse them without re-uploading',
-    mDesc: 'Tap ☰ to open the sidebar:\n\n**Pieces** — edit, reorder, delete\n**Snap to Grid** — for precise alignment\n**Layouts** — load saved arrangements\n**Library** — reuse previously added art',
+    desc: 'The sidebar is always open on the left. Use the tabs to switch between sections:\n\n**Pieces**: reorder layers, edit individual pieces, delete them\n**Snap to Grid**: enable snapping with a grid interval for precise placement\n**Layouts**: load, rename, or delete saved arrangements\n**Library**: pieces you\'ve added are saved here so you can reuse them without re-uploading',
+    mDesc: 'Tap ☰ to open the sidebar:\n\n**Pieces**: edit, reorder, delete\n**Snap to Grid**: for precise alignment\n**Layouts**: load saved arrangements\n**Library**: reuse previously added art',
     pos: 'bottom',
   },
   {
     id: 'multiple-walls',
     target: '[data-tutorial="header-wall-badge"]',
     title: '🏠 Multiple Rooms',
-    desc: 'You\'re not limited to one wall. Click the wall name to add walls for different rooms — bedroom, living room, hallway, office. Each room gets its own calibrated photo and set of saved layouts. Switch between rooms anytime.',
+    desc: 'You\'re not limited to one wall. Click the wall name to add walls for different rooms (bedroom, living room, hallway, office). Each room gets its own calibrated photo and set of saved layouts. Switch between rooms anytime.',
     mDesc: 'Tap the wall name to manage multiple rooms. Each gets its own photo and layouts. Switch between them freely.',
     pos: 'bottom',
   },
@@ -449,7 +449,7 @@ const STEPS = [
     id: 'grid',
     target: '[data-tutorial="snap-setting"]',
     title: '⊞ Grid & Snap to Grid',
-    desc: 'The **Settings** tab (now open) has Snap to Grid. Toggle it on and pieces will snap to a grid interval you choose — great for even spacing. You can also click **⊞ Grid** in the controls bar to overlay a measurement grid (inches and feet) across your wall.',
+    desc: 'The **Settings** tab (now open) has Snap to Grid. Toggle it on and pieces will snap to a grid interval you choose, great for even spacing. You can also click **⊞ Grid** in the controls bar to overlay a measurement grid (inches and feet) across your wall.',
     mDesc: 'In the Settings tab, toggle Snap to Grid on. Pieces snap to a precise interval. Tap ⊞ Grid in the toolbar to show a measurement overlay.',
     pos: 'bottom',
     openSettings: true,  // triggers sidebar → Settings tab on step enter
@@ -458,25 +458,25 @@ const STEPS = [
     id: 'lock',
     target: '[data-tutorial="ctrl-lock"]',
     title: '🔒 Lock Pieces in Place',
-    desc: 'Select any piece on the wall — the Lock button appears here in the controls bar. Click it to lock the piece so it can\'t be accidentally dragged while you arrange other pieces. A 🔒 icon marks locked pieces. Select again and click Lock to unlock.',
+    desc: 'Select any piece on the wall; the Lock button appears here in the controls bar. Click it to lock the piece so it can\'t be accidentally dragged while you arrange other pieces. A 🔒 icon marks locked pieces. Select again and click Lock to unlock.',
     mDesc: 'Select a piece, then tap Lock to prevent accidental moves. Tap Lock again to unlock. A 🔒 appears on locked pieces.',
     pos: 'bottom',
     fallbackTarget: '[data-tutorial="ctrl-undo"]',
-    fallbackNote: '→ Select any piece on the wall first — the Lock button appears here when a piece is selected',
+    fallbackNote: '→ Select any piece on the wall first; the Lock button appears here when a piece is selected',
   },
   {
     id: 'undo',
     target: '[data-tutorial="ctrl-undo"]',
     title: '↩ Undo',
-    desc: 'Click "↩ Undo" to step back through your last 100 actions — adding pieces, moving them, resizing, locking/unlocking, and deleting. History is kept for the current session.',
-    mDesc: 'Tap ↩ Undo to step back through recent actions — moves, resizes, adds, deletes, locks (up to 100 steps).',
+    desc: 'Click "↩ Undo" to step back through your last 100 actions: adding pieces, moving them, resizing, locking/unlocking, and deleting. History is kept for the current session.',
+    mDesc: 'Tap ↩ Undo to step back through recent actions: moves, resizes, adds, deletes, locks (up to 100 steps).',
     pos: 'bottom',
   },
   {
     id: 'done',
     target: null,
     title: '🎉 You\'re Ready!',
-    desc: 'That covers everything! Tips will continue to suggest helpful next steps as you work — toggle them with the Tips button in the controls bar. Replay this tutorial anytime using the Tutorial button.\n\nNow go make something beautiful!',
+    desc: 'That covers everything! Tips will continue to suggest helpful next steps as you work. Toggle them with the Tips button in the controls bar. Replay this tutorial anytime using the Tutorial button.\n\nNow go make something beautiful!',
     pos: 'center',
   },
 ]
@@ -689,20 +689,20 @@ function DemoMeasureStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
         <div className="tut-measure-panel">
           <MeasureArtSVG />
           <p className="tut-measure-caption">
-            Measure <strong>each piece of art</strong> — width and height, edge-to-edge (include the frame if you're hanging the frame).
+            Measure <strong>each piece of art</strong>: width and height, edge-to-edge (include the frame if you're hanging the frame).
           </p>
         </div>
         <div className="tut-measure-panel">
           <MeasureWallSVG />
           <p className="tut-measure-caption">
-            Measure your <strong>wall</strong> — the full width and height of the section you're hanging on.
+            Measure your <strong>wall</strong>: the full width and height of the section you're hanging on.
           </p>
         </div>
       </div>
       <div className="tut-measure-tip-row">
         <span className="tut-measure-photo-icon">📝</span>
         <span>
-          Make sure to write your measurements down! Or, use my favorite hack — <strong>take a picture of the measuring tape right next to the wall or piece</strong> so you always have it.
+          Make sure to write your measurements down! Or try my favorite hack: <strong>take a picture of the measuring tape right next to the wall or piece</strong> so you always have it.
         </span>
       </div>
     </DemoShell>
@@ -715,11 +715,11 @@ function DemoPhotoStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
     <DemoShell W={W} tutorialStep={tutorialStep} title="📸 Take a Straight-On Photo"
                badge="📋 Before You Start" onNext={onNext} onBack={onBack} onSkip={onSkip}>
       <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
-        You'll upload a photo of your wall (and optionally each piece). A flat, head-on shot gives the best results — but more importantly, <strong>leave space around all sides</strong> of the subject so you can crop tight in the next step.
+        You'll upload a photo of your wall (and optionally each piece). A flat, head-on shot gives the best results, but more importantly, <strong>leave space around all sides</strong> of the subject so you can crop tight in the next step.
       </p>
       <StraightOnSVG />
       <p className="tut-demo-explain" style={{ margin: '8px 0 0', fontSize: 11 }}>
-        The green dashes show where you'll crop. Anything outside them gets trimmed — so the more breathing room you give yourself, the more control you have.
+        The green dashes show where you'll crop. Anything outside them gets trimmed, so the more breathing room you give yourself, the more control you have.
       </p>
     </DemoShell>
   )
@@ -771,7 +771,7 @@ function DemoWarpStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
                onNext={onNext} onBack={onBack} onSkip={onSkip}>
       <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
         {warped
-          ? '✓ Perspective corrected — the painting is now viewed straight-on.'
+          ? '✓ Perspective corrected. The painting is now viewed straight-on.'
           : 'Drag the coloured corner handles to align with the edges of the artwork. The clip updates live so you can see the correction.'}
       </p>
       <div className="tut-demo-two-col">
@@ -869,7 +869,7 @@ function DemoEdgeStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
     <DemoShell W={W} tutorialStep={tutorialStep} title="✂️ Step 2: Edge Selection"
                onNext={onNext} onBack={onBack} onSkip={onSkip}>
       <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
-        <strong>⚡ Edge Select</strong> floods from the photo borders inward — green shows what's selected.
+        <strong>⚡ Edge Select</strong> floods from the photo borders inward; green shows what's selected.
         Drag <strong>Tolerance</strong> to see the mask grow/shrink. Then <strong>paint directly on the image</strong> to add or erase.
       </p>
       <div className="tut-demo-two-col">
@@ -939,11 +939,11 @@ function aiMaskCSS(thresh) {
   return `radial-gradient(ellipse ${sz}% ${sz + 8}% at 50% 52%, black ${sz - soft}%, transparent ${sz + soft}%)`
 }
 function aiLabel(t) {
-  if (t <= 1) return 'Very tight — may clip the subject'
+  if (t <= 1) return 'Very tight, may clip the subject'
   if (t <= 3) return 'Tight'
   if (t <= 6) return 'Balanced ✓'
-  if (t <= 8) return 'Loose — may keep background'
-  return 'Very loose — little removed'
+  if (t <= 8) return 'Loose, may keep background'
+  return 'Very loose, little removed'
 }
 
 function DemoAIStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
@@ -954,7 +954,7 @@ function DemoAIStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
                onNext={onNext} onBack={onBack} onSkip={onSkip}>
       <p className="tut-demo-explain" style={{ margin: '0 0 10px' }}>
         <strong>✨ AI Detect</strong> auto-removes backgrounds. Click the <strong>AI Threshold</strong> dots
-        below to see how aggressiveness changes the mask — lower removes more, higher keeps more.
+        below to see how aggressiveness changes the mask: lower removes more, higher keeps more.
         Checkerboard = transparent.
       </p>
       <div className="tut-demo-two-col">
@@ -983,9 +983,9 @@ function DemoAIStep({ W, isMob, tutorialStep, onNext, onBack, onSkip }) {
             <span className="tut-demo-ctrl-val" style={{ fontSize: 11 }}>{aiLabel(thresh)}</span>
           </div>
           <p className="tut-demo-hint" style={{ marginTop: 8 }}>
-            {thresh <= 3 && <><strong>⚠</strong> Very tight — might cut into the subject. Try raising to 5–7.<br/></>}
+            {thresh <= 3 && <><strong>⚠</strong> Very tight, might cut into the subject. Try raising to 5–7.<br/></>}
             {thresh > 3 && thresh <= 7 && <><strong>✓</strong> Good balance. Use the brush to touch up any edges AI missed.<br/></>}
-            {thresh > 7 && <><strong>⚠</strong> Loose — some background kept. Lower threshold or use Edge Select.<br/></>}
+            {thresh > 7 && <><strong>⚠</strong> Loose, some background kept. Lower threshold or use Edge Select.<br/></>}
             After AI Detect, switch to the brush in Edge Selection to fix any remaining imperfections.
           </p>
         </div>
