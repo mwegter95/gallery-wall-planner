@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
 export default function Sidebar({
   pieces, selectedId, onSelect, onDelete, onEdit, onBringForward, onSendBackward,
@@ -13,6 +13,21 @@ export default function Sidebar({
   const [layoutName, setLayoutName] = useState('')
   const [saveError, setSaveError]   = useState('')
   const [section, setSection]       = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'settings'
+
+  // Preserve scroll position across re-renders triggered by parent state changes
+  // (e.g. loading a layout updates pieces, which re-renders Sidebar and can reset scroll)
+  const asideRef        = useRef(null)
+  const savedScrollRef  = useRef(0)
+
+  const handleLoadLayout = useCallback((name) => {
+    // Snapshot the current scroll position of the sidebar container
+    if (asideRef.current) savedScrollRef.current = asideRef.current.scrollTop
+    onLoadLayout(name)
+    // Restore after React has flushed its DOM updates
+    requestAnimationFrame(() => {
+      if (asideRef.current) asideRef.current.scrollTop = savedScrollRef.current
+    })
+  }, [onLoadLayout])
 
   // Allow external callers (e.g. tutorial) to force-switch the active tab
   useEffect(() => {
@@ -35,7 +50,7 @@ export default function Sidebar({
   const selectedPiece = pieces.find(p => p.id === selectedId)
 
   return (
-    <aside className={`sidebar${isOpen ? ' sidebar--open' : ''}`}>
+    <aside ref={asideRef} className={`sidebar${isOpen ? ' sidebar--open' : ''}`}>
       {/* Top tabs */}
       <div className="sidebar-tabs" data-tutorial="sidebar-tabs">
         <button
@@ -283,7 +298,7 @@ export default function Sidebar({
                 <div className="layout-actions">
                   <button
                     className="btn btn-ghost btn-sm"
-                    onClick={() => onLoadLayout(name)}
+                    onClick={() => handleLoadLayout(name)}
                   >Load</button>
                   <button
                     className="icon-btn"

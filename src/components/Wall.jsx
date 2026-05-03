@@ -136,6 +136,9 @@ export default function Wall({
           ↩ Undo
         </button>
 
+        {/* ── Row break on mobile: Tutorial + Tips + piece count move to second row ── */}
+        <div className="ctrl-row-break" aria-hidden="true" />
+
         {/* Tutorial button */}
         <button
           className={`ctrl-btn ctrl-btn--tutorial ${tutorialActive ? 'active' : ''}`}
@@ -209,27 +212,42 @@ export default function Wall({
                     style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2 }}
                   >
                     <defs>
-                      {/* Inch sub-pattern — rendered when scale >= 1px/inch (visible on mobile) */}
-                      {scale >= 1 && (
-                        <pattern id="inch-pat" width={scale} height={scale} patternUnits="userSpaceOnUse">
-                          <path
-                            d={`M ${scale} 0 L 0 0 0 ${scale}`}
-                            fill="none"
-                            stroke="rgba(255,255,255,0.09)"
-                            strokeWidth="0.5"
-                          />
-                        </pattern>
-                      )}
-                      {/* Foot pattern (12") — draws over inch grid */}
-                      <pattern id="foot-pat" width={12 * scale} height={12 * scale} patternUnits="userSpaceOnUse">
-                        {scale >= 1 && <rect width={12 * scale} height={12 * scale} fill="url(#inch-pat)" />}
-                        <path
-                          d={`M ${12 * scale} 0 L 0 0 0 ${12 * scale}`}
-                          fill="none"
-                          stroke="rgba(255,255,255,0.28)"
-                          strokeWidth="1"
-                        />
-                      </pattern>
+                      {/* Vertical offset so grid lines land on whole-foot ruler marks
+                          measured from the floor. Without this, the grid tiles from
+                          y=0 (top) but the ruler counts up from the floor, so they
+                          only align when wallHeight is an exact number of feet.
+                          offsetY = (wallHeight mod 12) * scale shifts the pattern
+                          so that one tile boundary always falls at the floor (y=hPx). */}
+                      {(() => {
+                        const offsetY = (wallHeight % 12) * scale
+                        return (
+                          <>
+                            {scale >= 1 && (
+                              <pattern id="inch-pat" width={scale} height={scale}
+                                patternUnits="userSpaceOnUse"
+                                patternTransform={`translate(0,${offsetY})`}>
+                                <path
+                                  d={`M ${scale} 0 L 0 0 0 ${scale}`}
+                                  fill="none"
+                                  stroke="rgba(255,255,255,0.09)"
+                                  strokeWidth="0.5"
+                                />
+                              </pattern>
+                            )}
+                            <pattern id="foot-pat" width={12 * scale} height={12 * scale}
+                              patternUnits="userSpaceOnUse"
+                              patternTransform={`translate(0,${offsetY})`}>
+                              {scale >= 1 && <rect width={12 * scale} height={12 * scale} fill="url(#inch-pat)" />}
+                              <path
+                                d={`M ${12 * scale} 0 L 0 0 0 ${12 * scale}`}
+                                fill="none"
+                                stroke="rgba(255,255,255,0.28)"
+                                strokeWidth="1"
+                              />
+                            </pattern>
+                          </>
+                        )
+                      })()}
                     </defs>
                     <rect width="100%" height="100%" fill="url(#foot-pat)" />
                     {/* Foot labels inside the wall */}
@@ -245,18 +263,23 @@ export default function Wall({
                         >{fi}′</text>
                       )
                     ))}
-                    {Array.from({ length: Math.floor(wallHeight / 12) + 1 }, (_, i) => i).map(fi => (
-                      fi > 0 && fi * 12 <= wallHeight && (
-                        <text
-                          key={`fy-${fi}`}
-                          x={4}
-                          y={fi * 12 * scale - 3}
-                          fill="rgba(255,255,255,0.35)"
-                          fontSize={9}
-                          fontFamily="ui-monospace,monospace"
-                        >{Math.floor(wallHeight / 12) - fi}′</text>
+                    {/* Y labels: place fi′ mark at same Y as the vertical ruler tick
+                        (wallHeight - fi*12)*scale from top = fi feet up from floor) */}
+                    {Array.from({ length: Math.floor(wallHeight / 12) + 1 }, (_, i) => i).map(fi => {
+                      const yPos = (wallHeight - fi * 12) * scale
+                      return (
+                        fi > 0 && yPos > 3 && yPos < hPx && (
+                          <text
+                            key={`fy-${fi}`}
+                            x={4}
+                            y={yPos - 3}
+                            fill="rgba(255,255,255,0.35)"
+                            fontSize={9}
+                            fontFamily="ui-monospace,monospace"
+                          >{fi}′</text>
+                        )
                       )
-                    ))}
+                    })}
                   </svg>
                 )}
 

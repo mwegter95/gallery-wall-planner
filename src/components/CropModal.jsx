@@ -920,8 +920,10 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
               onClick={() => { setPhase('idle'); aiMaskRef.current = null; origDataRef.current = null; userAlphaRef.current = null }}>
               ↺ Start Over
             </button>
-            <button className="btn btn-ghost" onClick={goToWarp} title="Perspective-correct the cutout">↗ Warp Cutout</button>
-            <button className="btn btn-primary" onClick={apply}>✓ Use Cutout</button>
+            <p className="cm-hint cm-hint--warp">
+              💡 Select the tightest rectangle that still fits the whole piece inside — any area outside the cutout will be transparent on your wall.
+            </p>
+            <button className="btn btn-primary" onClick={goToWarp} title="Perspective-correct and apply the cutout">↗ Warp Cutout</button>
           </>
         ) : phase === 'edge-select' ? (
           <>
