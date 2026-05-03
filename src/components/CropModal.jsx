@@ -829,18 +829,23 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
               )}
               {/* Row 4: AI threshold (only shown when AI mask exists) */}
               {aiMaskRef.current && (
-                <div className="ms-thresh-row">
-                  <span className="ms-ctrl-label" title="Adjusting resets brush edits">AI Threshold</span>
-                  <div className="ms-sens-track">
-                    {Array.from({ length: 11 }, (_, i) => (
-                      <div key={i} className={`ms-sens-pip ${i <= sensitivity ? 'active' : ''}`}
-                        onClick={() => setSensitivity(i)} title="Resets brush edits" />
-                    ))}
+                <>
+                  <div className="ms-thresh-row">
+                    <span className="ms-ctrl-label ms-ctrl-label--highlight" title="Adjusting resets brush edits">AI Threshold</span>
+                    <div className="ms-sens-track">
+                      {Array.from({ length: 11 }, (_, i) => (
+                        <div key={i} className={`ms-sens-pip ${i <= sensitivity ? 'active' : ''}`}
+                          onClick={() => setSensitivity(i)} title="Resets brush edits" />
+                      ))}
+                    </div>
+                    <span className="ms-ctrl-val" style={{ minWidth: 52, textAlign: 'right' }}>
+                      {sensitivity < 4 ? 'Tight' : sensitivity > 7 ? 'Loose' : 'Balanced'}
+                    </span>
                   </div>
-                  <span className="ms-ctrl-val" style={{ minWidth: 52, textAlign: 'right' }}>
-                    {sensitivity < 4 ? 'Tight' : sensitivity > 7 ? 'Loose' : 'Balanced'}
-                  </span>
-                </div>
+                  <p className="ms-inline-tip">
+                    💡 <strong>Tight</strong> keeps only the highest-confidence areas — good for clean, high-contrast edges. <strong>Loose</strong> captures more of the piece but may pull in some background. Drag left or right, then use the brush to clean up any stragglers.
+                  </p>
+                </>
               )}
             </div>
           )}
@@ -850,6 +855,9 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
       {/* ── WARP PHASE ────────────────────────────────────── */}
       {phase === 'warp' && (
         <div className="cm-body">
+          <p className="ms-warp-tip">
+            💡 The areas you brushed or detected are already transparent — they'll stay that way. Drag the corner handles as tightly as possible around the edges of the piece itself, keeping the whole shape just inside the rectangle.
+          </p>
           <div className="cm-image-area">
             <div className="crop-wrap" ref={warpWrapRef}>
               <img
@@ -960,11 +968,12 @@ export default function CropModal({ imageUrl, onApply, onSkip }) {
         <div className="crop-header">
           <div className="cm-tabs">
             <button className={`cm-tab ${mode === 'crop'  ? 'active' : ''}`} onClick={() => setMode('crop')} >✂️ Perspective Crop</button>
-            <button className={`cm-tab ${mode === 'magic' ? 'active' : ''}`} onClick={() => setMode('magic')}>✨ Magic Select</button>
+            {/* cm-tab--callout pulses when on crop tab to nudge user toward Magic Select */}
+            <button className={`cm-tab ${mode === 'magic' ? 'active' : ''} ${mode === 'crop' ? 'cm-tab--callout' : ''}`} onClick={() => setMode('magic')}>✨ Magic Select</button>
           </div>
           <p className="cm-hint">
             {mode === 'crop'
-              ? 'Drag the 4 corners to frame the artwork · Apply Warp flattens perspective'
+              ? <><span>Drag the 4 corners to frame the artwork · Apply Warp flattens perspective</span><span className="cm-hint-callout"> · Non-rectangular piece (mirror, clock, wreath)? Switch to ✨ Magic Select to brush edges or detect background.</span></>
               : 'Edge Select traces borders instantly · optionally refine with AI · brush to clean up'}
           </p>
         </div>

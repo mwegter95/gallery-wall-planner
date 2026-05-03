@@ -1673,11 +1673,59 @@ kbd {
   color: var(--text-muted);
   margin: 0;
 }
+/* Inline callout within the crop-tab hint — highlights the non-rectangular shape suggestion */
+.cm-hint-callout {
+  color: var(--accent-lt);
+  font-style: italic;
+}
 .cm-hint--warp {
   flex: 1;
   font-size: 11px;
   line-height: 1.4;
   opacity: 0.75;
+}
+
+/* Magic Select tab pulses gently when the user is on the Crop tab,
+   drawing attention to the option for non-rectangular pieces */
+@keyframes cm-tab-callout-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124,111,247,0); border-color: var(--border); }
+  50%       { box-shadow: 0 0 0 3px rgba(124,111,247,0.35); border-color: rgba(124,111,247,0.6); }
+}
+.cm-tab--callout {
+  animation: cm-tab-callout-pulse 2.4s ease-in-out infinite;
+  color: var(--accent-lt);
+}
+
+/* Highlight label next to AI threshold to draw attention */
+.ms-ctrl-label--highlight {
+  color: var(--accent-lt);
+  font-weight: 600;
+}
+
+/* Inline contextual tip inside the brush controls area */
+.ms-inline-tip {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  background: rgba(124,111,247,0.07);
+  border-left: 2px solid rgba(124,111,247,0.4);
+  padding: 6px 8px;
+  border-radius: 0 4px 4px 0;
+  margin: 0;
+}
+.ms-inline-tip strong { color: var(--text-primary); }
+
+/* Warp phase tip banner above the canvas */
+.ms-warp-tip {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  background: rgba(124,111,247,0.07);
+  border-left: 2px solid rgba(124,111,247,0.4);
+  padding: 8px 12px;
+  border-radius: 0 4px 4px 0;
+  margin: 8px 12px 0;
+  flex-shrink: 0;
 }
 .cm-footer {
   padding: 10px 18px;

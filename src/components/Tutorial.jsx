@@ -537,26 +537,6 @@ const TIPS = [
     mDesc: 'Tap Save Layout to keep your current arrangement.',
     pos: 'bottom',
   },
-  {
-    id: 'edge-select-tip',
-    condition: ({ pieces }) =>
-      pieces.some(p => p.image && !p.transparent),
-    target: '[data-tutorial="header-add-piece"]',
-    title: '✂️ Remove Backgrounds for Odd-Shaped Pieces',
-    desc: 'Oval mirrors, clocks, wreaths, and other non-rectangular pieces look much better with the background removed. When adding or editing a piece photo, choose **Edge Select** or **AI Detect** to cut out just the piece — the transparent edges will be invisible on your wall preview.',
-    mDesc: 'Non-rectangular piece? Use **Edge Select** or **AI Detect** when adding a photo to remove the background for a cleaner preview.',
-    pos: 'bottom',
-  },
-  {
-    id: 'ai-looseness-tip',
-    condition: ({ pieces }) =>
-      pieces.some(p => p.image && !p.transparent),
-    target: '[data-tutorial="header-add-piece"]',
-    title: '🎛️ Tune the AI Threshold for Better Cutouts',
-    desc: 'After running AI Detect, use the **AI Threshold** slider to make the selection tighter or looser. **Tight** keeps only the most confident edges (good for clean, high-contrast photos). **Loose** captures more of the piece but may include some background. Then use the brush to touch up any missed areas.',
-    mDesc: 'After AI Detect, adjust the **AI Threshold** — Tight for crisp edges, Loose to capture more of the piece. Use the brush to clean up.',
-    pos: 'bottom',
-  },
 ]
 
 // ── Helpers ───────────────────────────────────────────────────────
