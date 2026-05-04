@@ -8,6 +8,7 @@ import WallManager from './components/WallManager'
 import Room3DViewer from './components/Room3DViewer'
 import RoomSetupWizard from './components/RoomSetupWizard'
 import RoomManager from './components/RoomManager'
+import SpaceBuilder from './components/SpaceBuilder'
 import AuthModal, { UserBadge } from './components/AuthModal'
 import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP } from './components/Tutorial'
 import * as api from './utils/api'
@@ -110,7 +111,9 @@ export default function App() {
   const [showRoomWizard,  setShowRoomWizard]  = useState(false)
   const [editingRoomId,   setEditingRoomId]   = useState(null)
   const [newRoomName,     setNewRoomName]     = useState('')
-  const saveMenuRef      = useRef(null)
+  /* ── Space Builder state ───────────────────────── */
+  const [showSpaceBuilder, setShowSpaceBuilder] = useState(false)
+  const [editingSpaceId,   setEditingSpaceId]   = useState(null)
   const saveFlashTimer   = useRef(null)
   const hasLoadedRef   = useRef(false)   // becomes true after first successful backend load
   const piecesRef      = useRef(pieces)  // always-current pieces for stable pushHistory callback
@@ -451,6 +454,16 @@ export default function App() {
     // Just open the wizard; FacePickerStep lets them choose which face to re-crop
     setShowRoomView(false)
     setShowRoomWizard(true)
+  }, [])
+
+  /* ── Space Builder save ──────────────────────────────── */
+  const handleSaveSpace = useCallback(async (space) => {
+    // Store the full space (including photo data URLs) as a room record.
+    // Photos are kept inline for now (same approach as paint layer masks).
+    await api.putRoom(space)
+    setRooms(prev => ({ ...prev, [space.id]: space }))
+    setShowSpaceBuilder(false)
+    setEditingSpaceId(null)
   }, [])
 
   /* ── Wall calibration ─────────────────────────────── */
@@ -1108,8 +1121,24 @@ export default function App() {
               <path d="M7 1v12M1 4.5l6 3.5 6-3.5" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" opacity="0.6"/>
             </svg>
             <span className="btn-label"> Rooms</span>
-            {Object.keys(rooms).length > 0 && (
-              <span className="room-count-badge">{Object.keys(rooms).length}</span>
+            {Object.keys(rooms).filter(id => rooms[id].roomType !== 'space').length > 0 && (
+              <span className="room-count-badge">{Object.keys(rooms).filter(id => rooms[id].roomType !== 'space').length}</span>
+            )}
+          </button>
+          <button
+            className="space-builder-btn"
+            onClick={() => { setEditingSpaceId(null); setShowSpaceBuilder(true) }}
+            title="Interactive Space Builder"
+          >
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+              <rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.25"/>
+              <rect x="7" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.25"/>
+              <rect x="1" y="7" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.25"/>
+              <rect x="7" y="7" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.25"/>
+            </svg>
+            <span className="btn-label"> Build</span>
+            {Object.values(rooms).filter(r => r.roomType === 'space').length > 0 && (
+              <span className="room-count-badge">{Object.values(rooms).filter(r => r.roomType === 'space').length}</span>
             )}
           </button>
         </div>
@@ -1398,6 +1427,15 @@ export default function App() {
             onClose={() => setShowRoomView(false)}
           />
         </div>
+      )}
+
+      {showSpaceBuilder && (
+        <SpaceBuilder
+          key={editingSpaceId || 'new-space'}
+          existingSpace={editingSpaceId ? rooms[editingSpaceId] : null}
+          onSave={handleSaveSpace}
+          onClose={() => { setShowSpaceBuilder(false); setEditingSpaceId(null) }}
+        />
       )}
 
       {/* Tutorial + Tips overlay — renders above everything else */}
