@@ -115,6 +115,7 @@ export default function App() {
   const [showSpaceBuilder, setShowSpaceBuilder] = useState(false)
   const [editingSpaceId,   setEditingSpaceId]   = useState(null)
   const saveFlashTimer   = useRef(null)
+  const saveMenuRef    = useRef(null)
   const hasLoadedRef   = useRef(false)   // becomes true after first successful backend load
   const piecesRef      = useRef(pieces)  // always-current pieces for stable pushHistory callback
   const calibWallIdRef = useRef(null)    // ref-based tracking of which wall is being calibrated
