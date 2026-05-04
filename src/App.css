@@ -5477,3 +5477,84 @@ kbd {
 }
 .sb-se-rewarp-btn:hover:not(:disabled) { background: rgba(74,158,255,0.06); color: #6aacda; border-color: #2a4a6a; }
 .sb-se-rewarp-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Surface panel: Wall Angle row ─────────────────────────────────────────── */
+.sb-se-rot-row {
+  gap: 6px;
+  align-items: center;
+}
+.sb-se-rot-slider {
+  flex: 1;
+  accent-color: #4a9eff;
+  cursor: pointer;
+}
+.sb-se-rot-val {
+  min-width: 36px;
+  text-align: right;
+}
+
+/* ── SpacePreviewViewer selected-surface panel ─────────────────────────────── */
+.spv-sel-panel {
+  position: absolute;
+  right: 14px;
+  top: 54px;
+  width: 220px;
+  background: rgba(8, 16, 28, 0.93);
+  border: 1px solid #1e3050;
+  border-radius: 10px;
+  padding: 10px 12px 12px;
+  backdrop-filter: blur(8px);
+}
+
+.spv-sel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.spv-sel-name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .03em;
+}
+.spv-sel-close {
+  background: none;
+  border: none;
+  color: #5a7090;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.spv-sel-close:hover { color: #aac4d8; background: rgba(255,255,255,0.06); }
+
+.spv-sel-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.spv-sel-field {
+  display: grid;
+  grid-template-columns: 42px 46px 1fr;
+  align-items: center;
+  gap: 4px;
+}
+.spv-sel-fl {
+  font-size: 10px;
+  color: #7a94aa;
+  font-weight: 500;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.spv-sel-fv {
+  font-size: 11px;
+  color: #aac4d8;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.spv-sel-field input[type="range"] {
+  width: 100%;
+  accent-color: #4a9eff;
+  cursor: pointer;
+}

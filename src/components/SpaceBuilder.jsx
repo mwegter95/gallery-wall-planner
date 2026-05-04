@@ -243,6 +243,18 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
           <span className="sb-se-unit">″</span>
         </div>
 
+        {/* 3D rotation */}
+        <div className="sb-se-row sb-se-rot-row">
+          <label className="sb-se-label">Wall angle</label>
+          <input
+            type="range" min="-180" max="180" step="1"
+            className="sb-se-rot-slider"
+            value={activeSurface.rotYDeg ?? 0}
+            onChange={e => updateSurface(activeSurface.id, { rotYDeg: Number(e.target.value) })}
+          />
+          <span className="sb-se-unit sb-se-rot-val">{activeSurface.rotYDeg ?? 0}°</span>
+        </div>
+
         {/* Photo assignment */}
         <div className="sb-se-row">
           <label className="sb-se-label">Photo</label>
@@ -497,134 +509,202 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
   )
 }
 
-// ── Inline 3D preview (minimal Three.js viewer for freeform placements) ──────
+// ── Inline 3D preview — orbit camera, click-to-select, per-surface sliders ──
 function SpacePreviewViewer({ placements, spaceName, onClose }) {
-  const mountRef = useRef(null)
+  const mountRef  = useRef(null)
+  const [localPlacements, setLocalPlacements] = useState(() => placements.map(p => ({ ...p })))
+  const [selectedId, setSelectedId] = useState(null)
 
+  // Three.js handles kept in refs so effects can access without re-running
+  const sceneRef    = useRef(null)
+  const cameraRef   = useRef(null)
+  const rendererRef = useRef(null)
+  const meshMapRef  = useRef({})   // { [surfaceId]: { mesh, frame } }
+  const rafRef      = useRef(null)
+  const orbitRef    = useRef({
+    phi: Math.PI / 2.5, theta: 0.3, radius: 5,
+    center: [0, 0, 0],
+    isDragging: false, hadDrag: false, lastX: 0, lastY: 0,
+  })
+
+  const applyOrbit = useCallback(() => {
+    const cam = cameraRef.current
+    if (!cam) return
+    const o = orbitRef.current
+    o.phi = Math.max(0.05, Math.min(Math.PI - 0.05, o.phi))
+    const [cx, cy, cz] = o.center
+    cam.position.set(
+      cx + o.radius * Math.sin(o.phi) * Math.sin(o.theta),
+      cy + o.radius * Math.cos(o.phi),
+      cz + o.radius * Math.sin(o.phi) * Math.cos(o.theta),
+    )
+    cam.lookAt(cx, cy, cz)
+  }, [])
+
+  // ── Scene init (once) ─────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mountRef.current || !placements?.length) return
     const mount = mountRef.current
+    if (!mount) return
 
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(mount.clientWidth || 900, mount.clientHeight || 650)
     renderer.outputColorSpace = THREE.SRGBColorSpace
     mount.appendChild(renderer.domElement)
+    rendererRef.current = renderer
 
-    const scene  = new THREE.Scene()
+    const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x090c10)
+    sceneRef.current = scene
 
     const camera = new THREE.PerspectiveCamera(
-      75, (mount.clientWidth || 900) / (mount.clientHeight || 650), 0.01, 500
+      60, (mount.clientWidth || 900) / (mount.clientHeight || 650), 0.01, 500
     )
-    camera.position.set(0, 0, 0)
+    cameraRef.current = camera
 
-    let phi = Math.PI / 2, theta = 0
-    const updateLookAt = () => {
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi))
-      camera.lookAt(
-        Math.sin(phi) * Math.sin(theta),
-        Math.cos(phi),
-        Math.sin(phi) * Math.cos(theta),
-      )
+    const ro = new ResizeObserver(() => {
+      camera.aspect = mount.clientWidth / mount.clientHeight
+      camera.updateProjectionMatrix()
+      renderer.setSize(mount.clientWidth, mount.clientHeight)
+    })
+    ro.observe(mount)
+
+    const o = orbitRef.current
+    const onDown = e => {
+      if (e.button !== 0) return
+      o.isDragging = true; o.hadDrag = false
+      o.lastX = e.clientX; o.lastY = e.clientY
     }
-    updateLookAt()
+    const onMove = e => {
+      if (!o.isDragging) return
+      const dx = e.clientX - o.lastX
+      const dy = e.clientY - o.lastY
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) o.hadDrag = true
+      o.theta -= dx * 0.005
+      o.phi   += dy * 0.005
+      o.lastX = e.clientX; o.lastY = e.clientY
+      applyOrbit()
+    }
+    const onUp = () => { o.isDragging = false }
+    const onWheel = e => {
+      o.radius = Math.max(0.3, Math.min(80, o.radius * (1 + e.deltaY * 0.001)))
+      applyOrbit()
+    }
+    const onClickCanvas = e => {
+      if (o.hadDrag) return
+      const rect = renderer.domElement.getBoundingClientRect()
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left)  / rect.width)  * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      const ray = new THREE.Raycaster()
+      ray.setFromCamera(mouse, camera)
+      const meshes = Object.values(meshMapRef.current).map(v => v.mesh).filter(Boolean)
+      const hits = ray.intersectObjects(meshes)
+      setSelectedId(hits.length ? hits[0].object.userData.surfaceId : null)
+    }
+
+    const canvas = renderer.domElement
+    canvas.addEventListener('mousedown', onDown)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    canvas.addEventListener('wheel', onWheel, { passive: true })
+    canvas.addEventListener('click', onClickCanvas)
+
+    const animate = () => { rafRef.current = requestAnimationFrame(animate); renderer.render(scene, camera) }
+    animate()
+
+    return () => {
+      cancelAnimationFrame(rafRef.current)
+      ro.disconnect()
+      canvas.removeEventListener('mousedown', onDown)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('click', onClickCanvas)
+      scene.traverse(obj => {
+        if (obj.geometry) obj.geometry.dispose()
+        if (obj.material?.map) obj.material.map.dispose()
+        if (obj.material) obj.material.dispose()
+      })
+      renderer.dispose()
+      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement)
+    }
+  }, [applyOrbit])
+
+  // ── Rebuild meshes when localPlacements changes ───────────────────────────
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    // Remove old surface objects
+    Object.values(meshMapRef.current).forEach(({ mesh, frame }) => {
+      scene.remove(mesh); scene.remove(frame)
+    })
+    meshMapRef.current = {}
 
     const texLoader = new THREE.TextureLoader()
-    const meshes    = []
-
-    placements.forEach(p => {
+    localPlacements.forEach(p => {
       const geo = new THREE.PlaneGeometry(p.wM, p.hM)
       let mat
-
       if (p.warpedDataUrl) {
         const tex = texLoader.load(p.warpedDataUrl)
         tex.colorSpace = THREE.SRGBColorSpace
-        mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.FrontSide })
+        mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
       } else {
-        const hex = parseInt(
-          (SURFACE_COLORS[p.colorIdx ?? 0] || '#4a9eff').replace('#', ''), 16
-        )
-        mat = new THREE.MeshBasicMaterial({ color: hex, side: THREE.FrontSide, opacity: 0.7, transparent: true })
+        const hex = parseInt((SURFACE_COLORS[p.colorIdx ?? 0] || '#4a9eff').replace('#', ''), 16)
+        mat = new THREE.MeshBasicMaterial({ color: hex, side: THREE.DoubleSide, opacity: 0.7, transparent: true })
       }
-
       const mesh = new THREE.Mesh(geo, mat)
       mesh.position.set(...p.position)
       mesh.rotation.set(p.rotX ?? 0, p.rotY ?? 0, 0)
       mesh.userData.surfaceId = p.surfaceId
       scene.add(mesh)
-      meshes.push(mesh)
 
-      const edges   = new THREE.EdgesGeometry(geo)
-      const lineMat = new THREE.LineBasicMaterial({ color: 0x3a5566 })
-      const frame   = new THREE.LineSegments(edges, lineMat)
-      frame.position.set(...p.position)
-      frame.rotation.set(p.rotX ?? 0, p.rotY ?? 0, 0)
+      const edgesGeo = new THREE.EdgesGeometry(geo)
+      const lineMat  = new THREE.LineBasicMaterial({ color: 0x3a5566 })
+      const frame    = new THREE.LineSegments(edgesGeo, lineMat)
+      frame.position.copy(mesh.position)
+      frame.rotation.copy(mesh.rotation)
       scene.add(frame)
+      meshMapRef.current[p.surfaceId] = { mesh, frame }
     })
 
-    // Position camera at centroid of all placements, looking at first surface
-    if (placements.length) {
-      const cx = placements.reduce((s, p) => s + p.position[0], 0) / placements.length
-      const cy = placements.reduce((s, p) => s + p.position[1], 0) / placements.length
-      const cz = placements.reduce((s, p) => s + p.position[2], 0) / placements.length
-      // Place camera slightly behind centroid
-      const maxDim = Math.max(...placements.map(p => Math.max(p.wM, p.hM)))
-      camera.position.set(cx, cy, cz + maxDim * 1.5)
-      camera.lookAt(cx, cy, cz)
-      phi = Math.PI / 2; theta = Math.PI
-      updateLookAt()
+    // Fit orbit
+    if (localPlacements.length) {
+      const cx = localPlacements.reduce((s, p) => s + p.position[0], 0) / localPlacements.length
+      const cy = localPlacements.reduce((s, p) => s + p.position[1], 0) / localPlacements.length
+      const cz = localPlacements.reduce((s, p) => s + p.position[2], 0) / localPlacements.length
+      const maxDim = Math.max(...localPlacements.flatMap(p => [p.wM, p.hM]))
+      const o = orbitRef.current
+      o.center  = [cx, cy, cz]
+      o.radius  = maxDim * 2.8
+      applyOrbit()
     }
+  }, [localPlacements, applyOrbit])
 
-    let isDragging = false, lastX = 0, lastY = 0
-    const onPointerDown = e => {
-      isDragging = true; lastX = e.clientX; lastY = e.clientY
-    }
-    const onPointerMove = e => {
-      if (!isDragging) return
-      theta -= (e.clientX - lastX) * 0.006
-      phi   += (e.clientY - lastY) * 0.006
-      lastX = e.clientX; lastY = e.clientY
-      updateLookAt()
-    }
-    const onPointerUp = () => { isDragging = false }
+  // ── Highlight selected surface ────────────────────────────────────────────
+  useEffect(() => {
+    Object.entries(meshMapRef.current).forEach(([id, { frame }]) => {
+      frame?.material?.color?.set(id === selectedId ? 0xffffff : 0x3a5566)
+    })
+  }, [selectedId])
 
-    const canvas = renderer.domElement
-    canvas.addEventListener('mousedown', onPointerDown)
-    canvas.addEventListener('mousemove', onPointerMove)
-    canvas.addEventListener('mouseup',   onPointerUp)
-    canvas.addEventListener('mouseleave',onPointerUp)
+  // ── Helpers for selected panel ────────────────────────────────────────────
+  const selectedP = localPlacements.find(p => p.surfaceId === selectedId)
 
-    const onResize = () => {
-      camera.aspect = mount.clientWidth / mount.clientHeight
-      camera.updateProjectionMatrix()
-      renderer.setSize(mount.clientWidth, mount.clientHeight)
-    }
-    const ro = new ResizeObserver(onResize)
-    ro.observe(mount)
-
-    let raf
-    const animate = () => { raf = requestAnimationFrame(animate); renderer.render(scene, camera) }
-    animate()
-
-    return () => {
-      cancelAnimationFrame(raf)
-      ro.disconnect()
-      canvas.removeEventListener('mousedown', onPointerDown)
-      canvas.removeEventListener('mousemove', onPointerMove)
-      canvas.removeEventListener('mouseup',   onPointerUp)
-      canvas.removeEventListener('mouseleave',onPointerUp)
-      scene.traverse(obj => {
-        if (obj.geometry) obj.geometry.dispose()
-        if (obj.material) {
-          if (obj.material.map) obj.material.map.dispose()
-          obj.material.dispose()
-        }
-      })
-      renderer.dispose()
-      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement)
-    }
-  }, [placements])
+  const updateSelPos = (axis, val) => {
+    const idx = { x: 0, y: 1, z: 2 }[axis]
+    setLocalPlacements(prev => prev.map(p => {
+      if (p.surfaceId !== selectedId) return p
+      const pos = [...p.position]; pos[idx] = +val
+      return { ...p, position: pos }
+    }))
+  }
+  const updateSelRot = (key, deg) =>
+    setLocalPlacements(prev => prev.map(p =>
+      p.surfaceId !== selectedId ? p : { ...p, [key]: +deg * Math.PI / 180 }
+    ))
 
   return (
     <div className="room-viewer">
@@ -639,8 +719,48 @@ function SpacePreviewViewer({ placements, spaceName, onClose }) {
           </button>
           <span className="room-viewer__room-name">{spaceName} — 3D Preview</span>
         </div>
-        <div className="room-viewer__tip">Drag to look around</div>
+
+        {selectedP ? (
+          <div className="spv-sel-panel">
+            <div className="spv-sel-header">
+              <span className="spv-sel-name" style={{ color: SURFACE_COLORS[selectedP.colorIdx ?? 0] }}>
+                {selectedP.name}
+              </span>
+              <button className="spv-sel-close" onClick={() => setSelectedId(null)}>✕</button>
+            </div>
+            <div className="spv-sel-fields">
+              {[['X', 'x', -20, 20, selectedP.position[0]],
+                ['Y', 'y', -10, 10, selectedP.position[1]],
+                ['Z', 'z', -20, 20, selectedP.position[2]]].map(([label, axis, min, max, val]) => (
+                <label key={axis} className="spv-sel-field">
+                  <span className="spv-sel-fl">{label}</span>
+                  <span className="spv-sel-fv">{(+val).toFixed(2)}m</span>
+                  <input type="range" min={min} max={max} step="0.02" value={val}
+                    onChange={e => updateSelPos(axis, e.target.value)} />
+                </label>
+              ))}
+              <label className="spv-sel-field">
+                <span className="spv-sel-fl">Rotate Y</span>
+                <span className="spv-sel-fv">{Math.round((selectedP.rotY ?? 0) * 180 / Math.PI)}°</span>
+                <input type="range" min="-180" max="180" step="1"
+                  value={Math.round((selectedP.rotY ?? 0) * 180 / Math.PI)}
+                  onChange={e => updateSelRot('rotY', e.target.value)} />
+              </label>
+              <label className="spv-sel-field">
+                <span className="spv-sel-fl">Tilt X</span>
+                <span className="spv-sel-fv">{Math.round((selectedP.rotX ?? 0) * 180 / Math.PI)}°</span>
+                <input type="range" min="-90" max="90" step="1"
+                  value={Math.round((selectedP.rotX ?? 0) * 180 / Math.PI)}
+                  onChange={e => updateSelRot('rotX', e.target.value)} />
+              </label>
+            </div>
+          </div>
+        ) : (
+          <div className="room-viewer__tip">Drag to orbit · Scroll to zoom · Click a surface to move it</div>
+        )}
       </div>
     </div>
   )
 }
+
+

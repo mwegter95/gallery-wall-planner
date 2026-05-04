@@ -76,6 +76,7 @@ export function createSurfaceDef({ photoId = null, index = 0 } = {}) {
     },
     warpedDataUrl: null,
     colorIdx:      index % SURFACE_COLORS.length,
+    rotYDeg:       0,   // manual 3D rotation around Y axis (degrees)
     connections: {
       top:    null,  // null | { surfaceId, edge, angleDeg }
       bottom: null,
@@ -295,7 +296,7 @@ export function assembleSurfaces(surfaces) {
     colorIdx:      first.colorIdx,
     position:      [0, 0, 0],
     rotX:          0,
-    rotY:          0,
+    rotY:          (first.rotYDeg ?? 0) * PI / 180,
     wM:            first.widthIn  * IN_TO_M,
     hM:            first.heightIn * IN_TO_M,
   }
@@ -339,7 +340,7 @@ export function assembleSurfaces(surfaces) {
       colorIdx:      s.colorIdx,
       position:      [rowX + wM / 2, 0, 0],
       rotX:          0,
-      rotY:          0,
+      rotY:          (s.rotYDeg ?? 0) * PI / 180,
       wM,
       hM,
     })
