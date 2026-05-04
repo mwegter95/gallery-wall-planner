@@ -5191,6 +5191,38 @@ kbd {
     repeating-linear-gradient(90deg, transparent, transparent 39px, #0f1a26 40px);
 }
 
+/* Drag-and-drop overlay */
+.sb-modal--drag-over .sb-canvas-area {
+  outline: 2px dashed #4a9eff;
+  outline-offset: -2px;
+}
+
+.sb-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background: rgba(8, 18, 34, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.sb-drop-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #4a9eff;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: .02em;
+}
+
+.sb-drop-message svg {
+  opacity: .85;
+}
+
 .sbc-viewport {
   position: absolute;
   inset: 0;

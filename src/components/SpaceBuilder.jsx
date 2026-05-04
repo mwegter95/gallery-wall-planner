@@ -28,6 +28,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
   const [isWarping,       setIsWarping]       = useState(false)
   const [warpProgress,    setWarpProgress]    = useState(0)
   const [isSaving,        setIsSaving]        = useState(false)
+  const [isDragOver,      setIsDragOver]      = useState(false)
   const fileInputRef = useRef(null)
 
   const activeSurface = space.surfaces.find(s => s.id === activeSurfaceId)
@@ -75,10 +76,37 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
   const handleAddPhotoClick = () => fileInputRef.current?.click()
 
   const handleFileChange = (e) => {
-    const file = e.target.files?.[0]
-    if (file) addPhotoFromFile(file)
+    const files = Array.from(e.target.files || [])
+    files.forEach(f => addPhotoFromFile(f))
     e.target.value = ''
   }
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const hasImages = Array.from(e.dataTransfer.items || []).some(
+      item => item.kind === 'file' && item.type.startsWith('image/')
+    )
+    if (hasImages) {
+      e.dataTransfer.dropEffect = 'copy'
+      setIsDragOver(true)
+    }
+  }, [])
+
+  const handleDragLeave = useCallback((e) => {
+    // Only clear when leaving the modal itself (not child elements)
+    if (!e.currentTarget.contains(e.relatedTarget)) {
+      setIsDragOver(false)
+    }
+  }, [])
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(false)
+    const files = Array.from(e.dataTransfer.files || []).filter(f => f.type.startsWith('image/'))
+    files.forEach(f => addPhotoFromFile(f))
+  }, [addPhotoFromFile])
 
   const addSurfaceOnPhoto = useCallback((photoId) => {
     setSpace(prev => {
@@ -317,7 +345,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
 
   return (
     <div className="sb-backdrop">
-      <div className="sb-modal">
+      <div
+        className={`sb-modal${isDragOver ? ' sb-modal--drag-over' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         {/* ── Header ──────────────────────────────────────────────────────── */}
         <div className="sb-header">
           <div className="sb-header-left">
@@ -337,6 +370,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
               ref={fileInputRef}
               type="file"
               accept="image/*"
+              multiple
               style={{ display: 'none' }}
               onChange={handleFileChange}
             />
@@ -390,6 +424,18 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
         <div className="sb-body">
           {/* Canvas area */}
           <div className="sb-canvas-area">
+            {isDragOver && (
+              <div className="sb-drop-overlay">
+                <div className="sb-drop-message">
+                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <rect x="2" y="6" width="28" height="20" rx="3" stroke="currentColor" strokeWidth="2"/>
+                    <circle cx="11" cy="14" r="3" stroke="currentColor" strokeWidth="2"/>
+                    <path d="M17 22l5-7 6 7" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+                  </svg>
+                  Drop photos to add
+                </div>
+              </div>
+            )}
             <SpaceBuilderCanvas
               space={space}
               activeSurfaceId={activeSurfaceId}
