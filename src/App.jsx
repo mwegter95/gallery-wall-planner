@@ -5,6 +5,9 @@ import AddPieceModal from './components/AddPieceModal'
 import PaintModal from './components/PaintModal'
 import WallSetup from './components/WallSetup'
 import WallManager from './components/WallManager'
+import Room3DViewer from './components/Room3DViewer'
+import RoomSetupWizard from './components/RoomSetupWizard'
+import RoomManager from './components/RoomManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
 import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP } from './components/Tutorial'
 import * as api from './utils/api'
@@ -13,6 +16,13 @@ import './App.css'
 
 const TUTORIAL_KEY = 'gwp-tutorial-done'
 const TIPS_KEY     = 'gwp-tips-enabled'
+
+/** Normalize a layout entry — handles both old array format and new { pieces, paintLayerIds } */
+function normalizeLayout(data) {
+  if (!data) return { pieces: [], paintLayerIds: [] }
+  if (Array.isArray(data)) return { pieces: data, paintLayerIds: [] }
+  return { pieces: data.pieces || [], paintLayerIds: data.paintLayerIds || [] }
+}
 
 /* ── Only tiny UI preference stays in localStorage ─────── */
 const ACTIVE_WALL_KEY    = 'gwp-active-wall'
@@ -91,6 +101,15 @@ export default function App() {
   const [tipsEnabled,    setTipsEnabled]    = useState(() =>
     localStorage.getItem(TIPS_KEY) !== 'false'    // default: true
   )
+
+  /* ── 3D Rooms state ─────────────────────────────────── */
+  const [rooms,           setRooms]           = useState({})
+  const [activeRoomId,    setActiveRoomId]    = useState(null)
+  const [showRoomMgr,     setShowRoomMgr]     = useState(false)
+  const [showRoomView,    setShowRoomView]    = useState(false)
+  const [showRoomWizard,  setShowRoomWizard]  = useState(false)
+  const [editingRoomId,   setEditingRoomId]   = useState(null)
+  const [newRoomName,     setNewRoomName]     = useState('')
   const saveMenuRef      = useRef(null)
   const saveFlashTimer   = useRef(null)
   const hasLoadedRef   = useRef(false)   // becomes true after first successful backend load
@@ -105,7 +124,7 @@ export default function App() {
     setIsLoading(true)
     try {
       const fetchedData = await api.loadState()
-      const { walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {}, paintLayers: savedPaintLayers = {} } =
+      const { walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {}, paintLayers: savedPaintLayers = {}, rooms: savedRooms = {} } =
         fetchedData
       const wallsObj   = savedWalls   || {}
       const layoutsObj = savedLayouts || {}
@@ -114,14 +133,22 @@ export default function App() {
       if (savedPaintLayers && Object.keys(savedPaintLayers).length > 0) {
         setWallPaintLayers(savedPaintLayers)
       }
+      // Fix relative image URLs in room surface warped images
+      const roomsObj = savedRooms || {}
+      for (const room of Object.values(roomsObj)) {
+        for (const surface of Object.values(room.surfaces || {})) {
+          if (surface.warpedImageUrl?.startsWith('/')) surface.warpedImageUrl = api.fixUrl(surface.warpedImageUrl)
+        }
+      }
+      setRooms(roomsObj)
 
       // ── Auto-migrate existing pieces into library (runs once if library is empty) ──
       let libObj = { ...savedLibrary }
       if (Object.keys(libObj).length === 0) {
         const seen = new Set()
         for (const wallLayouts of Object.values(layoutsObj)) {
-          for (const layoutPieces of Object.values(wallLayouts)) {
-            for (const piece of layoutPieces) {
+          for (const layoutData of Object.values(wallLayouts)) {
+            for (const piece of normalizeLayout(layoutData).pieces) {
               const key = piece.image || `${piece.name}_${piece.width}_${piece.height}`
               if (seen.has(key)) continue
               seen.add(key)
@@ -173,7 +200,7 @@ export default function App() {
             // No unsaved pieces — load the last named layout they were viewing from server data
             const snapWall = sessionSnap.activeWallId
             const wallId = (snapWall && wallsObj[snapWall]) ? snapWall : activeId
-            const layoutPieces = layoutsObj[wallId]?.[sessionSnap.currentLayout]
+            const { pieces: layoutPieces } = normalizeLayout(layoutsObj[wallId]?.[sessionSnap.currentLayout])
             if (layoutPieces?.length > 0) {
               if (wallId !== activeId) {
                 setActiveWallId(wallId)
@@ -302,7 +329,7 @@ export default function App() {
 
   const hasUnsavedChanges = pieces.length > 0 && (() => {
     if (!currentLayout) return true
-    const saved = wallLayouts[currentLayout]
+    const { pieces: saved } = normalizeLayout(wallLayouts[currentLayout])
     if (!saved || saved.length !== pieces.length) return true
     const map = Object.fromEntries(saved.map(p => [p.id, p]))
     return pieces.some(p => {
@@ -331,7 +358,7 @@ export default function App() {
   const handleDeleteWall = useCallback(async (id) => {
     const wallLayoutsData = allLayouts[id] || {}
     const deletePieceImgPromises = Object.values(wallLayoutsData)
-      .flat()
+      .flatMap(layoutData => normalizeLayout(layoutData).pieces)
       .filter(p => p.image?.startsWith('/uploads/'))
       .map(p => api.deletePieceImage(p.id).catch(() => {}))
     await Promise.all(deletePieceImgPromises)
@@ -361,6 +388,69 @@ export default function App() {
       api.putWall(updated).catch(console.error)
       return { ...prev, [id]: updated }
     })
+  }, [])
+
+  /* ── 3D Room handlers ─────────────────────────────── */
+
+  /**
+   * Save a room (new or updated).
+   * Uploads any surface images that are still data: URLs, then persists room metadata.
+   */
+  const handleSaveRoom = useCallback(async (draft) => {
+    // Build an updated copy, uploading per-surface data URLs as needed
+    const uploadedSurfaces = { ...draft.surfaces }
+    await Promise.all(
+      Object.entries(draft.surfaces || {}).map(async ([faceId, surface]) => {
+        if (surface.warpedImageUrl?.startsWith('data:')) {
+          try {
+            const { url } = await api.uploadSurfaceImage(draft.id, faceId, surface.warpedImageUrl)
+            uploadedSurfaces[faceId] = { ...surface, warpedImageUrl: url }
+          } catch (err) {
+            console.error(`Surface image upload failed (${faceId}):`, err)
+            // Keep the data URL locally so the viewer still renders
+          }
+        }
+      })
+    )
+    const finalRoom = { ...draft, surfaces: uploadedSurfaces }
+    // Strip any remaining large data URLs before sending to server
+    const toSave = {
+      ...finalRoom,
+      surfaces: Object.fromEntries(
+        Object.entries(finalRoom.surfaces || {}).map(([fid, s]) => [
+          fid,
+          { ...s, warpedImageUrl: s.warpedImageUrl?.startsWith('data:') ? null : s.warpedImageUrl },
+        ])
+      ),
+    }
+    await api.putRoom(toSave)
+    setRooms(prev => ({ ...prev, [finalRoom.id]: finalRoom }))
+    setActiveRoomId(finalRoom.id)
+    setShowRoomWizard(false)
+    setEditingRoomId(null)
+  }, [])
+
+  const handleDeleteRoom = useCallback(async (roomId) => {
+    await api.deleteRoom(roomId).catch(console.error)
+    setRooms(prev => { const next = { ...prev }; delete next[roomId]; return next })
+    if (activeRoomId === roomId) {
+      setActiveRoomId(null)
+      setShowRoomView(false)
+    }
+  }, [activeRoomId])
+
+  /** Open 3D room tour */
+  const handleViewRoom = useCallback((roomId) => {
+    setActiveRoomId(roomId)
+    setShowRoomView(true)
+    setShowRoomMgr(false)
+  }, [])
+
+  /** User clicked a face inside the 3D viewer — open setup wizard for that room */
+  const handleEditRoomFace = useCallback((_faceId) => {
+    // Just open the wizard; FacePickerStep lets them choose which face to re-crop
+    setShowRoomView(false)
+    setShowRoomWizard(true)
   }, [])
 
   /* ── Wall calibration ─────────────────────────────── */
@@ -461,9 +551,10 @@ export default function App() {
       }
       for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
         const serverWallLayouts = serverLayouts[wallId] || {}
-        for (const [name, pcs] of Object.entries(wLayouts || {})) {
+        for (const [name, layoutData] of Object.entries(wLayouts || {})) {
           if (serverWallLayouts[name]) continue  // layout already on server — skip
-          pushOps.push(api.putLayout(wallId, name, pcs))
+          const { pieces: pcs, paintLayerIds: plIds } = normalizeLayout(layoutData)
+          pushOps.push(api.putLayout(wallId, name, pcs, plIds))
         }
       }
       for (const piece of Object.values(localSnap.library || {})) {
@@ -485,8 +576,9 @@ export default function App() {
         pushOps.push(api.putWall(wallToSync))
       }
       for (const [wallId, wLayouts] of Object.entries(localSnap.allLayouts || {})) {
-        for (const [name, pcs] of Object.entries(wLayouts || {})) {
-          pushOps.push(api.putLayout(wallId, name, pcs))
+        for (const [name, layoutData] of Object.entries(wLayouts || {})) {
+          const { pieces: pcs, paintLayerIds: plIds } = normalizeLayout(layoutData)
+          pushOps.push(api.putLayout(wallId, name, pcs, plIds))
         }
       }
       for (const piece of Object.values(localSnap.library || {})) {
@@ -512,10 +604,21 @@ export default function App() {
       const wallId = freshData.walls?.[lastActive.wallId]
         ? lastActive.wallId
         : Object.keys(freshData.walls || {})[0]
-      const layoutPieces = freshData.layouts?.[wallId]?.[lastActive.layoutName]
+      const { pieces: layoutPieces, paintLayerIds } = normalizeLayout(freshData.layouts?.[wallId]?.[lastActive.layoutName])
       if (layoutPieces?.length > 0) {
         setActiveWallId(wallId)
         localStorage.setItem(ACTIVE_WALL_KEY, wallId)
+
+        // Restore paint layer visibility for this layout
+        setWallPaintLayers(prev => {
+          const wallLayers = prev[wallId] || {}
+          const updated = Object.fromEntries(
+            Object.entries(wallLayers).map(([id, layer]) =>
+              [id, { ...layer, visible: paintLayerIds.includes(id) }]
+            )
+          )
+          return { ...prev, [wallId]: updated }
+        })
 
         // If the user also had unsaved edits on top of that layout, restore those
         const unsavedPieces = localSnap?.activePieces
@@ -832,16 +935,19 @@ export default function App() {
         })
       )
       setPieces(uploadedPieces)
+      // Capture which paint layers are currently visible
+      const visiblePaintLayerIds = activePaintLayers.filter(l => l.visible).map(l => l.id)
+      const layoutData = { pieces: uploadedPieces, paintLayerIds: visiblePaintLayerIds }
       // ── Optimistic local update FIRST so snapshot captures the layout even if backend is down ──
       setAllLayouts(prev => {
         const wallPrev = prev[activeWallId] || {}
-        return { ...prev, [activeWallId]: { ...wallPrev, [name]: uploadedPieces } }
+        return { ...prev, [activeWallId]: { ...wallPrev, [name]: layoutData } }
       })
       setCurrentLayout(name)
       setSaveMenuOpen(false)
       setSaveAsName('')
       // Then attempt to persist to backend (fire-and-forget when offline)
-      api.putLayout(activeWallId, name, uploadedPieces).catch(err => {
+      api.putLayout(activeWallId, name, uploadedPieces, visiblePaintLayerIds).catch(err => {
         console.warn('Save layout to backend failed (will sync on next login):', err)
       })
     } catch (err) {
@@ -862,13 +968,24 @@ export default function App() {
   }, [saveAsName, saveLayout])
 
   const loadLayout = useCallback((name) => {
-    const savedPieces = wallLayouts[name]
-    if (!savedPieces) return
+    const layoutData = wallLayouts[name]
+    if (!layoutData) return
+    const { pieces: savedPieces, paintLayerIds } = normalizeLayout(layoutData)
     preloadPieceImages(savedPieces)
     setPieces(savedPieces)
     setSelectedId(null)
     setCurrentLayout(name)
-  }, [wallLayouts])
+    // Restore paint layer visibility for this layout
+    setWallPaintLayers(prev => {
+      const wallLayers = prev[activeWallId] || {}
+      const updated = Object.fromEntries(
+        Object.entries(wallLayers).map(([id, layer]) =>
+          [id, { ...layer, visible: paintLayerIds.includes(id) }]
+        )
+      )
+      return { ...prev, [activeWallId]: updated }
+    })
+  }, [wallLayouts, activeWallId])
 
   const discardChanges = useCallback(() => {
     pushHistory()
@@ -979,6 +1096,20 @@ export default function App() {
                 ? `${Math.round((activeWall?.width || 0) * 2.54)} × ${Math.round((activeWall?.height || 0) * 2.54)} cm`
                 : `${activeWall?.width}" × ${activeWall?.height}"`}
             </span>
+          </button>
+          <button
+            className="room-3d-btn"
+            onClick={() => setShowRoomMgr(true)}
+            title="3D Room Tour"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M7 1L13 4.5V9.5L7 13L1 9.5V4.5L7 1Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/>
+              <path d="M7 1v12M1 4.5l6 3.5 6-3.5" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" opacity="0.6"/>
+            </svg>
+            <span className="btn-label"> Rooms</span>
+            {Object.keys(rooms).length > 0 && (
+              <span className="room-count-badge">{Object.keys(rooms).length}</span>
+            )}
           </button>
         </div>
         <div className="header-actions">
@@ -1216,6 +1347,56 @@ export default function App() {
           onClose={() => { setShowAuth(false); setResetToken(null) }}
           resetToken={resetToken}
         />
+      )}
+
+      {/* ── 3D Room modals ─────────────────────────────────────────────── */}
+      {showRoomMgr && (
+        <RoomManager
+          rooms={rooms}
+          activeRoomId={activeRoomId}
+          onSelect={setActiveRoomId}
+          onView3D={handleViewRoom}
+          onSetupRoom={({ name }) => {
+            setNewRoomName(name)
+            setEditingRoomId(null)
+            setShowRoomWizard(true)
+            setShowRoomMgr(false)
+          }}
+          onEditRoom={(roomId) => {
+            setEditingRoomId(roomId)
+            setShowRoomWizard(true)
+            setShowRoomMgr(false)
+          }}
+          onDelete={handleDeleteRoom}
+          onClose={() => setShowRoomMgr(false)}
+          unitSystem={unitSystem}
+        />
+      )}
+
+      {showRoomWizard && (
+        <RoomSetupWizard
+          key={editingRoomId || 'new-room'}
+          existingRoom={editingRoomId ? rooms[editingRoomId] : null}
+          initialRoomName={editingRoomId ? undefined : newRoomName}
+          onSave={handleSaveRoom}
+          onClose={() => {
+            setShowRoomWizard(false)
+            setEditingRoomId(null)
+            // If we were editing from 3D viewer, re-open it
+            if (activeRoomId && rooms[activeRoomId]) setShowRoomView(true)
+          }}
+          unitSystem={unitSystem}
+        />
+      )}
+
+      {showRoomView && activeRoomId && rooms[activeRoomId] && (
+        <div className="room-viewer-overlay">
+          <Room3DViewer
+            room={rooms[activeRoomId]}
+            onEditFace={handleEditRoomFace}
+            onClose={() => setShowRoomView(false)}
+          />
+        </div>
       )}
 
       {/* Tutorial + Tips overlay — renders above everything else */}

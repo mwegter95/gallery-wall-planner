@@ -4528,3 +4528,533 @@ kbd {
   transition: color 0.1s;
 }
 .paint-idle-skip:hover { color: var(--text-primary); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   3D ROOM SYSTEM
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Header: Rooms button ─────────────────────────────────────────────────── */
+.room-3d-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: linear-gradient(135deg, #1a2435 0%, #0f1a28 100%);
+  border: 1px solid #334466;
+  border-radius: 6px;
+  color: #7ab8d4;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+  position: relative;
+}
+.room-3d-btn:hover {
+  background: linear-gradient(135deg, #223044 0%, #162030 100%);
+  border-color: #4477aa;
+  color: #a8d8f0;
+}
+.room-count-badge {
+  background: #3a7fc1;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
+}
+
+/* ── Room Viewer overlay ──────────────────────────────────────────────────── */
+.room-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: #000;
+}
+.room-viewer {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #090c10;
+}
+.room-viewer__canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+}
+.room-viewer__canvas:active { cursor: grabbing; }
+
+/* HUD overlay */
+.room-viewer__hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 16px;
+}
+.room-viewer__hud-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  pointer-events: all;
+}
+.room-viewer__close-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  background: rgba(10, 15, 22, 0.85);
+  border: 1px solid rgba(100, 150, 200, 0.3);
+  border-radius: 8px;
+  color: #a8c8e8;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: background 0.15s, border-color 0.15s;
+}
+.room-viewer__close-btn:hover {
+  background: rgba(20, 30, 45, 0.9);
+  border-color: rgba(100, 160, 220, 0.5);
+}
+.room-viewer__room-name {
+  color: rgba(200, 220, 240, 0.7);
+  font-size: 14px;
+  font-weight: 500;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+}
+.room-viewer__tip {
+  color: rgba(160, 190, 220, 0.5);
+  font-size: 12px;
+  text-align: center;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+  pointer-events: none;
+  padding-bottom: 8px;
+}
+
+/* Face label buttons (positioned around edges) */
+.room-viewer__face-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.room-viewer__face-btn {
+  position: absolute;
+  pointer-events: all;
+  padding: 4px 10px;
+  background: rgba(10, 20, 35, 0.75);
+  border: 1px solid rgba(80, 130, 180, 0.3);
+  border-radius: 5px;
+  color: rgba(160, 200, 230, 0.6);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: all 0.15s;
+}
+.room-viewer__face-btn:hover,
+.room-viewer__face-btn.has-photo {
+  background: rgba(20, 40, 65, 0.85);
+  border-color: rgba(100, 170, 230, 0.5);
+  color: #a8d4f0;
+}
+/* Approximate corner positions for face labels */
+.room-viewer__face-btn--north  { top: 50%;   left: 50%;  transform: translate(-50%, -50%); }
+.room-viewer__face-btn--south  { top: 55%;   left: 50%;  transform: translate(-50%, -50%); }
+.room-viewer__face-btn--east   { top: 50%;   right: 16px; transform: translateY(-50%); }
+.room-viewer__face-btn--west   { top: 50%;   left: 16px;  transform: translateY(-50%); }
+.room-viewer__face-btn--floor  { bottom: 48px; left: 50%; transform: translateX(-50%); }
+.room-viewer__face-btn--ceiling { top: 60px;  left: 50%; transform: translateX(-50%); }
+
+/* ── Room Manager modal ──────────────────────────────────────────────────── */
+.rm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.rm-modal {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(560px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  overflow: hidden;
+}
+.rm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.rm-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+}
+.rm-close {
+  padding: 4px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.rm-close:hover { background: var(--surface-2); }
+
+.rm-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+.rm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 32px 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+.rm-empty svg { opacity: 0.4; }
+.rm-empty-sub { font-size: 12px; opacity: 0.7; }
+
+.rm-room-row {
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.rm-room-row:hover { background: var(--surface-2); }
+.rm-room-row--active { background: rgba(100, 160, 220, 0.08); }
+
+.rm-thumb {
+  width: 60px;
+  height: 42px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--surface-3, #1a2030);
+  flex-shrink: 0;
+}
+.rm-thumb-img { width: 100%; height: 100%; object-fit: cover; }
+.rm-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary, #555);
+}
+
+.rm-room-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.rm-room-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rm-room-dims,
+.rm-room-surfaces {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.rm-room-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.rm-view-btn {
+  background: linear-gradient(135deg, #1f3a55 0%, #162840 100%) !important;
+  border-color: #3a6a9a !important;
+  color: #a8d4f0 !important;
+}
+.rm-view-btn:hover {
+  background: linear-gradient(135deg, #2a4a6a 0%, #1e3450 100%) !important;
+}
+.rm-delete-btn { color: var(--text-secondary) !important; }
+.rm-delete-btn:hover { color: #e87070 !important; }
+
+.rm-create {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.rm-create-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 8px;
+}
+.rm-create-row {
+  display: flex;
+  gap: 8px;
+}
+.rm-name-input {
+  flex: 1;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.rm-name-input:focus { border-color: var(--accent); }
+.rm-name-error { font-size: 11px; color: var(--error, #e87070); margin-top: 4px; }
+
+/* ── Room Setup Wizard ───────────────────────────────────────────────────── */
+.rsw-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.8);
+  z-index: 450;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.rsw-modal {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: min(680px, 100%);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 72px rgba(0,0,0,0.7);
+}
+
+/* Step indicator bar */
+.rsw-steps-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 20px 0;
+  flex-shrink: 0;
+}
+.rsw-step-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface-3, #1a2030);
+  border: 1.5px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.rsw-step-dot.active {
+  background: var(--accent, #3a7fc1);
+  border-color: var(--accent, #3a7fc1);
+  color: #fff;
+}
+.rsw-step-dot.done {
+  background: #2a5a35;
+  border-color: #3a8a50;
+  color: #6dcf8c;
+}
+.rsw-step-line {
+  width: 40px;
+  height: 1.5px;
+  background: var(--border);
+}
+
+/* Steps */
+.rsw-step {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px;
+  gap: 16px;
+}
+.rsw-step-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.rsw-step-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  background: var(--surface-2);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 20px;
+}
+.rsw-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+.rsw-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Fields */
+.rsw-fields { display: flex; flex-direction: column; gap: 12px; }
+.rsw-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.rsw-input {
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.rsw-input:focus { border-color: var(--accent, #3a7fc1); }
+.rsw-input--dim { width: 100%; }
+.rsw-dims-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+
+/* Room diagram */
+.rsw-diagram {
+  display: flex;
+  justify-content: center;
+  opacity: 0.7;
+}
+.rsw-diagram svg text { font-family: inherit; }
+
+/* Face grid */
+.rsw-face-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+.rsw-face-card {
+  background: var(--surface-2);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.15s;
+}
+.rsw-face-card--done { border-color: #3a7a50; }
+.rsw-face-preview {
+  height: 90px;
+  background-size: cover;
+  background-position: center;
+}
+.rsw-face-placeholder {
+  height: 90px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  background: var(--surface-3, #131b27);
+  color: var(--text-tertiary, #444);
+}
+.rsw-face-info {
+  padding: 8px 10px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rsw-face-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.rsw-face-dims {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.rsw-face-actions {
+  padding: 6px 10px 10px;
+  display: flex;
+  gap: 6px;
+}
+
+/* Footer */
+.rsw-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  margin-top: auto;
+  flex-shrink: 0;
+}
+.rsw-footer--space { justify-content: space-between; }
+.rsw-footer-right { display: flex; align-items: center; gap: 10px; }
+.rsw-photo-count {
+  font-size: 12px;
+  color: #6dcf8c;
+}
+.rsw-error {
+  font-size: 12px;
+  color: var(--error, #e87070);
+  padding: 6px 10px;
+  background: rgba(200, 60, 60, 0.08);
+  border-radius: 6px;
+  border: 1px solid rgba(200, 60, 60, 0.2);
+}
+.rsw-error--top { margin: 8px 20px 0; }
+
+/* Misc button sizes used in wizard */
+.btn-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: middle;
+  margin-right: 4px;
+}

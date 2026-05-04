@@ -179,10 +179,10 @@ export async function uploadWallImage(wallId, dataUrl) {
 }
 
 // ── Gallery: layouts ──────────────────────────────────────────────────────────
-export async function putLayout(wallId, name, pieces) {
+export async function putLayout(wallId, name, pieces, paintLayerIds = []) {
   return apiFetch(`/api/layouts/${wallId}/${encodeURIComponent(name)}`, {
     method: 'PUT',
-    body: JSON.stringify({ pieces }),
+    body: JSON.stringify({ pieces, paintLayerIds }),
   })
 }
 
@@ -235,4 +235,41 @@ export async function uploadLibraryImage(libId, dataUrl) {
     body: JSON.stringify({ dataUrl }),
   })
   return { ...data, url: data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url }
+}
+
+// ── Gallery: 3D rooms ─────────────────────────────────────────────────────────
+
+export async function loadRooms() {
+  const data = await apiFetch('/api/rooms')
+  // Fix relative image URLs in surfaces
+  for (const room of Object.values(data.rooms || {})) {
+    for (const surface of Object.values(room.surfaces || {})) {
+      if (surface.warpedImageUrl?.startsWith('/')) surface.warpedImageUrl = fixUrl(surface.warpedImageUrl)
+    }
+  }
+  return data.rooms || {}
+}
+
+export async function putRoom(room) {
+  return apiFetch(`/api/rooms/${room.id}`, {
+    method: 'PUT',
+    body: JSON.stringify(room),
+  })
+}
+
+export async function deleteRoom(roomId) {
+  return apiFetch(`/api/rooms/${roomId}`, { method: 'DELETE' })
+}
+
+/**
+ * Upload a perspective-warped surface image and return the server URL.
+ * Stores under uploads/walls/<roomId>_<faceId>.<ext>
+ */
+export async function uploadSurfaceImage(roomId, faceId, dataUrl) {
+  const data = await apiFetch(`/api/rooms/${roomId}/surfaces/${faceId}/image`, {
+    method: 'POST',
+    body: JSON.stringify({ dataUrl }),
+  })
+  const url = data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url
+  return { ...data, url: `${url}?v=${Date.now()}` }
 }

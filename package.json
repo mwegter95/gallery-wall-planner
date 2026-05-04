@@ -18,7 +18,8 @@
     "heic2any": "^0.0.4",
     "onnxruntime-web": "^1.21.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "three": "^0.184.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
