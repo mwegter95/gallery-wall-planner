@@ -138,7 +138,7 @@ export default function Sidebar({
             <div className="selected-controls">
               <div className="selected-title">Selected: <strong>{selectedPiece.name}</strong></div>
               <div className="selected-dims">
-                {selectedPiece.width}" × {selectedPiece.height}" at ({selectedPiece.x.toFixed(1)}", {selectedPiece.y.toFixed(1)}")
+                {selectedPiece.width}" × {selectedPiece.height}"
               </div>
               <div className="btn-row">
                 <button className="btn btn-ghost btn-sm" onClick={() => onBringForward(selectedId)}>▲ Forward</button>
