@@ -1204,6 +1204,7 @@ export default function App() {
           wallImage={activeWallImage}
           initialColor={(wallPaintLayers[activeWallId]?.[editingLayerId])?.color || '#C4875A'}
           initialMask={(wallPaintLayers[activeWallId]?.[editingLayerId])?.maskDataUrl || null}
+          existingLayers={activePaintLayers.filter(l => l.id !== editingLayerId && l.maskDataUrl)}
           onApply={handlePaintApply}
           onClose={() => { setShowPaintModal(false); setEditingLayerId(null) }}
         />

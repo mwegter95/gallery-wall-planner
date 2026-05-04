@@ -181,7 +181,7 @@ const AI_MODELS = [
    PaintModal
    Phases: loading → idle → edge-computing → edge-select → detecting → ready
 ──────────────────────────────────────────────────────────────────────────── */
-export default function PaintModal({ wallImage, initialColor, initialMask, onApply, onClose }) {
+export default function PaintModal({ wallImage, initialColor, initialMask, existingLayers = [], onApply, onClose }) {
   /* ── Phase / loading ────────────────────────────────────────────────── */
   const [phase,       setPhase]       = useState('loading')
   const [loadMsg,     setLoadMsg]     = useState('')
@@ -583,6 +583,26 @@ export default function PaintModal({ wallImage, initialColor, initialMask, onApp
     onApply(paintColor, mc.toDataURL('image/png'))
   }, [paintColor, onApply])
 
+  /* ── Reuse mask from an existing layer ──────────────────────────────── */
+  const reuseLayerMask = useCallback(async (layer) => {
+    if (!layer.maskDataUrl || !origDataRef.current) return
+    const orig = origDataRef.current
+    const { width: w, height: h } = orig
+    try {
+      const img = await loadImage(layer.maskDataUrl)
+      const oc = Object.assign(document.createElement('canvas'), { width: w, height: h })
+      oc.getContext('2d').drawImage(img, 0, 0, w, h)
+      const id = oc.getContext('2d').getImageData(0, 0, w, h)
+      const mask = new Uint8ClampedArray(w * h)
+      for (let i = 0; i < w * h; i++) mask[i] = id.data[i * 4]  // R channel
+      maskRef.current = mask
+      renderCanvas()
+      setPhase('ready')
+    } catch (err) {
+      setErrorMsg('Could not load that selection. Try another.')
+    }
+  }, [renderCanvas])
+
   /* ── Escape ──────────────────────────────────────────────────────────── */
   useEffect(() => {
     const h = (e) => { if (e.key === 'Escape') onClose() }
@@ -726,6 +746,25 @@ export default function PaintModal({ wallImage, initialColor, initialMask, onApp
                     ✨ AI Detect Wall
                   </button>
                 </div>
+
+                {existingLayers.length > 0 && (<>
+                  <div className="paint-idle-divider"><span>or reuse a previous selection</span></div>
+                  <div className="paint-idle-option">
+                    <div className="paint-idle-option-header">
+                      <span className="paint-idle-option-title">♻️ Reuse Selection</span>
+                      <span className="paint-idle-option-hint">Copy the wall selection from an existing layer</span>
+                    </div>
+                    <div className="paint-idle-reuse-list">
+                      {existingLayers.map(layer => (
+                        <button key={layer.id} className="paint-idle-reuse-row" onClick={() => reuseLayerMask(layer)}>
+                          <span className="paint-idle-reuse-swatch" style={{ background: layer.color }} />
+                          <span className="paint-idle-reuse-name">{layer.name}</span>
+                          <span className="paint-idle-reuse-arrow">→</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>)}
 
                 <button className="paint-idle-skip" onClick={() => setPhase('ready')}>
                   Skip — go straight to brush
