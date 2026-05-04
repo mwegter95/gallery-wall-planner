@@ -11,10 +11,14 @@ export default function Sidebar({
   isOpen = false, onRequestClose,
   forceSection = null,
   hasUnsavedChanges = false, onDiscardChanges,
+  paintLayers = [], onTogglePaintLayer, onDeletePaintLayer, onRenamePaintLayer,
+  onEditPaintLayer, onNewPaintLayer, hasWallImage = false,
 }) {
-  const [layoutName, setLayoutName] = useState('')
-  const [saveError, setSaveError]   = useState('')
-  const [section, setSection]       = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'settings'
+  const [layoutName,     setLayoutName]     = useState('')
+  const [saveError,      setSaveError]      = useState('')
+  const [section,        setSection]        = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'paint' | 'settings'
+  const [renamingLayer,  setRenamingLayer]  = useState(null)   // layerId being renamed
+  const [renameValue,    setRenameValue]    = useState('')
 
   // Preserve scroll position across re-renders triggered by parent state changes
   // (e.g. loading a layout updates pieces, which re-renders Sidebar and can reset scroll)
@@ -68,6 +72,13 @@ export default function Sidebar({
           data-tutorial="layouts-tab"
           onClick={() => setSection('layouts')}
         >Layouts</button>
+        <button
+          className={`tab-btn ${section === 'paint' ? 'active' : ''}`}
+          onClick={() => setSection('paint')}
+        >
+          Paint
+          {paintLayers.some(l => l.visible) && <span className="paint-active-dot" />}
+        </button>
         <button
           className={`tab-btn ${section === 'settings' ? 'active' : ''}`}
           data-tutorial="settings-tab"
@@ -317,6 +328,111 @@ export default function Sidebar({
                     }}
                   ><svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── PAINT tab ──────────────────────────────── */}
+      {section === 'paint' && (
+        <div className="sidebar-section">
+          <div className="sidebar-header">
+            <span className="section-title">Paint Layers <span className="count-badge">{paintLayers.length}</span></span>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={onNewPaintLayer}
+              disabled={!hasWallImage}
+              title={hasWallImage ? 'Add a new paint layer' : 'Calibrate your wall first'}
+            >+ New</button>
+          </div>
+
+          {!hasWallImage && (
+            <div className="empty-state">
+              <p>Calibrate your wall first to enable paint layers.</p>
+            </div>
+          )}
+
+          {hasWallImage && paintLayers.length === 0 && (
+            <div className="empty-state">
+              <p>No paint layers yet.</p>
+              <p>Click <strong>+ New</strong> to try a wall color.</p>
+            </div>
+          )}
+
+          <div className="paint-layer-list">
+            {paintLayers.map(layer => (
+              <div key={layer.id} className={`paint-layer-row ${layer.visible ? 'active' : ''}`}>
+                {/* Color swatch */}
+                <div
+                  className="paint-layer-swatch"
+                  style={{ background: layer.color }}
+                  onClick={() => onTogglePaintLayer?.(layer.id)}
+                  title={layer.visible ? 'Click to hide' : 'Click to show'}
+                />
+
+                {/* Name / inline rename */}
+                <div className="paint-layer-info">
+                  {renamingLayer === layer.id ? (
+                    <input
+                      autoFocus
+                      className="text-input paint-layer-rename"
+                      value={renameValue}
+                      onChange={e => setRenameValue(e.target.value)}
+                      onBlur={() => {
+                        if (renameValue.trim()) onRenamePaintLayer?.(layer.id, renameValue.trim())
+                        setRenamingLayer(null)
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          if (renameValue.trim()) onRenamePaintLayer?.(layer.id, renameValue.trim())
+                          setRenamingLayer(null)
+                        }
+                        if (e.key === 'Escape') setRenamingLayer(null)
+                      }}
+                    />
+                  ) : (
+                    <span
+                      className="paint-layer-name"
+                      onDoubleClick={() => { setRenamingLayer(layer.id); setRenameValue(layer.name) }}
+                      title="Double-click to rename"
+                    >{layer.name}</span>
+                  )}
+                  <span className="paint-layer-hex">{layer.color}</span>
+                </div>
+
+                {/* Visibility toggle */}
+                <button
+                  className={`icon-btn ${layer.visible ? 'active' : ''}`}
+                  title={layer.visible ? 'Hide layer' : 'Show layer'}
+                  onClick={() => onTogglePaintLayer?.(layer.id)}
+                >
+                  {layer.visible ? (
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 6.5C2.5 3.5 4 2 6.5 2S10.5 3.5 12 6.5C10.5 9.5 9 11 6.5 11S2.5 9.5 1 6.5z" stroke="currentColor" strokeWidth="1.25"/><circle cx="6.5" cy="6.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/></svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 2l9 9M5 3.5A5.5 5.5 0 0112 6.5c-.5 1-1.2 2-2 2.7M1 6.5c.5-1 1.2-2 2-2.7M7.5 9.8A4.5 4.5 0 011 6.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
+                  )}
+                </button>
+
+                {/* Edit */}
+                <button
+                  className="icon-btn"
+                  title="Edit this paint layer"
+                  onClick={() => onEditPaintLayer?.(layer.id)}
+                >
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2.5l1.5 1.5-7 7H2v-1.5l7-7z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/><path d="M8 3.5l1.5 1.5" stroke="currentColor" strokeWidth="1.25"/></svg>
+                </button>
+
+                {/* Delete */}
+                <button
+                  className="icon-btn"
+                  title="Delete layer"
+                  onClick={() => {
+                    if (window.confirm(`Delete layer "${layer.name}"?`)) onDeletePaintLayer?.(layer.id)
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                </button>
               </div>
             ))}
           </div>

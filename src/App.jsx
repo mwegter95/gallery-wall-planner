@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import Wall from './components/Wall'
 import Sidebar from './components/Sidebar'
 import AddPieceModal from './components/AddPieceModal'
+import PaintModal from './components/PaintModal'
 import WallSetup from './components/WallSetup'
 import WallManager from './components/WallManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
@@ -51,7 +52,11 @@ export default function App() {
   const [allLayouts,     setAllLayouts]     = useState({})
   const [pieces,         setPieces]         = useState([])
   const [selectedId,     setSelectedId]     = useState(null)
-  const [showAddModal,   setShowAddModal]   = useState(false)
+  const [showAddModal,     setShowAddModal]     = useState(false)
+  const [showPaintModal,   setShowPaintModal]   = useState(false)
+  const [editingLayerId,   setEditingLayerId]   = useState(null)   // which layer is open in PaintModal
+  // wallPaintLayers: { [wallId]: { [layerId]: { id, name, color, maskDataUrl, visible, createdAt } } }
+  const [wallPaintLayers,  setWallPaintLayers]  = useState({})
   const [editingPiece,   setEditingPiece]   = useState(null)
   const [unitSystem,     setUnitSystem]     = useState(() =>
     localStorage.getItem('gwp-unit-system') || 'imperial'
@@ -100,12 +105,15 @@ export default function App() {
     setIsLoading(true)
     try {
       const fetchedData = await api.loadState()
-      const { walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {} } =
+      const { walls: savedWalls = {}, layouts: savedLayouts = {}, library: savedLibrary = {}, paintLayers: savedPaintLayers = {} } =
         fetchedData
       const wallsObj   = savedWalls   || {}
       const layoutsObj = savedLayouts || {}
       setWalls(wallsObj)
       setAllLayouts(layoutsObj)
+      if (savedPaintLayers && Object.keys(savedPaintLayers).length > 0) {
+        setWallPaintLayers(savedPaintLayers)
+      }
 
       // ── Auto-migrate existing pieces into library (runs once if library is empty) ──
       let libObj = { ...savedLibrary }
@@ -280,6 +288,10 @@ export default function App() {
   const activeWall      = walls[activeWallId] || Object.values(walls)[0] || null
   const wallLayouts     = allLayouts[activeWallId] || {}
   const activeWallImage = activeWall?.imageUrl || null
+
+  /* Paint layers for active wall */
+  const activePaintLayers = Object.values(wallPaintLayers[activeWallId] || {})
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
 
   /* Build wallImages map (wallId => imageUrl) for WallManager thumbnails */
   const wallImages = Object.fromEntries(
@@ -724,6 +736,62 @@ export default function App() {
     })
   }, [addPiece])
 
+  /* ── Paint layer operations ──────────────────────────── */
+  const savePaintLayer = useCallback((layerData) => {
+    if (!activeWallId) return
+    setWallPaintLayers(prev => ({
+      ...prev,
+      [activeWallId]: { ...(prev[activeWallId] || {}), [layerData.id]: layerData },
+    }))
+    api.putPaintLayer(activeWallId, layerData).catch(console.error)
+  }, [activeWallId])
+
+  const deletePaintLayer = useCallback((layerId) => {
+    if (!activeWallId) return
+    setWallPaintLayers(prev => {
+      const wl = { ...(prev[activeWallId] || {}) }; delete wl[layerId]
+      return { ...prev, [activeWallId]: wl }
+    })
+    api.deletePaintLayer(activeWallId, layerId).catch(console.error)
+  }, [activeWallId])
+
+  const togglePaintLayer = useCallback((layerId) => {
+    if (!activeWallId) return
+    setWallPaintLayers(prev => {
+      const layer = (prev[activeWallId] || {})[layerId]; if (!layer) return prev
+      const updated = { ...layer, visible: !layer.visible }
+      api.putPaintLayer(activeWallId, updated).catch(console.error)
+      return { ...prev, [activeWallId]: { ...(prev[activeWallId] || {}), [layerId]: updated } }
+    })
+  }, [activeWallId])
+
+  const renamePaintLayer = useCallback((layerId, name) => {
+    if (!activeWallId) return
+    setWallPaintLayers(prev => {
+      const layer = (prev[activeWallId] || {})[layerId]; if (!layer) return prev
+      const updated = { ...layer, name }
+      api.putPaintLayer(activeWallId, updated).catch(console.error)
+      return { ...prev, [activeWallId]: { ...(prev[activeWallId] || {}), [layerId]: updated } }
+    })
+  }, [activeWallId])
+
+  const handlePaintApply = useCallback((color, maskDataUrl) => {
+    if (!activeWallId) return
+    const id = editingLayerId || genId()
+    const existing = (wallPaintLayers[activeWallId] || {})[id]
+    const layer = {
+      id,
+      name: existing?.name || `Paint ${Object.keys(wallPaintLayers[activeWallId] || {}).length + 1}`,
+      color,
+      maskDataUrl,
+      visible: true,
+      createdAt: existing?.createdAt || Date.now(),
+    }
+    savePaintLayer(layer)
+    setShowPaintModal(false)
+    setEditingLayerId(null)
+  }, [activeWallId, editingLayerId, wallPaintLayers, savePaintLayer])
+
   /* ── Snap helper ──────────────────────────────────── */
   const snap = useCallback((v) =>
     snapToGrid ? Math.round(v / gridSize) * gridSize : v,
@@ -971,6 +1039,22 @@ export default function App() {
             )}
           </div>
 
+          {/* Paint Wall button — only shown when a wall photo exists */}
+          {activeWallImage && (
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => { setEditingLayerId(null); setShowPaintModal(true) }}
+              title="Add a new paint layer"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon">
+                <path d="M2 12c1-1 2-2.5 4-3.5L10.5 4 10 3.5 5.5 8C4 9 3 10 2 12z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" fill="currentColor" fillOpacity="0.15"/>
+                <circle cx="10.5" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/>
+                {activePaintLayers.some(l => l.visible) && <circle cx="12" cy="12" r="1.5" fill="currentColor"/>}
+              </svg>
+              <span className="btn-label"> Paint Wall</span>
+            </button>
+          )}
+
           <button
             className={`btn btn-ghost btn-sm ${!activeWallImage ? 'btn-calibrate-pulse' : ''}`}
             data-tutorial="header-calibrate"
@@ -1028,6 +1112,13 @@ export default function App() {
           onDeleteLayout={deleteLayout}
           onAddPiece={() => setShowAddModal(true)}
           onClearAll={() => { setPieces([]); setSelectedId(null) }}
+          paintLayers={activePaintLayers}
+          onTogglePaintLayer={togglePaintLayer}
+          onDeletePaintLayer={deletePaintLayer}
+          onRenamePaintLayer={renamePaintLayer}
+          onEditPaintLayer={(layerId) => { setEditingLayerId(layerId); setShowPaintModal(true) }}
+          onNewPaintLayer={() => { if (!activeWallImage) return; setEditingLayerId(null); setShowPaintModal(true) }}
+          hasWallImage={Boolean(activeWallImage)}
           library={library}
           onAddFromLibrary={addPieceFromLibrary}
           onDeleteFromLibrary={deleteFromLibrary}
@@ -1051,6 +1142,7 @@ export default function App() {
           wallWidth={activeWall?.width || 120}
           wallHeight={activeWall?.height || 96}
           wallImage={activeWallImage}
+          paintLayers={activePaintLayers.filter(l => l.visible)}
           onCalibrate={openSetup}
           onUndo={handleUndo}
           canUndo={historyStack.length > 0}
@@ -1104,6 +1196,16 @@ export default function App() {
           onSubmit={handleModalSubmit}
           onClose={closeModal}
           unitSystem={unitSystem}
+        />
+      )}
+
+      {showPaintModal && (
+        <PaintModal
+          wallImage={activeWallImage}
+          initialColor={(wallPaintLayers[activeWallId]?.[editingLayerId])?.color || '#C4875A'}
+          initialMask={(wallPaintLayers[activeWallId]?.[editingLayerId])?.maskDataUrl || null}
+          onApply={handlePaintApply}
+          onClose={() => { setShowPaintModal(false); setEditingLayerId(null) }}
         />
       )}
 

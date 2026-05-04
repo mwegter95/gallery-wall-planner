@@ -2,6 +2,54 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import Piece from './Piece'
 import { INCH_TO_CM, RULER_TICK, MAJOR_GRID, MINOR_GRID, fmtRulerLabel, displayGridSize, fmtWallDims } from '../utils/units'
 
+/* ── Paint overlay — composites all visible paint layers ────────────── */
+function PaintOverlay({ paintLayers, wPx, hPx }) {
+  const canvasRef = useRef(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    canvas.width  = wPx
+    canvas.height = hPx
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, wPx, hPx)
+
+    if (!paintLayers?.length) return
+
+    const renderLayer = async (layer) => {
+      if (!layer.maskDataUrl || !layer.color) return
+      const img = new Image()
+      await new Promise((res, rej) => {
+        img.onload = res; img.onerror = rej; img.src = layer.maskDataUrl
+      })
+      const offscreen = Object.assign(document.createElement('canvas'), { width: wPx, height: hPx })
+      offscreen.getContext('2d').drawImage(img, 0, 0, wPx, hPx)
+      const maskData = offscreen.getContext('2d').getImageData(0, 0, wPx, hPx)
+      const n = parseInt(layer.color.replace('#',''), 16)
+      const pr = (n >> 16) & 255, pg = (n >> 8) & 255, pb = n & 255
+      const out = ctx.createImageData(wPx, hPx)
+      for (let i = 0; i < wPx * hPx; i++) {
+        const a = maskData.data[i * 4]
+        out.data[i*4] = pr; out.data[i*4+1] = pg; out.data[i*4+2] = pb
+        out.data[i*4+3] = Math.round(a * 0.55)
+      }
+      ctx.putImageData(out, 0, 0)
+    }
+
+    Promise.all(paintLayers.map(renderLayer)).catch(console.error)
+  }, [paintLayers, wPx, hPx])
+
+  if (!paintLayers?.length) return null
+  return (
+    <canvas
+      ref={canvasRef}
+      width={wPx}
+      height={hPx}
+      style={{ position:'absolute', inset:0, pointerEvents:'none', zIndex:1 }}
+    />
+  )
+}
+
 export default function Wall({
   pieces, selectedId, onSelect, onMove, onResize, onDeselect,
   snapToGrid, gridSize, wallWidth, wallHeight,
@@ -10,6 +58,7 @@ export default function Wall({
   onStartTutorial, tipsEnabled, onToggleTips, tutorialActive,
   tutorialShowLock,
   unitSystem = 'imperial',
+  paintLayers = [],
 }) {
   const containerRef = useRef(null)
   const [baseScale, setBaseScale] = useState(5)   // px per inch
@@ -216,6 +265,13 @@ export default function Wall({
                 }}
                 onClick={handleBgClick}
               >
+                {/* Paint overlay — composites all visible paint layers */}
+                <PaintOverlay
+                  paintLayers={paintLayers}
+                  wPx={wPx}
+                  hPx={hPx}
+                />
+
                 {/* Measurement grid overlay — unit-aware (minor + major intervals) */}
                 {showGrid && (
                   <svg

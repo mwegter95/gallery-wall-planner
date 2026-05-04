@@ -205,6 +205,18 @@ export async function deletePieceImage(pieceId) {
   return apiFetch(`/api/piece-images/${pieceId}`, { method: 'DELETE' })
 }
 
+// ── Gallery: paint layers ─────────────────────────────────────────────────────
+export async function putPaintLayer(wallId, layerData) {
+  return apiFetch(`/api/paint-layers/${wallId}/${layerData.id}`, {
+    method: 'PUT',
+    body: JSON.stringify(layerData),
+  })
+}
+
+export async function deletePaintLayer(wallId, layerId) {
+  return apiFetch(`/api/paint-layers/${wallId}/${layerId}`, { method: 'DELETE' })
+}
+
 // ── Gallery: library ──────────────────────────────────────────────────────────
 export async function putLibraryPiece(piece) {
   return apiFetch(`/api/library/${piece.id}`, {
