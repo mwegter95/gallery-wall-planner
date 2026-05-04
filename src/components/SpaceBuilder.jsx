@@ -453,8 +453,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
               activeSurfaceId={activeSurfaceId}
               onSelectSurface={setActiveSurfaceId}
               onUpdateSurface={updateSurface}
-              onUpdatePhoto={updatePhoto}
-              onAddSurfaceOnPhoto={addSurfaceOnPhoto}
+              onSetConnection={setConnection}
             />
           </div>
 

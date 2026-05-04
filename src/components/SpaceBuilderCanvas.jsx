@@ -1,400 +1,444 @@
 /**
- * SpaceBuilderCanvas — interactive multi-surface, multi-photo perspective canvas.
- *
- * - Pan the canvas by dragging the background
- * - Each photo can be repositioned (drag the photo header grip)
- * - Each photo can be z-ordered (send forward/back)
- * - Up to 12 surfaces defined per-photo with 4 draggable corner handles
- * - Surfaces show name + dims inline at centroid
- * - Corner snapping: handles turn white when near another surface's corner
- * - Click a surface quad to select it
+ * SpaceBuilderCanvas3D — Three.js 3D builder canvas.
+ * Drag bg = orbit | Scroll = zoom | Click = select | Drag surface = move (XZ)
+ * Shift+drag = move Y | Arrow keys = rotate selected | Dbl-click = crop editor
+ * Edge snap: drag a surface near another's edge → release to connect
  */
-import { useRef, useState, useEffect, useCallback, useLayoutEffect } from 'react'
-import { cornersToCanvas, cornersCentroid, findSnapTarget, SURFACE_COLORS } from '../utils/spaceAssembler'
+import { useRef, useState, useEffect } from 'react'
+import * as THREE from 'three'
+import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
+import { warpPerspectiveAsync } from '../utils/homography'
 
-const HANDLE_R       = 9
-const SNAP_THRESHOLD = 22
-const CANVAS_W       = 6000
-const CANVAS_H       = 4500
+const IN_TO_M   = 0.0254
+const SNAP_DIST = 0.35
+const EDGE_LIST = ['left', 'right', 'top', 'bottom']
+const EDGE_LOCAL = {
+  left:   new THREE.Vector3(-0.5, 0, 0),
+  right:  new THREE.Vector3( 0.5, 0, 0),
+  top:    new THREE.Vector3( 0,  0.5, 0),
+  bottom: new THREE.Vector3( 0, -0.5, 0),
+}
+function edgeWorldMid(mesh, edge, wM, hM) {
+  const v = EDGE_LOCAL[edge].clone(); v.x *= wM; v.y *= hM
+  return v.applyMatrix4(mesh.matrixWorld)
+}
+function dims(s) { return { wM: s.widthIn * IN_TO_M, hM: s.heightIn * IN_TO_M } }
 
 export default function SpaceBuilderCanvas({
-  space,
-  activeSurfaceId,
-  onSelectSurface,
-  onUpdateSurface,
-  onUpdatePhoto,
-  onAddSurfaceOnPhoto,
+  space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection,
 }) {
-  const viewportRef = useRef(null)
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
-  const [snapInfo, setSnapInfo] = useState(null) // { surfaceId, corner }
+  const mountRef = useRef(null)
+  const threeRef = useRef(null)
+  const stateRef = useRef({})
+  const [snapHint,      setSnapHint]      = useState(null)
+  const [cropSurfaceId, setCropSurfaceId] = useState(null)
+  stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection }
 
-  // Refs so stable callbacks can read latest values
-  const offsetRef   = useRef({ x: 0, y: 0 })
-  const spaceRef    = useRef(space)
-  const handlersRef = useRef({})
-  const dragRef     = useRef(null)
-
-  useLayoutEffect(() => { spaceRef.current   = space   }, [space])
-  useLayoutEffect(() => { offsetRef.current  = offset  }, [offset])
-  handlersRef.current = { onUpdateSurface, onUpdatePhoto, onSelectSurface, onAddSurfaceOnPhoto }
-
-  // ── Coordinate helper (no React deps, stable) ─────────────────────────────
-  function screenToCanvas(clientX, clientY) {
-    const rect = viewportRef.current?.getBoundingClientRect()
-    if (!rect) return [0, 0]
-    return [
-      clientX - rect.left + offsetRef.current.x,
-      clientY - rect.top  + offsetRef.current.y,
-    ]
-  }
-
-  // ── Stable global mouse handlers (use refs, never recreated) ──────────────
-  const globalMouseMove = useRef((e) => {
-    const d = dragRef.current
-    if (!d) return
-
-    if (d.type === 'pan') {
-      const newOffset = {
-        x: d.startOffX - (e.clientX - d.startScreenX),
-        y: d.startOffY - (e.clientY - d.startScreenY),
-      }
-      offsetRef.current = newOffset
-      setOffset(newOffset)
-      return
-    }
-
-    const [cx, cy] = screenToCanvas(e.clientX, e.clientY)
-
-    if (d.type === 'photo') {
-      handlersRef.current.onUpdatePhoto(d.photoId, {
-        x: d.startPhotoX + (e.clientX - d.startScreenX),
-        y: d.startPhotoY + (e.clientY - d.startScreenY),
-      })
-      return
-    }
-
-    if (d.type === 'surface-move') {
-      const dx = e.clientX - d.startScreenX
-      const dy = e.clientY - d.startScreenY
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.hasMoved = true
-      const { photos } = spaceRef.current
-      const photo = photos.find(p => p.id === d.photoId)
-      if (!photo) return
-      const dfx = dx / photo.displayW
-      const dfy = dy / photo.displayH
-      const newCorners = {}
-      for (const [k, [fx, fy]] of Object.entries(d.startCorners)) {
-        newCorners[k] = [fx + dfx, fy + dfy]
-      }
-      handlersRef.current.onUpdateSurface(d.surfaceId, { corners: newCorners })
-      return
-    }
-
-    if (d.type === 'handle') {
-      const { surfaces, photos } = spaceRef.current
-      const surface = surfaces.find(s => s.id === d.surfaceId)
-      const photo   = photos.find(p => p.id === surface?.photoId)
-      if (!photo) return
-
-      const fx = (cx - photo.x) / photo.displayW
-      const fy = (cy - photo.y) / photo.displayH
-
-      handlersRef.current.onUpdateSurface(d.surfaceId, {
-        corners: { ...surface.corners, [d.corner]: [fx, fy] },
-      })
-
-      // Check snap
-      const snap = findSnapTarget(surfaces, photos, d.surfaceId, d.corner, SNAP_THRESHOLD)
-      setSnapInfo(snap)
-    }
-  }).current
-
-  const globalMouseUp = useRef(() => {
-    const d = dragRef.current
-    // surface-move with no movement = click to select
-    if (d?.type === 'surface-move' && !d.hasMoved) {
-      handlersRef.current.onSelectSurface(d.surfaceId)
-    }
-    dragRef.current = null
-    setSnapInfo(null)
-    document.removeEventListener('mousemove', globalMouseMove)
-    document.removeEventListener('mouseup',   globalMouseUp)
-  }).current
-
+  // ── Scene init (runs once) ───────────────────────────────────────────────
   useEffect(() => {
+    const mount = mountRef.current
+    if (!mount) return
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.setSize(mount.clientWidth, mount.clientHeight)
+    mount.appendChild(renderer.domElement)
+
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(0x080d14)
+    scene.add(new THREE.GridHelper(40, 80, 0x0f1e30, 0x0f1e30))
+
+    const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 0.01, 200)
+    const orbit = { phi: 1.1, theta: 0.4, radius: 8, center: new THREE.Vector3() }
+    function applyOrbit() {
+      orbit.phi = Math.max(0.05, Math.min(Math.PI - 0.05, orbit.phi))
+      camera.position.set(
+        orbit.center.x + orbit.radius * Math.sin(orbit.phi) * Math.sin(orbit.theta),
+        orbit.center.y + orbit.radius * Math.cos(orbit.phi),
+        orbit.center.z + orbit.radius * Math.sin(orbit.phi) * Math.cos(orbit.theta),
+      )
+      camera.lookAt(orbit.center)
+    }
+    applyOrbit()
+
+    const texLoader = new THREE.TextureLoader()
+    const meshMap = {}   // { [surfaceId]: { mesh, wM, hM } }
+
+    function buildMesh(surface) {
+      const { wM, hM } = dims(surface)
+      const geo = new THREE.PlaneGeometry(wM, hM)
+      let mat
+      if (surface.warpedDataUrl) {
+        const tex = texLoader.load(surface.warpedDataUrl)
+        tex.colorSpace = THREE.SRGBColorSpace
+        mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+      } else {
+        const hex = parseInt((SURFACE_COLORS[surface.colorIdx ?? 0] || '#4a9eff').replace('#', ''), 16)
+        mat = new THREE.MeshBasicMaterial({ color: hex, side: THREE.DoubleSide, transparent: true, opacity: 0.55 })
+      }
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.userData.surfaceId = surface.id
+      if (surface.pose3d) {
+        mesh.position.fromArray(surface.pose3d.position)
+        mesh.rotation.set(surface.pose3d.rotX ?? 0, surface.pose3d.rotY ?? 0, surface.pose3d.rotZ ?? 0)
+      } else {
+        const surfs = stateRef.current.space.surfaces
+        const idx = surfs.findIndex(s => s.id === surface.id)
+        mesh.position.set((idx - (surfs.length - 1) / 2) * (wM + 0.3), 0, 0)
+      }
+      const edgesMesh = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: 0x3a5566 })
+      )
+      mesh.add(edgesMesh)
+      scene.add(mesh)
+      meshMap[surface.id] = { mesh, wM, hM }
+    }
+
+    function syncMeshes(surfaces) {
+      const ids = new Set(surfaces.map(s => s.id))
+      for (const id of Object.keys(meshMap)) {
+        if (!ids.has(id)) {
+          scene.remove(meshMap[id].mesh)
+          meshMap[id].mesh.traverse(o => {
+            if (o.geometry) o.geometry.dispose()
+            if (o.material?.map) o.material.map.dispose()
+            if (o.material) o.material.dispose()
+          })
+          delete meshMap[id]
+        }
+      }
+      for (const surface of surfaces) {
+        if (!meshMap[surface.id]) {
+          buildMesh(surface)
+        } else {
+          const entry = meshMap[surface.id]
+          const { wM, hM } = dims(surface)
+          if (surface.warpedDataUrl && !entry.mesh.material.map) {
+            const tex = texLoader.load(surface.warpedDataUrl)
+            tex.colorSpace = THREE.SRGBColorSpace
+            if (entry.mesh.material.map) entry.mesh.material.map.dispose()
+            entry.mesh.material.dispose()
+            entry.mesh.material = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+          }
+          if (Math.abs(entry.wM - wM) > 0.001 || Math.abs(entry.hM - hM) > 0.001) {
+            entry.mesh.geometry.dispose()
+            entry.mesh.geometry = new THREE.PlaneGeometry(wM, hM)
+            const child = entry.mesh.children[0]
+            if (child) { child.geometry.dispose(); child.geometry = new THREE.EdgesGeometry(entry.mesh.geometry) }
+            entry.wM = wM; entry.hM = hM
+          }
+          if (surface.pose3d) {
+            entry.mesh.position.fromArray(surface.pose3d.position)
+            entry.mesh.rotation.set(surface.pose3d.rotX ?? 0, surface.pose3d.rotY ?? 0, surface.pose3d.rotZ ?? 0)
+          }
+        }
+      }
+    }
+
+    function applySelection(activeId) {
+      for (const [id, entry] of Object.entries(meshMap)) {
+        const line = entry.mesh.children[0]
+        if (line) line.material.color.set(id === activeId ? 0xffffff : 0x3a5566)
+      }
+    }
+
+    const raycaster = new THREE.Raycaster()
+    function raycast(clientX, clientY) {
+      const rect = renderer.domElement.getBoundingClientRect()
+      const mouse = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width)  * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      raycaster.setFromCamera(mouse, camera)
+      const hits = raycaster.intersectObjects(Object.values(meshMap).map(e => e.mesh))
+      return hits[0] ?? null
+    }
+
+    function computeSnap(movingId) {
+      const me = meshMap[movingId]; if (!me) return null
+      for (const fe of EDGE_LIST) {
+        const fm = edgeWorldMid(me.mesh, fe, me.wM, me.hM)
+        for (const [oid, oe] of Object.entries(meshMap)) {
+          if (oid === movingId) continue
+          for (const te of EDGE_LIST) {
+            if (fm.distanceTo(edgeWorldMid(oe.mesh, te, oe.wM, oe.hM)) < SNAP_DIST)
+              return { fromId: movingId, fromEdge: fe, toId: oid, toEdge: te }
+          }
+        }
+      }
+      return null
+    }
+
+    function applySnap(hint) {
+      const { fromId, fromEdge, toId, toEdge } = hint
+      const fe = meshMap[fromId]; const te = meshMap[toId]
+      if (!fe || !te) return
+      const toMid   = edgeWorldMid(te.mesh, toEdge, te.wM, te.hM)
+      const fromMid = edgeWorldMid(fe.mesh, fromEdge, fe.wM, fe.hM)
+      fe.mesh.position.add(toMid.sub(fromMid))
+      fe.mesh.rotation.copy(te.mesh.rotation)
+      stateRef.current.onUpdateSurface(fromId, { pose3d: {
+        position: fe.mesh.position.toArray(),
+        rotX: fe.mesh.rotation.x, rotY: fe.mesh.rotation.y, rotZ: fe.mesh.rotation.z,
+      }})
+      stateRef.current.onSetConnection(fromId, fromEdge, { surfaceId: toId, edge: toEdge, angleDeg: 90 })
+    }
+
+    // Drag state
+    const drag = { active: false, hadMoved: false, type: null, surfaceId: null,
+                   startX: 0, startY: 0, offsetWorld: new THREE.Vector3(), basePos: new THREE.Vector3() }
+    const dragPt  = new THREE.Vector3()
+    const xzPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+
+    function screenRayXZ(clientX, clientY, planeY) {
+      const rect = renderer.domElement.getBoundingClientRect()
+      const m = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      raycaster.setFromCamera(m, camera)
+      xzPlane.constant = -planeY
+      return raycaster.ray.intersectPlane(xzPlane, dragPt) ? dragPt.clone() : null
+    }
+
+    function onDown(e) {
+      if (e.button !== 0) return
+      drag.startX = e.clientX; drag.startY = e.clientY; drag.hadMoved = false
+      const hit = raycast(e.clientX, e.clientY)
+      if (hit) {
+        const id = hit.object.userData.surfaceId
+        drag.active = true; drag.type = 'surface'; drag.surfaceId = id
+        const entry = meshMap[id]
+        const pt = screenRayXZ(e.clientX, e.clientY, entry?.mesh.position.y ?? 0)
+        if (pt) drag.offsetWorld.copy(pt).sub(entry.mesh.position)
+        drag.basePos.copy(entry.mesh.position)
+        stateRef.current.onSelectSurface(id)
+      } else {
+        drag.active = true; drag.type = 'orbit'
+      }
+    }
+
+    function onMove(e) {
+      if (!drag.active) return
+      const dx = e.clientX - drag.startX; const dy = e.clientY - drag.startY
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) drag.hadMoved = true
+      if (drag.type === 'orbit') {
+        orbit.theta -= dx * 0.005; orbit.phi += dy * 0.005; applyOrbit()
+      } else if (drag.type === 'surface') {
+        const entry = meshMap[drag.surfaceId]; if (!entry) return
+        if (e.shiftKey) {
+          entry.mesh.position.y = drag.basePos.y - dy * 0.01
+        } else {
+          const pt = screenRayXZ(e.clientX, e.clientY, drag.basePos.y)
+          if (pt) entry.mesh.position.copy(pt.sub(drag.offsetWorld))
+        }
+        setSnapHint(computeSnap(drag.surfaceId))
+      }
+      drag.startX = e.clientX; drag.startY = e.clientY
+    }
+
+    function onUp() {
+      if (drag.type === 'surface' && drag.hadMoved) {
+        const entry = meshMap[drag.surfaceId]
+        if (entry) {
+          const hint = computeSnap(drag.surfaceId)
+          if (hint) applySnap(hint)
+          else stateRef.current.onUpdateSurface(drag.surfaceId, { pose3d: {
+            position: entry.mesh.position.toArray(),
+            rotX: entry.mesh.rotation.x, rotY: entry.mesh.rotation.y, rotZ: entry.mesh.rotation.z,
+          }})
+        }
+        setSnapHint(null)
+      }
+      drag.active = false; drag.hadMoved = false; drag.type = null; drag.surfaceId = null
+    }
+
+    function onWheel(e) {
+      orbit.radius = Math.max(0.5, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
+      applyOrbit()
+    }
+
+    function onDbl(e) {
+      const hit = raycast(e.clientX, e.clientY)
+      if (hit) setCropSurfaceId(hit.object.userData.surfaceId)
+    }
+
+    const canvas = renderer.domElement
+    canvas.addEventListener('mousedown', onDown)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup',   onUp)
+    canvas.addEventListener('wheel',     onWheel, { passive: true })
+    canvas.addEventListener('dblclick',  onDbl)
+
+    const ro = new ResizeObserver(() => {
+      camera.aspect = mount.clientWidth / mount.clientHeight
+      camera.updateProjectionMatrix()
+      renderer.setSize(mount.clientWidth, mount.clientHeight)
+    })
+    ro.observe(mount)
+
+    let raf
+    const animate = () => { raf = requestAnimationFrame(animate); renderer.render(scene, camera) }
+    animate()
+
+    threeRef.current = { syncMeshes, applySelection, meshMap }
+
     return () => {
-      document.removeEventListener('mousemove', globalMouseMove)
-      document.removeEventListener('mouseup',   globalMouseUp)
+      cancelAnimationFrame(raf)
+      ro.disconnect()
+      canvas.removeEventListener('mousedown', onDown)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup',   onUp)
+      canvas.removeEventListener('wheel',     onWheel)
+      canvas.removeEventListener('dblclick',  onDbl)
+      scene.traverse(o => {
+        if (o.geometry) o.geometry.dispose()
+        if (o.material?.map) o.material.map.dispose()
+        if (o.material) o.material.dispose()
+      })
+      renderer.dispose()
+      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement)
+      threeRef.current = null
     }
-  }, []) // eslint-disable-line
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Pointer down handlers (per element type) ──────────────────────────────
-  const onBgMouseDown = (e) => {
-    if (e.button !== 0) return
-    e.preventDefault()
-    dragRef.current = {
-      type: 'pan',
-      startScreenX: e.clientX,
-      startScreenY: e.clientY,
-      startOffX: offsetRef.current.x,
-      startOffY: offsetRef.current.y,
+  useEffect(() => { threeRef.current?.syncMeshes(space.surfaces) }, [space.surfaces])
+  useEffect(() => { threeRef.current?.applySelection(activeSurfaceId) }, [activeSurfaceId])
+
+  // Keyboard: rotate selected surface
+  useEffect(() => {
+    function onKey(e) {
+      const t = threeRef.current; if (!t) return
+      const id = stateRef.current.activeSurfaceId; if (!id) return
+      const entry = t.meshMap[id]; if (!entry) return
+      const step = e.shiftKey ? Math.PI / 36 : Math.PI / 12
+      let changed = true
+      if      (e.key === 'ArrowLeft')  entry.mesh.rotation.y -= step
+      else if (e.key === 'ArrowRight') entry.mesh.rotation.y += step
+      else if (e.key === 'ArrowUp')    entry.mesh.rotation.x += step
+      else if (e.key === 'ArrowDown')  entry.mesh.rotation.x -= step
+      else changed = false
+      if (changed) {
+        e.preventDefault()
+        stateRef.current.onUpdateSurface(id, { pose3d: {
+          position: entry.mesh.position.toArray(),
+          rotX: entry.mesh.rotation.x, rotY: entry.mesh.rotation.y, rotZ: entry.mesh.rotation.z,
+        }})
+      }
     }
-    document.addEventListener('mousemove', globalMouseMove)
-    document.addEventListener('mouseup',   globalMouseUp)
-  }
-
-  const onPhotoGripMouseDown = (e, photoId) => {
-    e.stopPropagation()
-    e.preventDefault()
-    const photo = spaceRef.current.photos.find(p => p.id === photoId)
-    if (!photo) return
-    dragRef.current = {
-      type: 'photo',
-      photoId,
-      startScreenX: e.clientX,
-      startScreenY: e.clientY,
-      startPhotoX:  photo.x,
-      startPhotoY:  photo.y,
-    }
-    document.addEventListener('mousemove', globalMouseMove)
-    document.addEventListener('mouseup',   globalMouseUp)
-  }
-
-  const onHandleMouseDown = (e, surfaceId, corner) => {
-    e.stopPropagation()
-    e.preventDefault()
-    dragRef.current = { type: 'handle', surfaceId, corner }
-    document.addEventListener('mousemove', globalMouseMove)
-    document.addEventListener('mouseup',   globalMouseUp)
-  }
-
-  const onSurfaceBodyMouseDown = (e, surfaceId) => {
-    e.stopPropagation()
-    e.preventDefault()
-    const surface = spaceRef.current.surfaces.find(s => s.id === surfaceId)
-    if (!surface) return
-    dragRef.current = {
-      type:         'surface-move',
-      surfaceId,
-      photoId:      surface.photoId,
-      startScreenX: e.clientX,
-      startScreenY: e.clientY,
-      startCorners: JSON.parse(JSON.stringify(surface.corners)),
-      hasMoved:     false,
-    }
-    document.addEventListener('mousemove', globalMouseMove)
-    document.addEventListener('mouseup',   globalMouseUp)
-  }
-
-  // ── Rendering ─────────────────────────────────────────────────────────────
-  const toScreen = useCallback(([x, y]) => [x - offset.x, y - offset.y], [offset])
-
-  function getSCC(surface) {
-    const photo = space.photos.find(p => p.id === surface.photoId)
-    if (!photo) return null
-    const cc = cornersToCanvas(surface.corners, photo)
-    return {
-      tl: toScreen(cc.tl),
-      tr: toScreen(cc.tr),
-      bl: toScreen(cc.bl),
-      br: toScreen(cc.br),
-    }
-  }
-
-  function polyPoints(scc) {
-    return `${scc.tl[0]},${scc.tl[1]} ${scc.tr[0]},${scc.tr[1]} ${scc.br[0]},${scc.br[1]} ${scc.bl[0]},${scc.bl[1]}`
-  }
-
-  const sortedPhotos = [...space.photos].sort((a, b) => a.zIndex - b.zIndex)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
-    <div
-      className="sbc-viewport"
-      ref={viewportRef}
-      onMouseDown={onBgMouseDown}
-    >
-      {/* Photo layer — positioned photos with drag grips */}
-      {sortedPhotos.map(photo => (
-        <div
-          key={photo.id}
-          className="sbc-photo-wrap"
-          style={{
-            left:   photo.x - offset.x,
-            top:    photo.y - offset.y,
-            width:  photo.displayW,
-            zIndex: photo.zIndex + 1,
-          }}
-        >
-          {/* Drag grip bar */}
-          <div
-            className="sbc-photo-grip"
-            onMouseDown={e => onPhotoGripMouseDown(e, photo.id)}
-            title="Drag to reposition photo"
-          >
-            <span className="sbc-photo-grip-dots">⠿</span>
-            <span className="sbc-photo-label">Photo {space.photos.indexOf(photo) + 1}</span>
-            <div className="sbc-photo-grip-actions">
-              <button
-                className="sbc-photo-btn"
-                title="Add surface on this photo"
-                onMouseDown={e => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); onAddSurfaceOnPhoto(photo.id) }}
-              >+ Surface</button>
-              <button
-                className="sbc-photo-btn sbc-photo-btn--z"
-                title="Send photo back"
-                onMouseDown={e => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onUpdatePhoto(photo.id, { zIndex: photo.zIndex - 1 })
-                }}
-              >↓</button>
-              <button
-                className="sbc-photo-btn sbc-photo-btn--z"
-                title="Bring photo forward"
-                onMouseDown={e => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onUpdatePhoto(photo.id, { zIndex: photo.zIndex + 1 })
-                }}
-              >↑</button>
-            </div>
-          </div>
-          <img
-            src={photo.dataUrl}
-            draggable={false}
-            alt=""
-            style={{ width: '100%', display: 'block' }}
-          />
+    <div ref={mountRef} className="sbc-3d-viewport">
+      {snapHint && (
+        <div className="sbc-snap-hint">
+          ⚡ snap: <strong>{snapHint.fromEdge}</strong> → <strong>{snapHint.toEdge}</strong> — release to connect
         </div>
-      ))}
-
-      {/* SVG surface overlay (covers full viewport) */}
-      <svg
-        className="sbc-svg"
-        width="100%"
-        height="100%"
-        style={{ position: 'absolute', inset: 0, zIndex: 50 }}
-      >
-        {space.surfaces.map((surface) => {
-          const scc = getSCC(surface)
-          if (!scc) return null
-
-          const color    = SURFACE_COLORS[surface.colorIdx ?? 0]
-          const isActive = surface.id === activeSurfaceId
-          const pts      = polyPoints(scc)
-          const [cx, cy] = cornersCentroid(scc)
-
-          return (
-            <g key={surface.id}>
-              {/* Quad fill — drag to move, click (no drag) to select */}
-              <polygon
-                points={pts}
-                fill={`${color}22`}
-                stroke={color}
-                strokeWidth={isActive ? 2.5 : 1.5}
-                strokeDasharray={isActive ? 'none' : '7 3'}
-                style={{ cursor: 'move', pointerEvents: 'all' }}
-                onMouseDown={e => onSurfaceBodyMouseDown(e, surface.id)}
-              />
-
-              {/* Surface name + dims at centroid */}
-              <text
-                x={cx}
-                y={cy - 8}
-                textAnchor="middle"
-                fontSize="13"
-                fontWeight="700"
-                fill={color}
-                style={{ pointerEvents: 'none', userSelect: 'none', paintOrder: 'stroke' }}
-                stroke="#0d1117"
-                strokeWidth="3"
-              >{surface.name}</text>
-              <text
-                x={cx}
-                y={cy + 8}
-                textAnchor="middle"
-                fontSize="11"
-                fill={`${color}cc`}
-                style={{ pointerEvents: 'none', userSelect: 'none', paintOrder: 'stroke' }}
-                stroke="#0d1117"
-                strokeWidth="3"
-              >{surface.widthIn}" × {surface.heightIn}"</text>
-
-              {/* Corner handles */}
-              {(['tl', 'tr', 'bl', 'br']).map(corner => {
-                const [hx, hy] = scc[corner]
-                const isSnapping = (
-                  snapInfo && dragRef.current?.surfaceId === surface.id && dragRef.current?.corner === corner
-                )
-                return (
-                  <g key={corner}>
-                    {/* Hit area (larger transparent circle) */}
-                    <circle
-                      cx={hx} cy={hy} r={HANDLE_R + 8}
-                      fill="transparent"
-                      style={{ cursor: 'crosshair', pointerEvents: 'all' }}
-                      onMouseDown={e => onHandleMouseDown(e, surface.id, corner)}
-                    />
-                    {/* Visible handle */}
-                    <circle
-                      cx={hx} cy={hy} r={HANDLE_R}
-                      fill={isSnapping ? '#fff' : (isActive ? color : `${color}99`)}
-                      stroke={isSnapping ? color : '#1a2332'}
-                      strokeWidth="2"
-                      style={{ pointerEvents: 'none' }}
-                    />
-                    {/* Corner label */}
-                    <text
-                      x={hx}
-                      y={hy + 4}
-                      textAnchor="middle"
-                      fontSize="8"
-                      fill={isActive ? '#fff' : '#ffffff66'}
-                      fontWeight="700"
-                      style={{ pointerEvents: 'none', userSelect: 'none' }}
-                    >{corner.toUpperCase()}</text>
-                  </g>
-                )
-              })}
-            </g>
-          )
-        })}
-
-        {/* Snap indicator line */}
-        {snapInfo && dragRef.current?.type === 'handle' && (() => {
-          const activeSurf = space.surfaces.find(s => s.id === dragRef.current.surfaceId)
-          const targetSurf = space.surfaces.find(s => s.id === snapInfo.surfaceId)
-          if (!activeSurf || !targetSurf) return null
-          const activeSCC = getSCC(activeSurf)
-          const targetSCC = getSCC(targetSurf)
-          if (!activeSCC || !targetSCC) return null
-          const [ax, ay] = activeSCC[dragRef.current.corner]
-          const [tx, ty] = targetSCC[snapInfo.corner]
-          return (
-            <line
-              x1={ax} y1={ay} x2={tx} y2={ty}
-              stroke="#ffffff66"
-              strokeWidth="1"
-              strokeDasharray="4 4"
-            />
-          )
-        })()}
-      </svg>
-
-      {/* Empty state */}
-      {space.photos.length === 0 && (
-        <div className="sbc-empty">
+      )}
+      <div className="sbc-3d-legend">
+        <span>Drag bg: orbit</span>
+        <span>Drag surface: move XZ</span>
+        <span>Shift+drag: raise/lower</span>
+        <span>←→↑↓: rotate (Shift=fine)</span>
+        <span>Dbl-click: crop corners</span>
+        <span>Scroll: zoom</span>
+      </div>
+      {space.surfaces.length === 0 && (
+        <div className="sbc-3d-empty">
           <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
             <rect x="4" y="12" width="48" height="32" rx="4" stroke="#4a9eff" strokeWidth="2"/>
             <circle cx="19" cy="24" r="5" stroke="#4a9eff" strokeWidth="2"/>
             <path d="M4 36l14-10 10 7 10-13 18 16" stroke="#4a9eff" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
           </svg>
-          <p>Click <strong>Add Photo</strong> to place your first room photo</p>
-          <p className="sbc-empty-sub">Then drag the corner handles to define each surface</p>
+          <p>Add a photo — drag surfaces into position to build your room</p>
         </div>
       )}
+      {cropSurfaceId && (
+        <CropOverlay
+          surfaceId={cropSurfaceId}
+          space={space}
+          onUpdateSurface={onUpdateSurface}
+          onClose={() => setCropSurfaceId(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── 2D crop-corner editor (overlay on top of 3D canvas) ──────────────────────
+function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
+  const surface = space.surfaces.find(s => s.id === surfaceId)
+  const photo   = surface && space.photos.find(p => p.id === surface.photoId)
+  const [corners,   setCorners]   = useState(surface?.corners ? JSON.parse(JSON.stringify(surface.corners)) : null)
+  const [isWarping, setIsWarping] = useState(false)
+  const svgRef  = useRef(null)
+  const dragRef = useRef(null)
+  const W = 540
+  const H = photo ? Math.round(W * photo.displayH / photo.displayW) : 360
+  if (!surface || !photo || !corners) return null
+  const toSVG   = ([fx, fy]) => [fx * W, fy * H]
+  const fromSVG = (sx, sy)   => [sx / W, sy / H]
+  const polyStr = ['tl','tr','br','bl'].map(k => toSVG(corners[k]).join(',')).join(' ')
+
+  async function applyAndWarp() {
+    onUpdateSurface(surfaceId, { corners, warpedDataUrl: null })
+    setIsWarping(true)
+    try {
+      const url = await warpSurface(
+        { ...surface, corners }, photo.dataUrl, photo.displayW, photo.displayH, warpPerspectiveAsync
+      )
+      onUpdateSurface(surfaceId, { corners, warpedDataUrl: url })
+    } finally { setIsWarping(false); onClose() }
+  }
+
+  return (
+    <div className="sbc-crop-overlay">
+      <div className="sbc-crop-modal">
+        <div className="sbc-crop-header">
+          <span>Crop corners — {surface.name}</span>
+          <button className="sbc-crop-close" onClick={onClose}>✕</button>
+        </div>
+        <svg
+          ref={svgRef} width={W} height={H}
+          style={{ display:'block', backgroundImage:`url(${photo.dataUrl})`, backgroundSize:'100% 100%', cursor:'crosshair' }}
+          onMouseMove={e => {
+            if (!dragRef.current) return
+            const rect = svgRef.current.getBoundingClientRect()
+            setCorners(prev => ({ ...prev, [dragRef.current]: fromSVG(
+              Math.max(0, Math.min(W, e.clientX - rect.left)),
+              Math.max(0, Math.min(H, e.clientY - rect.top))
+            )}))
+          }}
+          onMouseUp={() => { dragRef.current = null }}
+          onMouseLeave={() => { dragRef.current = null }}
+        >
+          <polygon points={polyStr} fill="rgba(74,158,255,0.15)" stroke="#4a9eff" strokeWidth="1.5"/>
+          {['tl','tr','br','bl'].map(k => {
+            const [hx, hy] = toSVG(corners[k])
+            return (
+              <g key={k} onMouseDown={e => { e.stopPropagation(); dragRef.current = k }} style={{ cursor:'grab' }}>
+                <circle cx={hx} cy={hy} r={14} fill="transparent"/>
+                <circle cx={hx} cy={hy} r={8}  fill="#4a9eff" stroke="#fff" strokeWidth="2"/>
+                <text x={hx} y={hy+4} textAnchor="middle" fontSize="8" fill="#fff" fontWeight="700"
+                  style={{ pointerEvents:'none', userSelect:'none' }}>{k.toUpperCase()}</text>
+              </g>
+            )
+          })}
+        </svg>
+        <div className="sbc-crop-footer">
+          <button className="sb-btn sb-btn--ghost" onClick={onClose}>Cancel</button>
+          <button
+            className={`sb-btn sb-btn--save${isWarping ? ' sb-btn--loading' : ''}`}
+            onClick={applyAndWarp} disabled={isWarping}
+          >
+            {isWarping ? <><span className="btn-spinner"/>Warping…</> : 'Apply & Warp'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
