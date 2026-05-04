@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import CropModal from './CropModal'
 import { BASE as API_BASE } from '../utils/api'
+import { inToCmInt, cmToIn } from '../utils/units'
 
 const PALETTE = [
   '#8B7D6B','#6B8E9F','#9E8B6A','#7B9E87','#A08080',
@@ -109,11 +110,11 @@ async function anyImageToJpeg(file) {
   return blobToDataUrl(file)
 }
 
-export default function AddPieceModal({ piece, onSubmit, onClose }) {
+export default function AddPieceModal({ piece, onSubmit, onClose, unitSystem = 'imperial' }) {
   const isEdit = !!piece
   const [name,   setName]   = useState(piece?.name   || '')
-  const [width,  setWidth]  = useState(piece?.width  || 16)
-  const [height, setHeight] = useState(piece?.height || 20)
+  const [width,  setWidth]  = useState(unitSystem === 'metric' ? inToCmInt(piece?.width  || 16) : (piece?.width  || 16))
+  const [height, setHeight] = useState(unitSystem === 'metric' ? inToCmInt(piece?.height || 20) : (piece?.height || 20))
   const [color,  setColor]  = useState(piece?.color  || PALETTE[0])
   const [image,       setImage]       = useState(piece?.image       || null)
   const [transparent, setTransparent] = useState(piece?.transparent || false)
@@ -137,7 +138,9 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
     e.preventDefault()
     const errs = validate()
     if (Object.keys(errs).length) { setErrors(errs); return }
-    onSubmit({ name: name.trim(), width: +width, height: +height, color, image, transparent })
+    const wIn = unitSystem === 'metric' ? cmToIn(+width)  : +width
+    const hIn = unitSystem === 'metric' ? cmToIn(+height) : +height
+    onSubmit({ name: name.trim(), width: wIn, height: hIn, color, image, transparent })
   }
 
   const handleImageUpload = useCallback(async (e) => {
@@ -188,27 +191,27 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
           {/* Dimensions */}
           <div className="field field-row">
             <div className="field field-half">
-              <label className="field-label">Width (inches)</label>
+              <label className="field-label">Width ({unitSystem === 'metric' ? 'cm' : 'inches'})</label>
               <input
                 type="number"
                 className={`text-input ${errors.width ? 'error' : ''}`}
                 value={width}
                 min={1}
-                max={128}
-                step={0.5}
+                max={unitSystem === 'metric' ? 300 : 128}
+                step={unitSystem === 'metric' ? 1 : 0.5}
                 onChange={e => { setWidth(e.target.value); setErrors(ev => ({ ...ev, width: '' })) }}
               />
               {errors.width && <span className="field-error">{errors.width}</span>}
             </div>
             <div className="field field-half">
-              <label className="field-label">Height (inches)</label>
+              <label className="field-label">Height ({unitSystem === 'metric' ? 'cm' : 'inches'})</label>
               <input
                 type="number"
                 className={`text-input ${errors.height ? 'error' : ''}`}
                 value={height}
                 min={1}
-                max={95}
-                step={0.5}
+                max={unitSystem === 'metric' ? 250 : 95}
+                step={unitSystem === 'metric' ? 1 : 0.5}
                 onChange={e => { setHeight(e.target.value); setErrors(ev => ({ ...ev, height: '' })) }}
               />
               {errors.height && <span className="field-error">{errors.height}</span>}
@@ -229,7 +232,9 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
                   backgroundSize: 'cover',
                 }}
               />
-              <span className="size-preview-dims">{width}" × {height}"</span>
+              <span className="size-preview-dims">
+                {unitSystem === 'metric' ? `${width} × ${height} cm` : `${width}" × ${height}"`}
+              </span>
             </div>
           )}
 

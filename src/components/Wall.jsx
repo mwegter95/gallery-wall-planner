@@ -1,13 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import Piece from './Piece'
-
-/** Convert a total-inch measurement to a "X' Y"" label (e.g. 150 → "12' 6\"") */
-function fmtFtIn(inches) {
-  const ft = Math.floor(inches / 12)
-  const i  = Math.round(inches % 12)
-  if (i === 0) return `${ft}'`
-  return `${ft}' ${i}"`
-}
+import { INCH_TO_CM, RULER_TICK, MAJOR_GRID, MINOR_GRID, fmtRulerLabel, displayGridSize, fmtWallDims } from '../utils/units'
 
 export default function Wall({
   pieces, selectedId, onSelect, onMove, onResize, onDeselect,
@@ -16,6 +9,7 @@ export default function Wall({
   onUndo, canUndo, onLockToggle, onMoveStart, onResizeStart,
   onStartTutorial, tipsEnabled, onToggleTips, tutorialActive,
   tutorialShowLock,
+  unitSystem = 'imperial',
 }) {
   const containerRef = useRef(null)
   const [baseScale, setBaseScale] = useState(5)   // px per inch
@@ -39,36 +33,42 @@ export default function Wall({
     return () => ro.disconnect()
   }, [wallWidth, wallHeight])
 
-  const scale = baseScale * zoom
-  const wPx   = wallWidth  * scale
-  const hPx   = wallHeight * scale
+  const scale       = baseScale * zoom
+  const wPx         = wallWidth  * scale
+  const hPx         = wallHeight * scale
+  const tickInterval = RULER_TICK[unitSystem]   // inches between ruler ticks
+  const majorGrid    = MAJOR_GRID[unitSystem]   // inches per major grid cell
+  const minorGrid    = MINOR_GRID[unitSystem]   // inches per minor grid cell
 
-  /* Ruler ticks every 12" (1 foot) + final edge tick if wall isn't an exact # of feet */
-  const footTicks = []
-  for (let i = 0; i <= wallWidth; i += 12) {
-    footTicks.push({ pos: i * scale, label: fmtFtIn(i) })
+  /* ── Horizontal ruler ticks ───────────────────────────── */
+  const rulerTicksH = []
+  for (let i = 0; i <= wallWidth; i += tickInterval) {
+    rulerTicksH.push({ pos: i * scale, label: fmtRulerLabel(i, unitSystem) })
   }
-  // If width isn't an exact foot, add the fractional right-edge tick
-  if (wallWidth % 12 !== 0) {
-    footTicks.push({ pos: wallWidth * scale, label: fmtFtIn(wallWidth) })
+  // Edge tick if wall doesn't land on a tick boundary
+  const lastTickH = Math.floor(wallWidth / tickInterval) * tickInterval
+  if (Math.abs(wallWidth - lastTickH) > 0.5) {
+    rulerTicksH.push({ pos: wallWidth * scale, label: fmtRulerLabel(wallWidth, unitSystem) })
   }
-  // Always flip the very last tick's label leftward so it never overflows the ruler
-  if (footTicks.length > 0) {
-    footTicks[footTicks.length - 1] = { ...footTicks[footTicks.length - 1], isEdge: true }
+  if (rulerTicksH.length > 0) {
+    rulerTicksH[rulerTicksH.length - 1] = { ...rulerTicksH[rulerTicksH.length - 1], isEdge: true }
   }
 
-  // Vertical ruler: top tick = actual wall height, then whole-foot marks up from floor
-  const footTicksH = []
-  const wholeFeetV  = Math.floor(wallHeight / 12)
-  // Top tick: actual wall height in ft+in (e.g. "9' 6"")
-  footTicksH.push({ pos: 0, label: fmtFtIn(wallHeight), isEdge: true })
-  // Whole-foot marks counting up from the floor (0' at floor, 1', 2', …)
-  for (let f = 0; f <= wholeFeetV; f++) {
-    const posFromTop = (wallHeight - f * 12) * scale
-    if (posFromTop > 0.5) {          // skip if it would overlap the top tick
-      footTicksH.push({ pos: posFromTop, label: `${f}'` })
+  /* ── Vertical ruler ticks (counts up from floor) ─────── */
+  const rulerTicksV = []
+  // Top tick = full wall height
+  rulerTicksV.push({ pos: 0, label: fmtRulerLabel(wallHeight, unitSystem), isEdge: true })
+  // Ticks from floor upward
+  const wholeTicks = Math.floor(wallHeight / tickInterval)
+  for (let t = 0; t <= wholeTicks; t++) {
+    const posFromTop = (wallHeight - t * tickInterval) * scale
+    if (posFromTop > 0.5) {
+      rulerTicksV.push({ pos: posFromTop, label: fmtRulerLabel(t * tickInterval, unitSystem) })
     }
   }
+
+  const footTicks  = rulerTicksH
+  const footTicksH = rulerTicksV
 
   const handleBgClick = useCallback((e) => {
     if (e.target === e.currentTarget) onDeselect()
@@ -101,15 +101,15 @@ export default function Wall({
           className={`ctrl-btn ${showGrid ? 'active' : ''}`}
           data-tutorial="ctrl-grid"
           onClick={() => setShowGrid(g => !g)}
-          title="Toggle inch/foot measurement grid"
+          title={`Toggle measurement grid (${unitSystem === 'metric' ? `${Math.round(MINOR_GRID.metric * INCH_TO_CM)} cm minor / 1 m major` : '1" minor / 1\' major'})`}
         >
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M1 4.5h11M1 8.5h11M4.5 1v11M8.5 1v11" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
-          Grid
+          Grid {unitSystem === 'metric' ? `${Math.round(MINOR_GRID.metric * INCH_TO_CM)} cm` : '1"'}
         </button>
         {snapToGrid && (
           <span className="snap-badge">
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" xmlns="http://www.w3.org/2000/svg" style={{display:'inline',verticalAlign:'middle',marginRight:'3px'}}><path d="M1 3.5h9M1 7.5h9M3.5 1v9M7.5 1v9" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
-            Snap {gridSize}"
+            Snap {displayGridSize(gridSize, unitSystem)}{unitSystem === 'metric' ? ' cm' : '"'}
           </span>
         )}
 
@@ -216,7 +216,7 @@ export default function Wall({
                 }}
                 onClick={handleBgClick}
               >
-                {/* Measurement grid overlay (inches + feet) */}
+                {/* Measurement grid overlay — unit-aware (minor + major intervals) */}
                 {showGrid && (
                   <svg
                     className="grid-svg"
@@ -225,34 +225,30 @@ export default function Wall({
                     style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2 }}
                   >
                     <defs>
-                      {/* Vertical offset so grid lines land on whole-foot ruler marks
-                          measured from the floor. Without this, the grid tiles from
-                          y=0 (top) but the ruler counts up from the floor, so they
-                          only align when wallHeight is an exact number of feet.
-                          offsetY = (wallHeight mod 12) * scale shifts the pattern
-                          so that one tile boundary always falls at the floor (y=hPx). */}
                       {(() => {
-                        const offsetY = (wallHeight % 12) * scale
+                        const offsetY = (wallHeight % majorGrid) * scale
+                        const minorPx = minorGrid * scale
+                        const majorPx = majorGrid * scale
                         return (
                           <>
-                            {scale >= 1 && (
-                              <pattern id="inch-pat" width={scale} height={scale}
+                            {minorPx >= 2 && (
+                              <pattern id="minor-pat" width={minorPx} height={minorPx}
                                 patternUnits="userSpaceOnUse"
                                 patternTransform={`translate(0,${offsetY})`}>
                                 <path
-                                  d={`M ${scale} 0 L 0 0 0 ${scale}`}
+                                  d={`M ${minorPx} 0 L 0 0 0 ${minorPx}`}
                                   fill="none"
                                   stroke="rgba(255,255,255,0.09)"
                                   strokeWidth="0.5"
                                 />
                               </pattern>
                             )}
-                            <pattern id="foot-pat" width={12 * scale} height={12 * scale}
+                            <pattern id="major-pat" width={majorPx} height={majorPx}
                               patternUnits="userSpaceOnUse"
                               patternTransform={`translate(0,${offsetY})`}>
-                              {scale >= 1 && <rect width={12 * scale} height={12 * scale} fill="url(#inch-pat)" />}
+                              {minorPx >= 2 && <rect width={majorPx} height={majorPx} fill="url(#minor-pat)" />}
                               <path
-                                d={`M ${12 * scale} 0 L 0 0 0 ${12 * scale}`}
+                                d={`M ${majorPx} 0 L 0 0 0 ${majorPx}`}
                                 fill="none"
                                 stroke="rgba(255,255,255,0.28)"
                                 strokeWidth="1"
@@ -262,34 +258,33 @@ export default function Wall({
                         )
                       })()}
                     </defs>
-                    <rect width="100%" height="100%" fill="url(#foot-pat)" />
-                    {/* Foot labels inside the wall */}
-                    {Array.from({ length: Math.floor(wallWidth / 12) + 1 }, (_, i) => i).map(fi => (
-                      fi > 0 && fi * 12 <= wallWidth && (
+                    <rect width="100%" height="100%" fill="url(#major-pat)" />
+                    {/* X-axis major grid labels */}
+                    {Array.from({ length: Math.floor(wallWidth / majorGrid) + 1 }, (_, i) => i).map(mi => (
+                      mi > 0 && mi * majorGrid <= wallWidth && (
                         <text
-                          key={`fx-${fi}`}
-                          x={fi * 12 * scale + 3}
+                          key={`mx-${mi}`}
+                          x={mi * majorGrid * scale + 3}
                           y={10}
                           fill="rgba(255,255,255,0.35)"
                           fontSize={9}
                           fontFamily="ui-monospace,monospace"
-                        >{fi}′</text>
+                        >{fmtRulerLabel(mi * majorGrid, unitSystem)}</text>
                       )
                     ))}
-                    {/* Y labels: place fi′ mark at same Y as the vertical ruler tick
-                        (wallHeight - fi*12)*scale from top = fi feet up from floor) */}
-                    {Array.from({ length: Math.floor(wallHeight / 12) + 1 }, (_, i) => i).map(fi => {
-                      const yPos = (wallHeight - fi * 12) * scale
+                    {/* Y-axis major grid labels (counts up from floor) */}
+                    {Array.from({ length: Math.floor(wallHeight / majorGrid) + 1 }, (_, i) => i).map(mi => {
+                      const yPos = (wallHeight - mi * majorGrid) * scale
                       return (
-                        fi > 0 && yPos > 3 && yPos < hPx && (
+                        mi > 0 && yPos > 3 && yPos < hPx && (
                           <text
-                            key={`fy-${fi}`}
+                            key={`my-${mi}`}
                             x={4}
                             y={yPos - 3}
                             fill="rgba(255,255,255,0.35)"
                             fontSize={9}
                             fontFamily="ui-monospace,monospace"
-                          >{fi}′</text>
+                          >{fmtRulerLabel(mi * majorGrid, unitSystem)}</text>
                         )
                       )
                     })}
@@ -351,7 +346,7 @@ export default function Wall({
                       and correct the perspective, then add pieces to start arranging your gallery wall.
                     </p>
                     <p className="wall-empty-sub">
-                      Wall: {wallWidth}" × {wallHeight}"  ({(wallWidth/12).toFixed(1)}′ × {(wallHeight/12).toFixed(1)}′)
+                      Wall: {fmtWallDims(wallWidth, wallHeight, unitSystem)}
                     </p>
                   </div>
                 )}
@@ -361,13 +356,13 @@ export default function Wall({
                   <div className="wall-empty">
                     <div className="wall-empty-icon"><svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/><circle cx="13" cy="17" r="3" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/><path d="M4 27l8-7 6 6 5-5 9 7" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" opacity="0.4"/></svg></div>
                     <p>Tap the <strong>+</strong> button in the menu above to add your first piece</p>
-                    <p className="wall-empty-sub">Wall is {wallWidth}" × {wallHeight}" ({(wallWidth/12).toFixed(1)}′ × {(wallHeight/12).toFixed(1)}′)</p>
+                    <p className="wall-empty-sub">Wall is {fmtWallDims(wallWidth, wallHeight, unitSystem)}</p>
                   </div>
                 )}
 
                 {/* Dimension label */}
                 <div className="wall-dim-label">
-                  {wallWidth}" × {wallHeight}"
+                  {fmtWallDims(wallWidth, wallHeight, unitSystem)}
                 </div>
               </div>
             </div>

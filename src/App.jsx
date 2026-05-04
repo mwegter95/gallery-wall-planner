@@ -7,6 +7,7 @@ import WallManager from './components/WallManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
 import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP } from './components/Tutorial'
 import * as api from './utils/api'
+import { DEFAULT_SNAP } from './utils/units'
 import './App.css'
 
 const TUTORIAL_KEY = 'gwp-tutorial-done'
@@ -52,8 +53,11 @@ export default function App() {
   const [selectedId,     setSelectedId]     = useState(null)
   const [showAddModal,   setShowAddModal]   = useState(false)
   const [editingPiece,   setEditingPiece]   = useState(null)
+  const [unitSystem,     setUnitSystem]     = useState(() =>
+    localStorage.getItem('gwp-unit-system') || 'imperial'
+  )
   const [snapToGrid,     setSnapToGrid]     = useState(false)
-  const [gridSize,       setGridSize]       = useState(4)
+  const [gridSize,       setGridSize]       = useState(() => DEFAULT_SNAP[localStorage.getItem('gwp-unit-system') || 'imperial'])
   const [currentLayout,  setCurrentLayout]  = useState('')
   const [colorIdx,       setColorIdx]       = useState(0)
   const [showSetup,      setShowSetup]      = useState(false)
@@ -902,7 +906,11 @@ export default function App() {
             title="Switch or manage walls"
           >
             {activeWall?.name || 'My Wall'}
-            <span className="wall-badge-dims">{activeWall?.width}" × {activeWall?.height}"</span>
+            <span className="wall-badge-dims">
+              {unitSystem === 'metric'
+                ? `${Math.round((activeWall?.width || 0) * 2.54)} × ${Math.round((activeWall?.height || 0) * 2.54)} cm`
+                : `${activeWall?.width}" × ${activeWall?.height}"`}
+            </span>
           </button>
         </div>
         <div className="header-actions">
@@ -1001,6 +1009,12 @@ export default function App() {
           onEdit={openEdit}
           onBringForward={bringForward}
           onSendBackward={sendBackward}
+          unitSystem={unitSystem}
+          onUnitSystemChange={(u) => {
+            setUnitSystem(u)
+            localStorage.setItem('gwp-unit-system', u)
+            setGridSize(DEFAULT_SNAP[u])
+          }}
           snapToGrid={snapToGrid}
           onSnapToggle={() => setSnapToGrid(s => !s)}
           gridSize={gridSize}
@@ -1031,6 +1045,7 @@ export default function App() {
           onMove={handleMove}
           onResize={handleResize}
           onDeselect={() => setSelectedId(null)}
+          unitSystem={unitSystem}
           snapToGrid={snapToGrid}
           gridSize={gridSize}
           wallWidth={activeWall?.width || 120}
@@ -1058,6 +1073,7 @@ export default function App() {
           wallWidth={calibWall?.width || 120}
           wallHeight={calibWall?.height || 96}
           existingImageUrl={calibWall?.imageUrl || null}
+          unitSystem={unitSystem}
         />
       )}
 
@@ -1073,6 +1089,12 @@ export default function App() {
           onRename={handleRenameWall}
           onSetupWall={(id) => openSetup(id)}
           onClose={() => setShowWallMgr(false)}
+          unitSystem={unitSystem}
+          onUnitSystemChange={(u) => {
+            setUnitSystem(u)
+            localStorage.setItem('gwp-unit-system', u)
+            setGridSize(DEFAULT_SNAP[u])
+          }}
         />
       )}
 
@@ -1081,6 +1103,7 @@ export default function App() {
           piece={editingPiece}
           onSubmit={handleModalSubmit}
           onClose={closeModal}
+          unitSystem={unitSystem}
         />
       )}
 

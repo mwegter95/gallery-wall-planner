@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { fmtDimPair, displayGridSize, inputGridSize } from '../utils/units'
 
 export default function Sidebar({
   pieces, selectedId, onSelect, onDelete, onEdit, onBringForward, onSendBackward,
   snapToGrid, onSnapToggle, gridSize, onGridSizeChange,
+  unitSystem = 'imperial', onUnitSystemChange,
   layouts, wallName, currentLayout, onSaveLayout, saveFlash = false, onLoadLayout, onDeleteLayout,
   onAddPiece, onClearAll,
   library = {}, onAddFromLibrary, onDeleteFromLibrary,
@@ -115,7 +117,7 @@ export default function Sidebar({
                 />
                 <div className="piece-info">
                   <span className="piece-row-name">{piece.name}</span>
-                  <span className="piece-row-dims">{piece.width}" × {piece.height}"</span>
+                  <span className="piece-row-dims">{fmtDimPair(piece.width, piece.height, unitSystem)}</span>
                 </div>
                 <div className="piece-row-actions">
                   <button
@@ -138,7 +140,7 @@ export default function Sidebar({
             <div className="selected-controls">
               <div className="selected-title">Selected: <strong>{selectedPiece.name}</strong></div>
               <div className="selected-dims">
-                {selectedPiece.width}" × {selectedPiece.height}"
+                {fmtDimPair(selectedPiece.width, selectedPiece.height, unitSystem)}
               </div>
               <div className="btn-row">
                 <button className="btn btn-ghost btn-sm" onClick={() => onBringForward(selectedId)}>▲ Forward</button>
@@ -197,7 +199,7 @@ export default function Sidebar({
                     />
                     <div className="lib-info">
                       <span className="lib-name" title={piece.name}>{piece.name}</span>
-                      <span className="lib-dims">{piece.width}" × {piece.height}"</span>
+                      <span className="lib-dims">{fmtDimPair(piece.width, piece.height, unitSystem)}</span>
                     </div>
                     <div className="lib-actions">
                       <button
@@ -328,6 +330,24 @@ export default function Sidebar({
             <span className="section-title">Settings</span>
           </div>
 
+          <div className="setting-group">
+            <div className="setting-row">
+              <label className="setting-label">Measurement Units</label>
+              <div className="unit-seg">
+                <button
+                  className={`unit-seg-btn ${unitSystem === 'imperial' ? 'active' : ''}`}
+                  onClick={() => onUnitSystemChange?.('imperial')}
+                  title="Inches / feet"
+                >in</button>
+                <button
+                  className={`unit-seg-btn ${unitSystem === 'metric' ? 'active' : ''}`}
+                  onClick={() => onUnitSystemChange?.('metric')}
+                  title="Centimetres / metres"
+                >cm</button>
+              </div>
+            </div>
+          </div>
+
           <div className="setting-group" data-tutorial="snap-setting">
             <div className="setting-row">
               <label className="setting-label">Snap to Grid</label>
@@ -345,12 +365,12 @@ export default function Sidebar({
                   <input
                     type="number"
                     className="text-input num-input"
-                    value={gridSize}
-                    min={1}
-                    max={24}
-                    onChange={e => onGridSizeChange(Number(e.target.value))}
+                    value={displayGridSize(gridSize, unitSystem)}
+                    min={unitSystem === 'metric' ? 2 : 1}
+                    max={unitSystem === 'metric' ? 60 : 24}
+                    onChange={e => onGridSizeChange(inputGridSize(Number(e.target.value), unitSystem))}
                   />
-                  <span className="unit">inches</span>
+                  <span className="unit">{unitSystem === 'metric' ? 'cm' : 'inches'}</span>
                 </div>
               </div>
             )}

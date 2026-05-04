@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { BASE as API_BASE } from '../utils/api'
+import { inToCmInt, cmToIn } from '../utils/units'
 
 const DEFAULT_CORNERS = [
   [0.05, 0.05],   // TL
@@ -116,7 +117,7 @@ async function anyImageToJpeg(file) {
 }
 
 
-export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 120, wallHeight = 96, existingImageUrl = null }) {
+export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 120, wallHeight = 96, existingImageUrl = null, unitSystem = 'imperial' }) {
   const imgRef            = useRef(null)
   const fileInputRef      = useRef(null)
   const photoWrapRef      = useRef(null)
@@ -128,8 +129,8 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
   const [progress,        setProgress]        = useState(0)
   const [isProcessing,    setIsProcessing]    = useState(false)
   const [statusMsg,       setStatusMsg]       = useState('')
-  const [editWidth,       setEditWidth]       = useState(wallWidth)
-  const [editHeight,      setEditHeight]      = useState(wallHeight)
+  const [editWidth,       setEditWidth]       = useState(unitSystem === 'metric' ? inToCmInt(wallWidth)  : wallWidth)
+  const [editHeight,      setEditHeight]      = useState(unitSystem === 'metric' ? inToCmInt(wallHeight) : wallHeight)
   const [errorMsg,        setErrorMsg]        = useState('')
   const [previewUrl,      setPreviewUrl]      = useState(null)
   const [showPreview,     setShowPreview]     = useState(false)
@@ -290,12 +291,12 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
     {
       x: ((corners[0][0] + corners[1][0]) / 2) * imgSize.w,
       y: ((corners[0][1] + corners[1][1]) / 2) * imgSize.h - 14,
-      text: `← ${wallWidth}" →`,
+      text: unitSystem === 'metric' ? `← ${editWidth} cm →` : `← ${editWidth}" →`,
     },
     {
       x: ((corners[1][0] + corners[2][0]) / 2) * imgSize.w + 14,
       y: ((corners[1][1] + corners[2][1]) / 2) * imgSize.h,
-      text: `${wallHeight}"`,
+      text: unitSystem === 'metric' ? `${editHeight} cm` : `${editHeight}"`,
     },
   ]
 
@@ -450,7 +451,10 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
               <div className="ws-preview-badge">✓ Corrected Wall Preview</div>
               <img src={previewUrl} className="ws-preview-img" alt="Corrected wall" />
               <div className="ws-preview-meta">
-                {editWidth}" × {editHeight}" · perspective corrected &amp; ready to use
+                {unitSystem === 'metric'
+                  ? `${editWidth} × ${editHeight} cm · perspective corrected & ready to use`
+                  : `${editWidth}" × ${editHeight}" · perspective corrected & ready to use`
+                }
               </div>
             </div>
           )}
@@ -469,24 +473,24 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
           {/* Editable wall dimensions */}
           <div className="ws-dims-row">
-            <label className="ws-dims-label">Wall size (inches):</label>
+            <label className="ws-dims-label">Wall size ({unitSystem === 'metric' ? 'cm' : 'inches'}):</label>
             <div className="ws-dims-inputs">
               <input
                 className="ws-dim-input"
-                type="number" min="1" max="600" step="1"
+                type="number" min="1" max={unitSystem === 'metric' ? 1500 : 600} step="1"
                 value={editWidth}
                 onChange={e => setEditWidth(Math.max(1, parseInt(e.target.value, 10) || editWidth))}
-                aria-label="Width in inches"
+                aria-label={`Width in ${unitSystem === 'metric' ? 'cm' : 'inches'}`}
               />
               <span className="ws-dims-sep">×</span>
               <input
                 className="ws-dim-input"
-                type="number" min="1" max="600" step="1"
+                type="number" min="1" max={unitSystem === 'metric' ? 1500 : 600} step="1"
                 value={editHeight}
                 onChange={e => setEditHeight(Math.max(1, parseInt(e.target.value, 10) || editHeight))}
-                aria-label="Height in inches"
+                aria-label={`Height in ${unitSystem === 'metric' ? 'cm' : 'inches'}`}
               />
-              <span className="ws-dims-unit">in</span>
+              <span className="ws-dims-unit">{unitSystem === 'metric' ? 'cm' : 'in'}</span>
             </div>
           </div>
 
@@ -498,7 +502,11 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                 </button>
                 <button
                   className="btn btn-primary"
-                  onClick={() => onApply(previewUrl, corners, { width: editWidth, height: editHeight })}
+                  onClick={() => {
+                    const wIn = unitSystem === 'metric' ? Math.round(cmToIn(editWidth))  : editWidth
+                    const hIn = unitSystem === 'metric' ? Math.round(cmToIn(editHeight)) : editHeight
+                    onApply(previewUrl, corners, { width: wIn, height: hIn })
+                  }}
                 >
                   ✓ Use This Wall
                 </button>

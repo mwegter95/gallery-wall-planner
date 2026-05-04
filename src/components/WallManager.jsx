@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { inToCmInt, cmToIn, fmtDimPair } from '../utils/units'
 
 const DEFAULT_W = 120
 const DEFAULT_H = 96
@@ -14,11 +15,38 @@ export default function WallManager({
   onRename,
   onSetupWall,
   onClose,
+  unitSystem = 'imperial',
+  onUnitSystemChange,
 }) {
   const [newName,   setNewName]   = useState('')
-  const [newWidth,  setNewWidth]  = useState(DEFAULT_W)
-  const [newHeight, setNewHeight] = useState(DEFAULT_H)
+  const [newWidth,  setNewWidth]  = useState(unitSystem === 'metric' ? inToCmInt(DEFAULT_W) : DEFAULT_W)
+  const [newHeight, setNewHeight] = useState(unitSystem === 'metric' ? inToCmInt(DEFAULT_H) : DEFAULT_H)
   const [nameError, setNameError] = useState('')
+
+  // Keep a ref of the last inch values so we can re-convert correctly on unit change
+  const inchesRef = useRef({ w: DEFAULT_W, h: DEFAULT_H })
+
+  useEffect(() => {
+    if (unitSystem === 'metric') {
+      setNewWidth(inToCmInt(inchesRef.current.w))
+      setNewHeight(inToCmInt(inchesRef.current.h))
+    } else {
+      setNewWidth(inchesRef.current.w)
+      setNewHeight(inchesRef.current.h)
+    }
+  }, [unitSystem])
+
+  const handleWidthChange = (val) => {
+    setNewWidth(val)
+    const n = Number(val)
+    if (!isNaN(n) && n > 0) inchesRef.current.w = unitSystem === 'metric' ? Math.round(cmToIn(n)) : n
+  }
+
+  const handleHeightChange = (val) => {
+    setNewHeight(val)
+    const n = Number(val)
+    if (!isNaN(n) && n > 0) inchesRef.current.h = unitSystem === 'metric' ? Math.round(cmToIn(n)) : n
+  }
   const [editingId, setEditingId] = useState(null)
   const [editName,  setEditName]  = useState('')
 
@@ -28,12 +56,15 @@ export default function WallManager({
   const handleCreate = () => {
     const name = newName.trim()
     if (!name) { setNameError('Enter a wall name'); return }
-    const w = Math.max(10, Math.min(999, Number(newWidth)  || DEFAULT_W))
-    const h = Math.max(10, Math.min(999, Number(newHeight) || DEFAULT_H))
+    const rawW = Math.max(10, Math.min(9999, Number(newWidth)  || DEFAULT_W))
+    const rawH = Math.max(10, Math.min(9999, Number(newHeight) || DEFAULT_H))
+    const w = unitSystem === 'metric' ? Math.round(cmToIn(rawW)) : rawW
+    const h = unitSystem === 'metric' ? Math.round(cmToIn(rawH)) : rawH
     onCreate({ name, width: w, height: h })
     setNewName('')
-    setNewWidth(DEFAULT_W)
-    setNewHeight(DEFAULT_H)
+    setNewWidth(unitSystem === 'metric' ? inToCmInt(DEFAULT_W) : DEFAULT_W)
+    setNewHeight(unitSystem === 'metric' ? inToCmInt(DEFAULT_H) : DEFAULT_H)
+    inchesRef.current = { w: DEFAULT_W, h: DEFAULT_H }
     setNameError('')
   }
 
@@ -99,7 +130,7 @@ export default function WallManager({
                       {isActive && <span className="wm-active-badge">active</span>}
                     </span>
                   )}
-                  <span className="wm-wall-dims">{wall.width}" × {wall.height}"</span>
+                  <span className="wm-wall-dims">{fmtDimPair(wall.width, wall.height, unitSystem)}</span>
                   <span className="wm-layout-count">
                     {layoutCount === 0 ? 'No saved layouts' : `${layoutCount} layout${layoutCount !== 1 ? 's' : ''}`}
                   </span>
@@ -146,7 +177,23 @@ export default function WallManager({
 
         {/* ── Create new wall ────────────────────────── */}
         <div className="wm-create">
-          <h3 className="wm-create-title">New Wall</h3>
+          <div className="wm-create-header">
+            <h3 className="wm-create-title">New Wall</h3>
+            {onUnitSystemChange && (
+              <div className="unit-seg">
+                <button
+                  className={`unit-seg-btn ${unitSystem === 'imperial' ? 'active' : ''}`}
+                  onClick={() => onUnitSystemChange('imperial')}
+                  title="Inches"
+                >in</button>
+                <button
+                  className={`unit-seg-btn ${unitSystem === 'metric' ? 'active' : ''}`}
+                  onClick={() => onUnitSystemChange('metric')}
+                  title="Centimetres"
+                >cm</button>
+              </div>
+            )}
+          </div>
           <div className="wm-create-row">
             <input
               className="text-input wm-create-name"
@@ -157,24 +204,24 @@ export default function WallManager({
             />
             <div className="wm-dims-row">
               <label className="wm-dim-label">
-                W"
+                W{unitSystem === 'metric' ? 'cm' : '"'}
                 <input
                   type="number"
                   className="text-input num-input"
                   value={newWidth}
-                  min={10} max={999}
-                  onChange={e => setNewWidth(e.target.value)}
+                  min={10} max={unitSystem === 'metric' ? 2000 : 999}
+                  onChange={e => handleWidthChange(e.target.value)}
                 />
               </label>
               <span className="wm-dim-sep">×</span>
               <label className="wm-dim-label">
-                H"
+                H{unitSystem === 'metric' ? 'cm' : '"'}
                 <input
                   type="number"
                   className="text-input num-input"
                   value={newHeight}
-                  min={10} max={999}
-                  onChange={e => setNewHeight(e.target.value)}
+                  min={10} max={unitSystem === 'metric' ? 2000 : 999}
+                  onChange={e => handleHeightChange(e.target.value)}
                 />
               </label>
             </div>
