@@ -65,12 +65,19 @@ export default function SpaceBuilderCanvas({
     const texLoader = new THREE.TextureLoader()
     const meshMap = {}   // { [surfaceId]: { mesh, wM, hM } }
 
+    // Returns the best available texture URL for a surface
+    function getTexUrl(surface) {
+      if (surface.warpedDataUrl) return surface.warpedDataUrl
+      return stateRef.current.space.photos.find(p => p.id === surface.photoId)?.dataUrl || null
+    }
+
     function buildMesh(surface) {
       const { wM, hM } = dims(surface)
       const geo = new THREE.PlaneGeometry(wM, hM)
       let mat
-      if (surface.warpedDataUrl) {
-        const tex = texLoader.load(surface.warpedDataUrl)
+      const texUrl = getTexUrl(surface)
+      if (texUrl) {
+        const tex = texLoader.load(texUrl)
         tex.colorSpace = THREE.SRGBColorSpace
         mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
       } else {
@@ -79,21 +86,27 @@ export default function SpaceBuilderCanvas({
       }
       const mesh = new THREE.Mesh(geo, mat)
       mesh.userData.surfaceId = surface.id
+      // Position
       if (surface.pose3d) {
         mesh.position.fromArray(surface.pose3d.position)
-        mesh.rotation.set(surface.pose3d.rotX ?? 0, surface.pose3d.rotY ?? 0, surface.pose3d.rotZ ?? 0)
       } else {
         const surfs = stateRef.current.space.surfaces
         const idx = surfs.findIndex(s => s.id === surface.id)
-        mesh.position.set((idx - (surfs.length - 1) / 2) * (wM + 0.3), 0, 0)
+        mesh.position.set((idx - (surfs.length - 1) / 2) * (wM + 0.3), hM / 2, 0)
       }
+      // Rotation — rotYDeg is authoritative for Y; pose3d.rotX for pitch
+      mesh.rotation.set(
+        surface.pose3d?.rotX ?? 0,
+        (surface.rotYDeg ?? 0) * Math.PI / 180,
+        0,
+      )
       const edgesMesh = new THREE.LineSegments(
         new THREE.EdgesGeometry(geo),
         new THREE.LineBasicMaterial({ color: 0x3a5566 })
       )
       mesh.add(edgesMesh)
       scene.add(mesh)
-      meshMap[surface.id] = { mesh, wM, hM }
+      meshMap[surface.id] = { mesh, wM, hM, texUrl }
     }
 
     function syncMeshes(surfaces) {
@@ -115,13 +128,22 @@ export default function SpaceBuilderCanvas({
         } else {
           const entry = meshMap[surface.id]
           const { wM, hM } = dims(surface)
-          if (surface.warpedDataUrl && !entry.mesh.material.map) {
-            const tex = texLoader.load(surface.warpedDataUrl)
-            tex.colorSpace = THREE.SRGBColorSpace
+          // Texture: rebuild whenever the best-available URL changes
+          const newTexUrl = getTexUrl(surface)
+          if (newTexUrl !== entry.texUrl) {
             if (entry.mesh.material.map) entry.mesh.material.map.dispose()
             entry.mesh.material.dispose()
-            entry.mesh.material = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+            if (newTexUrl) {
+              const tex = texLoader.load(newTexUrl)
+              tex.colorSpace = THREE.SRGBColorSpace
+              entry.mesh.material = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
+            } else {
+              const hex = parseInt((SURFACE_COLORS[surface.colorIdx ?? 0] || '#4a9eff').replace('#', ''), 16)
+              entry.mesh.material = new THREE.MeshBasicMaterial({ color: hex, side: THREE.DoubleSide, transparent: true, opacity: 0.55 })
+            }
+            entry.texUrl = newTexUrl
           }
+          // Geometry: resize if dims changed
           if (Math.abs(entry.wM - wM) > 0.001 || Math.abs(entry.hM - hM) > 0.001) {
             entry.mesh.geometry.dispose()
             entry.mesh.geometry = new THREE.PlaneGeometry(wM, hM)
@@ -129,9 +151,15 @@ export default function SpaceBuilderCanvas({
             if (child) { child.geometry.dispose(); child.geometry = new THREE.EdgesGeometry(entry.mesh.geometry) }
             entry.wM = wM; entry.hM = hM
           }
+          // Rotation: rotYDeg is always authoritative for Y; pose3d.rotX for pitch
+          entry.mesh.rotation.set(
+            surface.pose3d?.rotX ?? 0,
+            (surface.rotYDeg ?? 0) * Math.PI / 180,
+            0,
+          )
+          // Position: from pose3d when available
           if (surface.pose3d) {
             entry.mesh.position.fromArray(surface.pose3d.position)
-            entry.mesh.rotation.set(surface.pose3d.rotX ?? 0, surface.pose3d.rotY ?? 0, surface.pose3d.rotZ ?? 0)
           }
         }
       }
@@ -178,43 +206,33 @@ export default function SpaceBuilderCanvas({
       const toMid   = edgeWorldMid(te.mesh, toEdge, te.wM, te.hM)
       const fromMid = edgeWorldMid(fe.mesh, fromEdge, fe.wM, fe.hM)
       fe.mesh.position.add(toMid.sub(fromMid))
-      fe.mesh.rotation.copy(te.mesh.rotation)
-      stateRef.current.onUpdateSurface(fromId, { pose3d: {
-        position: fe.mesh.position.toArray(),
-        rotX: fe.mesh.rotation.x, rotY: fe.mesh.rotation.y, rotZ: fe.mesh.rotation.z,
-      }})
+      fe.mesh.rotation.y = te.mesh.rotation.y  // inherit snapped-to surface's Y rotation
+      const newRotYDeg = Math.round(te.mesh.rotation.y * 180 / Math.PI)
+      stateRef.current.onUpdateSurface(fromId, {
+        rotYDeg: newRotYDeg,
+        pose3d: { position: fe.mesh.position.toArray(), rotX: fe.mesh.rotation.x },
+      })
       stateRef.current.onSetConnection(fromId, fromEdge, { surfaceId: toId, edge: toEdge, angleDeg: 90 })
     }
 
     // Drag state
-    const drag = { active: false, hadMoved: false, type: null, surfaceId: null,
-                   startX: 0, startY: 0, offsetWorld: new THREE.Vector3(), basePos: new THREE.Vector3() }
-    const dragPt  = new THREE.Vector3()
-    const xzPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
-
-    function screenRayXZ(clientX, clientY, planeY) {
-      const rect = renderer.domElement.getBoundingClientRect()
-      const m = new THREE.Vector2(
-        ((clientX - rect.left) / rect.width) * 2 - 1,
-        -((clientY - rect.top) / rect.height) * 2 + 1,
-      )
-      raycaster.setFromCamera(m, camera)
-      xzPlane.constant = -planeY
-      return raycaster.ray.intersectPlane(xzPlane, dragPt) ? dragPt.clone() : null
-    }
+    const drag = { active: false, hadMoved: false, type: null, surfaceId: null, startX: 0, startY: 0 }
 
     function onDown(e) {
       if (e.button !== 0) return
       drag.startX = e.clientX; drag.startY = e.clientY; drag.hadMoved = false
       const hit = raycast(e.clientX, e.clientY)
       if (hit) {
-        const id = hit.object.userData.surfaceId
-        drag.active = true; drag.type = 'surface'; drag.surfaceId = id
-        const entry = meshMap[id]
-        const pt = screenRayXZ(e.clientX, e.clientY, entry?.mesh.position.y ?? 0)
-        if (pt) drag.offsetWorld.copy(pt).sub(entry.mesh.position)
-        drag.basePos.copy(entry.mesh.position)
-        stateRef.current.onSelectSurface(id)
+        // Walk up parent chain (LineSegments child may be hit instead of Mesh)
+        let obj = hit.object
+        while (obj && !obj.userData.surfaceId) obj = obj.parent
+        const id = obj?.userData.surfaceId
+        if (id) {
+          drag.active = true; drag.type = 'surface'; drag.surfaceId = id
+          stateRef.current.onSelectSurface(id)
+        } else {
+          drag.active = true; drag.type = 'orbit'
+        }
       } else {
         drag.active = true; drag.type = 'orbit'
       }
@@ -228,11 +246,20 @@ export default function SpaceBuilderCanvas({
         orbit.theta -= dx * 0.005; orbit.phi += dy * 0.005; applyOrbit()
       } else if (drag.type === 'surface') {
         const entry = meshMap[drag.surfaceId]; if (!entry) return
+        // Camera-space drag: move surface in screen plane at surface depth
+        const dist = Math.max(0.5, camera.position.distanceTo(entry.mesh.position))
+        const rect = renderer.domElement.getBoundingClientRect()
+        const scale = (2 * dist * Math.tan(camera.fov * Math.PI / 360)) / rect.height
+        const camFwd   = new THREE.Vector3()
+        camera.getWorldDirection(camFwd)
+        const camRight = new THREE.Vector3().crossVectors(camFwd, camera.up).normalize()
+        const camUp    = new THREE.Vector3().crossVectors(camRight, camFwd).normalize()
         if (e.shiftKey) {
-          entry.mesh.position.y = drag.basePos.y - dy * 0.01
+          // Shift: move only vertically (world Y)
+          entry.mesh.position.y -= dy * scale
         } else {
-          const pt = screenRayXZ(e.clientX, e.clientY, drag.basePos.y)
-          if (pt) entry.mesh.position.copy(pt.sub(drag.offsetWorld))
+          entry.mesh.position.addScaledVector(camRight,  dx * scale)
+          entry.mesh.position.addScaledVector(camUp,    -dy * scale)
         }
         setSnapHint(computeSnap(drag.surfaceId))
       }
@@ -245,10 +272,9 @@ export default function SpaceBuilderCanvas({
         if (entry) {
           const hint = computeSnap(drag.surfaceId)
           if (hint) applySnap(hint)
-          else stateRef.current.onUpdateSurface(drag.surfaceId, { pose3d: {
-            position: entry.mesh.position.toArray(),
-            rotX: entry.mesh.rotation.x, rotY: entry.mesh.rotation.y, rotZ: entry.mesh.rotation.z,
-          }})
+          else stateRef.current.onUpdateSurface(drag.surfaceId, {
+            pose3d: { position: entry.mesh.position.toArray(), rotX: entry.mesh.rotation.x },
+          })
         }
         setSnapHint(null)
       }
@@ -313,19 +339,21 @@ export default function SpaceBuilderCanvas({
       const t = threeRef.current; if (!t) return
       const id = stateRef.current.activeSurfaceId; if (!id) return
       const entry = t.meshMap[id]; if (!entry) return
-      const step = e.shiftKey ? Math.PI / 36 : Math.PI / 12
-      let changed = true
-      if      (e.key === 'ArrowLeft')  entry.mesh.rotation.y -= step
-      else if (e.key === 'ArrowRight') entry.mesh.rotation.y += step
-      else if (e.key === 'ArrowUp')    entry.mesh.rotation.x += step
-      else if (e.key === 'ArrowDown')  entry.mesh.rotation.x -= step
-      else changed = false
-      if (changed) {
+      const stepDeg = e.shiftKey ? 5 : 15
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        // ←→ rotate Y — keep rotYDeg in sync with slider
         e.preventDefault()
-        stateRef.current.onUpdateSurface(id, { pose3d: {
-          position: entry.mesh.position.toArray(),
-          rotX: entry.mesh.rotation.x, rotY: entry.mesh.rotation.y, rotZ: entry.mesh.rotation.z,
-        }})
+        const surf = stateRef.current.space.surfaces.find(s => s.id === id)
+        const newDeg = (surf?.rotYDeg ?? 0) + (e.key === 'ArrowLeft' ? -stepDeg : stepDeg)
+        entry.mesh.rotation.y = newDeg * Math.PI / 180
+        stateRef.current.onUpdateSurface(id, { rotYDeg: newDeg })
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        // ↑↓ rotate X (tilt) — stored in pose3d.rotX
+        e.preventDefault()
+        entry.mesh.rotation.x += (e.key === 'ArrowUp' ? stepDeg : -stepDeg) * Math.PI / 180
+        stateRef.current.onUpdateSurface(id, {
+          pose3d: { position: entry.mesh.position.toArray(), rotX: entry.mesh.rotation.x },
+        })
       }
     }
     window.addEventListener('keydown', onKey)
