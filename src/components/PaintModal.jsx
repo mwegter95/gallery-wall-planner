@@ -290,19 +290,24 @@ export default function PaintModal({ wallImage, initialColor, initialMask, onApp
     const { width: w, height: h } = orig
     canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
+    // Draw original photo
     ctx.putImageData(orig, 0, 0)
+    // Overlay paint color exactly as Wall.jsx does: flat color at mask_alpha * 0.55
+    // Using an offscreen canvas + drawImage so the browser alpha-composites it correctly
     const { r: pr, g: pg, b: pb } = hexToRgb(colorRef.current)
-    const out = ctx.getImageData(0, 0, w, h)
-    const od = out.data
+    const overlay = ctx.createImageData(w, h)
+    const od = overlay.data
     for (let i = 0; i < w * h; i++) {
       const a = mask[i]; if (a === 0) continue
-      const i4 = i * 4, strength = (a / 255) * 0.72
-      const lum = (0.299 * od[i4] + 0.587 * od[i4+1] + 0.114 * od[i4+2]) / 255
-      od[i4]   = Math.round(od[i4]   * (1 - strength) + pr * lum * 2 * strength)
-      od[i4+1] = Math.round(od[i4+1] * (1 - strength) + pg * lum * 2 * strength)
-      od[i4+2] = Math.round(od[i4+2] * (1 - strength) + pb * lum * 2 * strength)
+      const i4 = i * 4
+      od[i4]   = pr
+      od[i4+1] = pg
+      od[i4+2] = pb
+      od[i4+3] = Math.round(a * 0.55)
     }
-    ctx.putImageData(out, 0, 0)
+    const oc = Object.assign(document.createElement('canvas'), { width: w, height: h })
+    oc.getContext('2d').putImageData(overlay, 0, 0)
+    ctx.drawImage(oc, 0, 0)
     // Edge highlight
     const edgeOut = ctx.getImageData(0, 0, w, h); const ed = edgeOut.data
     for (let y = 1; y < h-1; y++) {
