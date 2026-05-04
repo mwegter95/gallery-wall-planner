@@ -186,7 +186,7 @@ export default function Piece({
       {/* Lock icon overlay */}
       {piece.locked && (
         <div className="piece-lock-icon" title="Locked: click to select, then use Lock button to unlock">
-          🔒
+          <svg width="11" height="11" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="6" width="9" height="6" rx="1" stroke="currentColor" strokeWidth="1.5"/><path d="M4 6V4.5a2.5 2.5 0 015 0V6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><circle cx="6.5" cy="9" r="1" fill="currentColor"/></svg>
         </div>
       )}
 

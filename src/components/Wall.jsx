@@ -94,7 +94,8 @@ export default function Wall({
           onClick={() => setShowRulers(r => !r)}
           title="Toggle rulers"
         >
-          📏 Rulers
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><rect x="1" y="4" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.25"/><path d="M3.5 4V5.5M6.5 4V6M9.5 4V5.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
+          Rulers
         </button>
         <button
           className={`ctrl-btn ${showGrid ? 'active' : ''}`}
@@ -102,10 +103,14 @@ export default function Wall({
           onClick={() => setShowGrid(g => !g)}
           title="Toggle inch/foot measurement grid"
         >
-          ⊞ Grid
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M1 4.5h11M1 8.5h11M4.5 1v11M8.5 1v11" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
+          Grid
         </button>
         {snapToGrid && (
-          <span className="snap-badge">⊞ Snap {gridSize}"</span>
+          <span className="snap-badge">
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" xmlns="http://www.w3.org/2000/svg" style={{display:'inline',verticalAlign:'middle',marginRight:'3px'}}><path d="M1 3.5h9M1 7.5h9M3.5 1v9M7.5 1v9" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
+            Snap {gridSize}"
+          </span>
         )}
 
         {/* Lock / Unlock button — shown when a piece is selected, or as a
@@ -121,7 +126,12 @@ export default function Wall({
                 : selectedPiece.locked ? 'Unlock piece so it can be moved' : 'Lock piece in place'
             }
           >
-            🔓 Lock
+            {selectedPiece?.locked ? (
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><rect x="2" y="6" width="9" height="6" rx="1" stroke="currentColor" strokeWidth="1.25"/><path d="M4 6V4.5a2.5 2.5 0 015 0V6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/><circle cx="6.5" cy="9" r="1" fill="currentColor"/></svg>
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><rect x="2" y="6" width="9" height="6" rx="1" stroke="currentColor" strokeWidth="1.25"/><path d="M4 6V4.5a2.5 2.5 0 015 0" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/><circle cx="6.5" cy="9" r="1" fill="currentColor"/></svg>
+            )}
+            Lock
           </button>
         )}
 
@@ -133,7 +143,8 @@ export default function Wall({
           disabled={!canUndo}
           title="Undo last action (add, move, resize, lock, delete)"
         >
-          ↩ Undo
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M2 5.5H8a3.5 3.5 0 010 7H5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/><path d="M4.5 3L2 5.5 4.5 8" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          Undo
         </button>
 
         {/* ── Row break on mobile: Tutorial + Tips + piece count move to second row ── */}
@@ -146,7 +157,8 @@ export default function Wall({
           onClick={onStartTutorial}
           title="Start guided tutorial"
         >
-          🎓 Tutorial
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" strokeWidth="1.25"/><path d="M6.5 3.5v.5m0 5V7m0-2.5a1.5 1.5 0 110 3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
+          Tutorial
         </button>
 
         {/* Tips toggle */}
@@ -156,7 +168,8 @@ export default function Wall({
           onClick={onToggleTips}
           title={tipsEnabled ? 'Tips are on (click to turn off)' : 'Tips are off (click to turn on)'}
         >
-          💡 Tips
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M6.5 1.5a3.5 3.5 0 011.5 6.67V9.5h-3V8.17A3.5 3.5 0 016.5 1.5z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/><path d="M5 9.5h3M5.5 11h2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg>
+          Tips
         </button>
 
         <span className="piece-count">{pieces.length} piece{pieces.length !== 1 ? 's' : ''}</span>
@@ -332,9 +345,9 @@ export default function Wall({
                 {/* Calibration nudge (uncalibrated + empty) */}
                 {!wallImage && pieces.length === 0 && (
                   <div className="wall-empty">
-                    <div className="wall-empty-icon">🖼️</div>
+                    <div className="wall-empty-icon"><svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/><circle cx="13" cy="17" r="3" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/><path d="M4 27l8-7 6 6 5-5 9 7" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" opacity="0.4"/></svg></div>
                     <p>
-                      Click <strong>📐 Calibrate Wall</strong> in the toolbar above to upload a photo
+                      Click <strong>Calibrate Wall</strong> in the toolbar above to upload a photo
                       and correct the perspective, then add pieces to start arranging your gallery wall.
                     </p>
                     <p className="wall-empty-sub">
@@ -346,7 +359,7 @@ export default function Wall({
                 {/* Empty state (already calibrated) */}
                 {wallImage && pieces.length === 0 && (
                   <div className="wall-empty">
-                    <div className="wall-empty-icon">🖼️</div>
+                    <div className="wall-empty-icon"><svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/><circle cx="13" cy="17" r="3" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/><path d="M4 27l8-7 6 6 5-5 9 7" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" opacity="0.4"/></svg></div>
                     <p>Tap the <strong>+</strong> button in the menu above to add your first piece</p>
                     <p className="wall-empty-sub">Wall is {wallWidth}" × {wallHeight}" ({(wallWidth/12).toFixed(1)}′ × {(wallHeight/12).toFixed(1)}′)</p>
                   </div>

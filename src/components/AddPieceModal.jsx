@@ -166,7 +166,9 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
       <div className="modal">
         <div className="modal-header">
           <h2>{isEdit ? 'Edit Piece' : 'Add New Piece'}</h2>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          </button>
         </div>
 
         <form className="modal-body" onSubmit={handleSubmit}>
@@ -280,7 +282,7 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
                         setPendingImage(image)
                         setShowCrop(true)
                       }}
-                    >✂️ Crop</button>
+                    ><svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><circle cx="3.5" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/><circle cx="3.5" cy="9.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/><path d="M5 4.5L10 1M5 8.5L10 12M5 4.5l0 4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/></svg> Crop</button>
                     <button
                       type="button"
                       className="image-action-btn image-action-remove"
@@ -291,7 +293,7 @@ export default function AddPieceModal({ piece, onSubmit, onClose }) {
                 </div>
               ) : (
                 <div className="image-placeholder">
-                  <span className="upload-icon">📷</span>
+                  <span class="upload-icon"><svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="7" width="22" height="16" rx="2" stroke="currentColor" strokeWidth="1.5"/><circle cx="14" cy="15" r="4" stroke="currentColor" strokeWidth="1.5"/><path d="M10 7l2-3h4l2 3" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg></span>
                   <span>Click to upload a photo of this piece</span>
                   <span className="upload-sub">Supported: JPG · PNG · WEBP · HEIC</span>
                 </div>

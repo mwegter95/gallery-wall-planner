@@ -858,8 +858,15 @@ export default function App() {
   if (isLoading) {
     return (
       <div className="app-loading">
-        <span className="app-loading-icon">🖼️</span>
-        <span>Loading Gallery Wall Planner…</span>
+        <span className="app-loading-icon">
+          <svg width="36" height="36" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="32" height="32" rx="4" fill="#1A1510"/>
+            <rect x="4" y="4" width="24" height="24" rx="1" stroke="#F5F0E8" strokeWidth="1.5" fill="none" opacity="0.25"/>
+            <rect x="8" y="8" width="16" height="16" rx="1" stroke="#C4875A" strokeWidth="1.5" fill="none"/>
+            <rect x="12" y="12" width="8" height="8" rx="0.5" fill="#C4875A"/>
+          </svg>
+        </span>
+        <span>Loading Stage…</span>
       </div>
     )
   }
@@ -877,15 +884,24 @@ export default function App() {
             onClick={() => setSidebarOpen(v => !v)}
             aria-label="Toggle sidebar"
           >☰</button>
-          <span className="brand-icon">🖼️</span>
-          <span className="brand-name">Gallery Wall Planner</span>
+          {/* Stage mark — three nested rectangles */}
+          <span className="brand-icon">
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="32" height="32" rx="4" fill="#1A1510"/>
+              <rect x="4" y="4" width="24" height="24" rx="1" stroke="#F5F0E8" strokeWidth="1.5" fill="none" opacity="0.25"/>
+              <rect x="8" y="8" width="16" height="16" rx="1" stroke="#C4875A" strokeWidth="1.5" fill="none"/>
+              <rect x="12" y="12" width="8" height="8" rx="0.5" fill="#C4875A"/>
+            </svg>
+          </span>
+          <span className="brand-name">Stage</span>
+          <span className="header-sep" />
           <button
             className="wall-badge wall-badge--btn"
             data-tutorial="header-wall-badge"
             onClick={() => setShowWallMgr(true)}
-            title="Manage walls"
+            title="Switch or manage walls"
           >
-            🏠 {activeWall?.name || 'My Wall'}
+            {activeWall?.name || 'My Wall'}
             <span className="wall-badge-dims">{activeWall?.width}" × {activeWall?.height}"</span>
           </button>
         </div>
@@ -902,7 +918,17 @@ export default function App() {
               disabled={pieces.length === 0 || isSaving}
               title="Save current layout"
             >
-              {isSaving ? '⏳' : saveFlash ? '✓' : '💾'}
+              {isSaving ? (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon spin"><circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 3"/></svg>
+              ) : saveFlash ? (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M2.5 7L5.5 10L11.5 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon">
+                  <path d="M1.5,1.5 H9 L12.5,5 V12.5 H1.5 Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/>
+                  <rect x="3.5" y="1.5" width="4" height="3" rx="0.5" stroke="currentColor" strokeWidth="1"/>
+                  <rect x="2.5" y="8" width="9" height="3.5" rx="0.5" stroke="currentColor" strokeWidth="1"/>
+                </svg>
+              )}
               <span className="btn-label">
                 {isSaving ? ' Saving…' : saveFlash ? ' Saved!' : ` ${currentLayout || 'Save Layout'}`}
               </span>
@@ -943,10 +969,15 @@ export default function App() {
             onClick={() => openSetup()}
             title={activeWallImage ? 'Re-calibrate wall perspective' : 'Calibrate wall perspective'}
           >
-            {activeWallImage ? '⚙' : '📐'}<span className="btn-label"> {activeWallImage ? 'Recalibrate' : 'Calibrate Wall'}</span>
+            {activeWallImage ? (
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><circle cx="7" cy="7" r="2" stroke="currentColor" strokeWidth="1.5"/><path d="M7 1v2M7 11v2M1 7h2M11 7h2M2.93 2.93l1.41 1.41M9.66 9.66l1.41 1.41M2.93 11.07l1.41-1.41M9.66 4.34l1.41-1.41" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><rect x="1" y="4" width="12" height="7" rx="1" stroke="currentColor" strokeWidth="1.5"/><path d="M4 4V3a1 1 0 011-1h4a1 1 0 011 1v1" stroke="currentColor" strokeWidth="1.5"/><path d="M4.5 7.5h5M4.5 9.5h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+            )}<span className="btn-label"> {activeWallImage ? 'Recalibrate' : 'Calibrate Wall'}</span>
           </button>
           <button className="btn btn-primary" data-tutorial="header-add-piece" onClick={() => setShowAddModal(true)}>
-            +<span className="btn-label"> Add Piece</span>
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M6.5 1.5v10M1.5 6.5h10" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round"/></svg>
+            <span className="btn-label"> Add Piece</span>
           </button>
           <div data-tutorial="header-login">
             <UserBadge

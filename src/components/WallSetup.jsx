@@ -306,7 +306,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
         <div className="ws-modal ws-modal--upload">
           <div className="ws-header">
             <div className="ws-title-row">
-              <span className="ws-icon">📸</span>
+              <span className="ws-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="16" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><circle cx="10" cy="11" r="3" stroke="currentColor" strokeWidth="1.5"/><path d="M7 5l1-2h4l1 2" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg></span>
               <h2>Upload Wall Photo: {wallName}</h2>
             </div>
             <p className="ws-subtitle">
@@ -332,7 +332,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                 <><div className="ms-spinner" /><span>Loading photo…</span></>
               ) : (
                 <>
-                  <span className="ws-upload-icon">🖼️</span>
+                  <span className="ws-upload-icon"><svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="8" width="24" height="18" rx="2" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/><circle cx="16" cy="17" r="4" stroke="currentColor" strokeWidth="1.5" opacity="0.5"/><path d="M12 8l2-3h8l2 3" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" opacity="0.5"/></svg></span>
                   <span className="ws-upload-label">Click to choose a wall photo</span>
                   <span className="ws-upload-sub">JPEG, PNG, WebP, HEIC</span>
                 </>
@@ -356,7 +356,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
         {/* Header */}
         <div className="ws-header">
           <div className="ws-title-row">
-            <span className="ws-icon">📐</span>
+            <span className="ws-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 17L17 3M3 17h5M3 17v-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M7 13l3-3M10 7l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg></span>
             <h2>Calibrate: {wallName}</h2>
           </div>
           <p className="ws-subtitle">
@@ -513,7 +513,8 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   onClick={() => { setRawPhoto(null); setCorners(DEFAULT_CORNERS) }}
                   disabled={isProcessing}
                 >
-                  📂 Change Photo
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M1.5 10.5V4a1 1 0 011-1h2.5l1 1.5H10a1 1 0 011 1v5a1 1 0 01-1 1H2.5a1 1 0 01-1-1z" stroke="currentColor" strokeWidth="1.25"/></svg>
+                  Change Photo
                 </button>
                 <button
                   className="btn btn-ghost btn-sm"
@@ -527,7 +528,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   onClick={handleApply}
                   disabled={isProcessing}
                 >
-                  {isProcessing ? `⏳ ${Math.round(progress * 100)}%…` : '⚡ Apply Correction'}
+                  {isProcessing ? `${Math.round(progress * 100)}%…` : 'Apply Correction'}
                 </button>
               </>
             )}

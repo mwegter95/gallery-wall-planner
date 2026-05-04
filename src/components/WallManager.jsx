@@ -49,8 +49,10 @@ export default function WallManager({
     <div className="wm-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="wm-modal">
         <div className="wm-header">
-          <h2>🏠 My Walls</h2>
-          <button className="icon-btn wm-close" onClick={onClose}>✕</button>
+          <h2>My Walls</h2>
+          <button className="icon-btn wm-close" onClick={onClose} aria-label="Close">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          </button>
         </div>
 
         {/* ── Wall list ──────────────────────────────── */}
@@ -69,7 +71,7 @@ export default function WallManager({
                 <div className="wm-thumb">
                   {wallImages[wall.id]
                     ? <img src={wallImages[wall.id]} alt={wall.name} />
-                    : <span className="wm-thumb-icon">🖼️</span>
+                    : <span className="wm-thumb-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="4" width="16" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><circle cx="7" cy="8.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/><path d="M2 13l4-3 3 3 3-3 4 3" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/></svg></span>
                   }
                 </div>
 
@@ -121,7 +123,8 @@ export default function WallManager({
                     title="Upload / recalibrate wall photo"
                     onClick={() => { onSetupWall(wall.id); onClose() }}
                   >
-                    📐 {wallImages[wall.id] ? 'Recalibrate' : 'Set Photo'}
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><rect x="1" y="4" width="11" height="7" rx="1" stroke="currentColor" strokeWidth="1.25"/><path d="M4.5 4V3a1.5 1.5 0 013 0v1" stroke="currentColor" strokeWidth="1.25"/><circle cx="6.5" cy="7.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/></svg>
+                    {wallImages[wall.id] ? 'Recalibrate' : 'Set Photo'}
                   </button>
                   {wallList.length > 1 && (
                     <button
@@ -132,7 +135,7 @@ export default function WallManager({
                           onDelete(wall.id)
                       }}
                     >
-                      🗑️
+                      <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg>
                     </button>
                   )}
                 </div>

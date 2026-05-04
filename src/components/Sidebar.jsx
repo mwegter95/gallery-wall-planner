@@ -77,7 +77,9 @@ export default function Sidebar({
             onClick={onRequestClose}
             aria-label="Close sidebar"
             title="Close"
-          >✕</button>
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          </button>
         )}
       </div>
 
@@ -120,12 +122,12 @@ export default function Sidebar({
                     className="icon-btn"
                     title="Edit"
                     onClick={(e) => { e.stopPropagation(); onEdit(piece) }}
-                  >✏️</button>
+                  ><svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2.5l1.5 1.5-7 7H2v-1.5l7-7z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/><path d="M8 3.5l1.5 1.5" stroke="currentColor" strokeWidth="1.25"/></svg></button>
                   <button
                     className="icon-btn"
                     title="Delete"
                     onClick={(e) => { e.stopPropagation(); onDelete(piece.id) }}
-                  >🗑️</button>
+                  ><svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
                 </div>
               </div>
             ))}
@@ -141,7 +143,10 @@ export default function Sidebar({
               <div className="btn-row">
                 <button className="btn btn-ghost btn-sm" onClick={() => onBringForward(selectedId)}>▲ Forward</button>
                 <button className="btn btn-ghost btn-sm" onClick={() => onSendBackward(selectedId)}>▼ Back</button>
-                <button className="btn btn-ghost btn-sm" onClick={() => onEdit(selectedPiece)}>✏️ Edit</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => onEdit(selectedPiece)}>
+                  <svg width="12" height="12" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M9 2.5l1.5 1.5-7 7H2v-1.5l7-7z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/><path d="M8 3.5l1.5 1.5" stroke="currentColor" strokeWidth="1.25"/></svg>
+                  {' '}Edit
+                </button>
                 <button className="btn btn-danger btn-sm" onClick={() => onDelete(selectedId)}>Delete</button>
               </div>
             </div>
@@ -154,7 +159,8 @@ export default function Sidebar({
                 if (window.confirm('Clear all pieces from the wall?')) onClearAll()
               }}
             >
-              🗑 Clear all
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              Clear all
             </button>
           )}
         </div>
@@ -205,7 +211,7 @@ export default function Sidebar({
                           if (window.confirm(`Remove "${piece.name}" from library?`)) onDeleteFromLibrary(piece.id)
                         }}
                         title="Remove from library"
-                      >🗑️</button>
+                      ><svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
                     </div>
                   </div>
                 ))
@@ -222,7 +228,7 @@ export default function Sidebar({
             <span className="section-title">Saved Layouts</span>
           </div>
           {wallName && (
-            <div className="layouts-wall-label">🏠 {wallName}</div>
+            <div className="layouts-wall-label">{wallName}</div>
           )}
 
           {/* Overwrite current layout */}
@@ -237,7 +243,8 @@ export default function Sidebar({
                     onClick={() => onSaveLayout(currentLayout)}
                     title="Save current arrangement into this layout"
                   >
-                    💾 Overwrite
+                    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className="btn-icon"><path d="M1.5,1.5 H9 L12.5,5 V12.5 H1.5 Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/><rect x="3.5" y="1.5" width="4" height="3" rx="0.5" stroke="currentColor" strokeWidth="1"/><rect x="2.5" y="8" width="9" height="3.5" rx="0.5" stroke="currentColor" strokeWidth="1"/></svg>
+                    Overwrite
                   </button>
                 )
               }
@@ -302,10 +309,11 @@ export default function Sidebar({
                   >Load</button>
                   <button
                     className="icon-btn"
+                    title="Delete layout"
                     onClick={() => {
                       if (window.confirm(`Delete layout "${name}"?`)) onDeleteLayout(name)
                     }}
-                  >🗑️</button>
+                  ><svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
                 </div>
               </div>
             ))}
