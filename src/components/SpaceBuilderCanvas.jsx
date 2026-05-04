@@ -56,8 +56,8 @@ export default function SpaceBuilderCanvas({
 
     if (d.type === 'pan') {
       const newOffset = {
-        x: Math.max(0, d.startOffX - (e.clientX - d.startScreenX)),
-        y: Math.max(0, d.startOffY - (e.clientY - d.startScreenY)),
+        x: d.startOffX - (e.clientX - d.startScreenX),
+        y: d.startOffY - (e.clientY - d.startScreenY),
       }
       offsetRef.current = newOffset
       setOffset(newOffset)
@@ -74,14 +74,31 @@ export default function SpaceBuilderCanvas({
       return
     }
 
+    if (d.type === 'surface-move') {
+      const dx = e.clientX - d.startScreenX
+      const dy = e.clientY - d.startScreenY
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.hasMoved = true
+      const { photos } = spaceRef.current
+      const photo = photos.find(p => p.id === d.photoId)
+      if (!photo) return
+      const dfx = dx / photo.displayW
+      const dfy = dy / photo.displayH
+      const newCorners = {}
+      for (const [k, [fx, fy]] of Object.entries(d.startCorners)) {
+        newCorners[k] = [fx + dfx, fy + dfy]
+      }
+      handlersRef.current.onUpdateSurface(d.surfaceId, { corners: newCorners })
+      return
+    }
+
     if (d.type === 'handle') {
       const { surfaces, photos } = spaceRef.current
       const surface = surfaces.find(s => s.id === d.surfaceId)
       const photo   = photos.find(p => p.id === surface?.photoId)
       if (!photo) return
 
-      const fx = Math.max(0, Math.min(1, (cx - photo.x) / photo.displayW))
-      const fy = Math.max(0, Math.min(1, (cy - photo.y) / photo.displayH))
+      const fx = (cx - photo.x) / photo.displayW
+      const fy = (cy - photo.y) / photo.displayH
 
       handlersRef.current.onUpdateSurface(d.surfaceId, {
         corners: { ...surface.corners, [d.corner]: [fx, fy] },
@@ -94,6 +111,11 @@ export default function SpaceBuilderCanvas({
   }).current
 
   const globalMouseUp = useRef(() => {
+    const d = dragRef.current
+    // surface-move with no movement = click to select
+    if (d?.type === 'surface-move' && !d.hasMoved) {
+      handlersRef.current.onSelectSurface(d.surfaceId)
+    }
     dragRef.current = null
     setSnapInfo(null)
     document.removeEventListener('mousemove', globalMouseMove)
@@ -143,6 +165,24 @@ export default function SpaceBuilderCanvas({
     e.stopPropagation()
     e.preventDefault()
     dragRef.current = { type: 'handle', surfaceId, corner }
+    document.addEventListener('mousemove', globalMouseMove)
+    document.addEventListener('mouseup',   globalMouseUp)
+  }
+
+  const onSurfaceBodyMouseDown = (e, surfaceId) => {
+    e.stopPropagation()
+    e.preventDefault()
+    const surface = spaceRef.current.surfaces.find(s => s.id === surfaceId)
+    if (!surface) return
+    dragRef.current = {
+      type:         'surface-move',
+      surfaceId,
+      photoId:      surface.photoId,
+      startScreenX: e.clientX,
+      startScreenY: e.clientY,
+      startCorners: JSON.parse(JSON.stringify(surface.corners)),
+      hasMoved:     false,
+    }
     document.addEventListener('mousemove', globalMouseMove)
     document.addEventListener('mouseup',   globalMouseUp)
   }
@@ -247,18 +287,16 @@ export default function SpaceBuilderCanvas({
           const [cx, cy] = cornersCentroid(scc)
 
           return (
-            <g
-              key={surface.id}
-              style={{ cursor: 'pointer' }}
-              onClick={(e) => { e.stopPropagation(); onSelectSurface(surface.id) }}
-            >
-              {/* Quad fill */}
+            <g key={surface.id}>
+              {/* Quad fill — drag to move, click (no drag) to select */}
               <polygon
                 points={pts}
                 fill={`${color}22`}
                 stroke={color}
                 strokeWidth={isActive ? 2.5 : 1.5}
                 strokeDasharray={isActive ? 'none' : '7 3'}
+                style={{ cursor: 'move', pointerEvents: 'all' }}
+                onMouseDown={e => onSurfaceBodyMouseDown(e, surface.id)}
               />
 
               {/* Surface name + dims at centroid */}
