@@ -146,8 +146,8 @@ export async function loadState() {
   }
   if (state.layouts) {
     for (const wallLayouts of Object.values(state.layouts)) {
-      for (const pieces of Object.values(wallLayouts)) {
-        for (const piece of pieces) {
+      for (const layout of Object.values(wallLayouts)) {
+        for (const piece of (layout.pieces || [])) {
           if (piece.image) piece.image = fixUrl(piece.image)
         }
       }

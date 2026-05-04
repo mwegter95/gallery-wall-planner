@@ -990,7 +990,8 @@ export default function App() {
   const discardChanges = useCallback(() => {
     pushHistory()
     if (currentLayout && wallLayouts[currentLayout]) {
-      setPieces(wallLayouts[currentLayout].map(p => ({ ...p })))
+      const { pieces: saved } = normalizeLayout(wallLayouts[currentLayout])
+      setPieces(saved.map(p => ({ ...p })))
     } else {
       setPieces([])
       setCurrentLayout('')
@@ -999,7 +1000,7 @@ export default function App() {
   }, [currentLayout, wallLayouts, pushHistory])
 
   const deleteLayout = useCallback((name) => {
-    const layoutPieces = wallLayouts[name] || []
+    const { pieces: layoutPieces } = normalizeLayout(wallLayouts[name])
     layoutPieces
       .filter(p => p.image?.startsWith('/uploads/'))
       .forEach(p => api.deletePieceImage(p.id).catch(() => {}))
