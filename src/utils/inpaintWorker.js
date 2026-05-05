@@ -1,28 +1,29 @@
 /**
  * inpaintWorker.js — Classic (non-module) Web Worker.
  *
- * Implements diffusion-based inpainting: iteratively fills masked pixels by
- * blending inward from the known surrounding pixels.  This works well for
- * uniform/textured backgrounds (walls, floors, sky) — it produces smooth,
- * natural-looking results without the risk of copy-paste artefacts.
+ * Gradient-aware inpaint for uniform backgrounds (walls, floors, sky).
  *
- * Algorithm overview:
- *   1.  Collect all masked ("unknown") pixels that have at least one known
- *       neighbour — the "fill front".
- *   2.  For each fill-front pixel compute a weighted average of known pixels
- *       in a small window (inverse-distance² weights, 7×7 kernel).
- *   3.  Write the new colour; mark pixel as known; advance the front.
- *   4.  Repeat until all masked pixels are filled.  Alternating scan direction
- *       each pass avoids directional bias.
- *   5.  Two Gaussian smoothing passes on the originally-masked region to
- *       blend hard fill edges seamlessly into the background.
+ * Phase 1 – Jacobi fill from original background:
+ *   For each masked pixel, estimate the wall colour at that spatial position by
+ *   sampling all ORIGINAL (never-masked) pixels within an adaptive large radius,
+ *   using inverse-distance² weights.  All predictions are computed independently
+ *   from the unmodified source image (Jacobi, not Gauss-Seidel), so no boundary
+ *   contamination from object edges propagates inward.  Because distant wall
+ *   pixels are included, the wall's lighting gradient is naturally reproduced.
  *
- * No external dependencies — pure typed-array arithmetic.
+ * Phase 2 – Diffusion cleanup:
+ *   Any pixels still unfilled after Phase 1 (very large selections) are filled
+ *   with a Gauss-Seidel diffusion pass using the Phase-1 result as source.
+ *
+ * Phase 3 – Seam smoothing:
+ *   3-pass weighted smooth on the filled region + a 2-pixel feather into the
+ *   surrounding known pixels to eliminate hard visible edges.
+ *
  * Messages:
  *   IN  { type:'inpaint', imageData:{width,height,data:ArrayBuffer},
  *                         mask:{width,height,data:ArrayBuffer} }
  *   OUT { type:'progress', pct }
- *   OUT { type:'done',     imageData:{width,height,data:Uint8ClampedArray} }
+ *   OUT { type:'done',     imageData:{width,height,data} }
  *   OUT { type:'error',    message }
  */
 
@@ -30,76 +31,43 @@
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v }
 
+/* ── Phase 1: Jacobi gradient fill ──────────────────────────────────────── */
 /**
- * One diffusion sweep across the image.
- * For each still-masked pixel, compute a weighted average of all KNOWN pixels
- * in a 7×7 window (inverse-distance² weights) and write the result.
- * Marks filled pixels as known immediately (Gauss-Seidel style — converges faster).
- * @returns number of pixels filled this sweep
+ * For every originally-masked pixel, independently estimate the background
+ * colour by sampling only the ORIGINAL known (never-masked) pixels in a large
+ * adaptive radius with inverse-distance² weights.
+ *
+ * Key design choices:
+ *  • Reads from `origImg` (frozen) — ensures erased-object colours never
+ *    influence the fill, even when scanning row-by-row.
+ *  • Checks `origMask` (frozen) — never treats already-filled pixels as source.
+ *  • Large radius (≥ half the mask diagonal) ensures every pixel, including the
+ *    dead-centre, samples actual wall background on all sides.
+ *  • Inverse-distance² naturally weights nearer wall pixels more, so the fill
+ *    follows the wall's spatial colour gradient instead of producing a flat average.
  */
-function sweep(img, mask, w, h, fwd) {
-  let filled = 0
-  for (let yi = 0; yi < h; yi++) {
-    const y = fwd ? yi : h - 1 - yi
-    for (let xi = 0; xi < w; xi++) {
-      const x = fwd ? xi : w - 1 - xi
-      if (!mask[y * w + x]) continue   // already known
-
-      let R = 0, G = 0, B = 0, W = 0
-      for (let dy = -3; dy <= 3; dy++) {
-        for (let dx = -3; dx <= 3; dx++) {
-          if (dx === 0 && dy === 0) continue
-          const nx = x + dx, ny = y + dy
-          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
-          if (mask[ny * w + nx]) continue   // also unknown — skip
-          const d2 = dx * dx + dy * dy
-          const wt = 1.0 / d2
-          const i4 = (ny * w + nx) * 4
-          R += img[i4]     * wt
-          G += img[i4 + 1] * wt
-          B += img[i4 + 2] * wt
-          W += wt
-        }
-      }
-      if (W === 0) continue   // no known neighbours yet — reached in a later pass
-
-      const i4 = (y * w + x) * 4
-      img[i4]     = Math.round(R / W)
-      img[i4 + 1] = Math.round(G / W)
-      img[i4 + 2] = Math.round(B / W)
-      img[i4 + 3] = 255
-      mask[y * w + x] = 0
-      filled++
-    }
-  }
-  return filled
-}
-
-/**
- * Fallback for isolated fully-masked islands: expands search radius up to 16px.
- */
-function fillIsolated(img, mask, w, h) {
-  let remaining = 0
-  for (let i = 0; i < mask.length; i++) if (mask[i]) remaining++
-  if (remaining === 0) return
-
+function jacobiPhase(img, origImg, origMask, mask, w, h, sampleR, stride) {
+  let predicted = 0
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      if (!mask[y * w + x]) continue
+      if (!origMask[y * w + x]) continue   // not originally masked
+
+      const y0 = Math.max(0, y - sampleR), y1 = Math.min(h - 1, y + sampleR)
+      const x0 = Math.max(0, x - sampleR), x1 = Math.min(w - 1, x + sampleR)
+      const r2  = sampleR * sampleR
+
       let R = 0, G = 0, B = 0, W = 0
-      outer: for (let r = 4; r <= 24; r += 2) {
-        for (let dy = -r; dy <= r; dy++) {
-          for (let dx = -r; dx <= r; dx++) {
-            const nx = x + dx, ny = y + dy
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
-            if (mask[ny * w + nx]) continue
-            const d2 = dx * dx + dy * dy
-            const wt = 1.0 / d2
-            const i4 = (ny * w + nx) * 4
-            R += img[i4] * wt; G += img[i4+1] * wt; B += img[i4+2] * wt; W += wt
-          }
+      for (let sy = y0; sy <= y1; sy += stride) {
+        for (let sx = x0; sx <= x1; sx += stride) {
+          if (origMask[sy * w + sx]) continue    // skip originally masked pixels
+          const dx = sx - x, dy = sy - y
+          const d2 = dx * dx + dy * dy
+          if (d2 > r2) continue                  // circular clip
+          const wt = 1.0 / (d2 || 0.25)
+          const i4 = (sy * w + sx) * 4
+          R += origImg[i4] * wt; G += origImg[i4+1] * wt
+          B += origImg[i4+2] * wt;  W += wt
         }
-        if (W > 0) break outer
       }
       if (W === 0) continue
       const i4 = (y * w + x) * 4
@@ -107,41 +75,114 @@ function fillIsolated(img, mask, w, h) {
       img[i4+1] = Math.round(G / W)
       img[i4+2] = Math.round(B / W)
       img[i4+3] = 255
-      mask[y * w + x] = 0
+      mask[y * w + x] = 0   // mark as filled
+      predicted++
     }
+  }
+  return predicted
+}
+
+/* ── Phase 2: Diffusion cleanup ──────────────────────────────────────────── */
+/**
+ * Gauss-Seidel diffusion for any pixels Phase 1 couldn't reach
+ * (e.g. a fully-masked island with no background within sampleR).
+ * Uses Phase-1 results (now stored in img) as source.
+ */
+function diffusionCleanup(img, mask, w, h) {
+  let pass = 0
+  while (true) {
+    let filled = 0
+    const fwd = pass % 2 === 0
+    for (let yi = 0; yi < h; yi++) {
+      const y = fwd ? yi : h - 1 - yi
+      for (let xi = 0; xi < w; xi++) {
+        const x = fwd ? xi : w - 1 - xi
+        if (!mask[y * w + x]) continue
+        let R = 0, G = 0, B = 0, W = 0
+        for (let dy = -5; dy <= 5; dy++) {
+          for (let dx = -5; dx <= 5; dx++) {
+            if (!dx && !dy) continue
+            const nx = x + dx, ny = y + dy
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+            if (mask[ny * w + nx]) continue
+            const wt = 1.0 / (dx * dx + dy * dy)
+            const i4 = (ny * w + nx) * 4
+            R += img[i4] * wt; G += img[i4+1] * wt; B += img[i4+2] * wt; W += wt
+          }
+        }
+        if (W === 0) continue
+        const i4 = (y * w + x) * 4
+        img[i4]   = Math.round(R / W); img[i4+1] = Math.round(G / W)
+        img[i4+2] = Math.round(B / W); img[i4+3] = 255
+        mask[y * w + x] = 0; filled++
+      }
+    }
+    pass++
+    if (filled === 0 || pass > 20) break
   }
 }
 
+/* ── Phase 3: Seam smoothing ─────────────────────────────────────────────── */
 /**
- * Two-pass Gaussian smoothing confined to the originally-masked region.
- * Blends fill edges seamlessly into the surrounding background.
+ * 3-pass weighted smooth over the filled region + a 2-pixel feathered border
+ * into the surrounding known pixels.  The border pixels are only lightly
+ * affected (20% blend) so wall texture outside the selection is preserved.
+ * Using two ping-pong buffers avoids scan-order bias.
  */
-function smoothFilled(img, origMask, w, h) {
-  const tmp = new Uint8ClampedArray(img)
-  for (let pass = 0; pass < 2; pass++) {
+function seamSmooth(img, origMask, w, h) {
+  // Build smooth zone: filled region + 2px expansion into known border
+  const zone = new Uint8Array(w * h)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!origMask[y * w + x]) continue
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const nx = clamp(x + dx, 0, w - 1)
+          const ny = clamp(y + dy, 0, h - 1)
+          zone[ny * w + nx] = 1
+        }
+      }
+    }
+  }
+
+  // Ping-pong buffers so each pass reads clean previous-pass data
+  let src = new Uint8ClampedArray(img)
+  let dst = new Uint8ClampedArray(img)
+
+  for (let pass = 0; pass < 3; pass++) {
+    // swap
+    const tmp = src; src = dst; dst = tmp
+    // src = previous pass result (or original img on pass 0, since both start equal)
+
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        if (!origMask[y * w + x]) continue   // only touch originally-masked area
-        let R = 0, G = 0, B = 0, n = 0
+        const i4 = (y * w + x) * 4
+        if (!zone[y * w + x]) {
+          dst[i4] = src[i4]; dst[i4+1] = src[i4+1]
+          dst[i4+2] = src[i4+2]; dst[i4+3] = src[i4+3]
+          continue
+        }
+        let R = 0, G = 0, B = 0, W = 0
         for (let dy = -2; dy <= 2; dy++) {
           for (let dx = -2; dx <= 2; dx++) {
             const nx = clamp(x + dx, 0, w - 1)
             const ny = clamp(y + dy, 0, h - 1)
-            const i4 = (ny * w + nx) * 4
-            R += tmp[i4]; G += tmp[i4 + 1]; B += tmp[i4 + 2]
-            n++
+            const d2 = dx * dx + dy * dy
+            const wt = 1.0 / (d2 || 0.5)
+            const qi = (ny * w + nx) * 4
+            R += src[qi] * wt; G += src[qi+1] * wt; B += src[qi+2] * wt; W += wt
           }
         }
-        const i4 = (y * w + x) * 4
-        tmp[i4]     = Math.round(R / n)
-        tmp[i4 + 1] = Math.round(G / n)
-        tmp[i4 + 2] = Math.round(B / n)
-        tmp[i4 + 3] = 255
+        // Known border pixels: blend lightly (20%) to avoid smearing wall texture
+        const blend = origMask[y * w + x] ? 1.0 : 0.20
+        dst[i4]   = Math.round(src[i4]   * (1 - blend) + (R / W) * blend)
+        dst[i4+1] = Math.round(src[i4+1] * (1 - blend) + (G / W) * blend)
+        dst[i4+2] = Math.round(src[i4+2] * (1 - blend) + (B / W) * blend)
+        dst[i4+3] = 255
       }
     }
-    if (pass === 0) img.set(tmp)
   }
-  return tmp
+  return dst   // dst holds the final pass result
 }
 
 /* ── Main handler ─────────────────────────────────────────────────────────── */
@@ -153,18 +194,24 @@ self.onmessage = ({ data }) => {
   const { width: w, height: h }     = imageData
 
   try {
-    // imageData.data and maskIn.data arrive as ArrayBuffer (transferred via Transferable)
-    const img  = new Uint8Array(imageData.data)
-    const mask = new Uint8Array(maskIn.data)   // 1 = fill, 0 = keep
-
-    if (maskIn.width !== w || maskIn.height !== h) {
+    if (maskIn.width !== w || maskIn.height !== h)
       throw new Error(`Dimension mismatch: image ${w}×${h} vs mask ${maskIn.width}×${maskIn.height}`)
-    }
 
+    const img  = new Uint8Array(imageData.data)
+    const mask = new Uint8Array(maskIn.data)
+
+    // Measure mask and compute bounding box for adaptive radius
     let totalMasked = 0
-    for (let i = 0; i < mask.length; i++) if (mask[i]) totalMasked++
-
-    console.log(`[inpaintWorker] diffusion fill ${w}×${h}, masked=${totalMasked}`)
+    let minX = w, maxX = 0, minY = h, maxY = 0
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (mask[y * w + x]) {
+          totalMasked++
+          if (x < minX) minX = x; if (x > maxX) maxX = x
+          if (y < minY) minY = y; if (y > maxY) maxY = y
+        }
+      }
+    }
 
     if (totalMasked === 0) {
       self.postMessage({ type: 'progress', pct: 100 })
@@ -172,35 +219,35 @@ self.onmessage = ({ data }) => {
       return
     }
 
-    const origMask = new Uint8Array(mask)
-    let remaining  = totalMasked
-    let pass       = 0
+    // Adaptive sample radius: must be large enough that even the dead-centre pixel
+    // can reach original background on all sides.  Add 30px margin beyond half-diagonal.
+    const maskW   = maxX - minX + 1
+    const maskH   = maxY - minY + 1
+    const halfDiag = Math.ceil(Math.sqrt(maskW * maskW + maskH * maskH) / 2)
+    const sampleR  = Math.max(60, halfDiag + 30)
+    // Adaptive stride: target ~2 000 candidates per masked pixel
+    const stride   = Math.max(2, Math.ceil(sampleR / 22))
 
-    while (remaining > 0) {
-      const filled = sweep(img, mask, w, h, pass % 2 === 0)
-      remaining -= filled
-      pass++
+    console.log(`[inpaintWorker] gradient fill ${w}×${h}, masked=${totalMasked}, sampleR=${sampleR}, stride=${stride}`)
 
-      // If no progress: isolated pixels — use wide-radius fallback
-      if (filled === 0 && remaining > 0) {
-        fillIsolated(img, mask, w, h)
-        // Recount
-        remaining = 0
-        for (let i = 0; i < mask.length; i++) if (mask[i]) remaining++
-        break   // stop main loop — isolated islands handled
-      }
+    const origMask = new Uint8Array(mask)   // never modified — Phase 1 filter & Phase 3 zone
+    const origImg  = new Uint8Array(img)    // never modified — Phase 1 samples only from here
 
-      const pct = Math.round(((totalMasked - remaining) / totalMasked) * 90)
-      self.postMessage({ type: 'progress', pct })
-    }
+    self.postMessage({ type: 'progress', pct: 5 })
 
-    const result = smoothFilled(img, origMask, w, h)
+    // Phase 1: gradient-aware fill from original background
+    jacobiPhase(img, origImg, origMask, mask, w, h, sampleR, stride)
+    self.postMessage({ type: 'progress', pct: 75 })
 
+    // Phase 2: diffusion cleanup for any isolated unfilled pixels
+    diffusionCleanup(img, mask, w, h)
+    self.postMessage({ type: 'progress', pct: 90 })
+
+    // Phase 3: seam smooth + feather into border
+    const result = seamSmooth(img, origMask, w, h)
     self.postMessage({ type: 'progress', pct: 100 })
-    self.postMessage({
-      type: 'done',
-      imageData: { width: w, height: h, data: result },
-    })
+    self.postMessage({ type: 'done', imageData: { width: w, height: h, data: result } })
+
   } catch (err) {
     console.error('[inpaintWorker] error:', err)
     self.postMessage({ type: 'error', message: err.message })
