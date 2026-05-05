@@ -643,8 +643,9 @@ export default function SpaceBuilderCanvas({
         </div>
       )}
 
-      {/* ── FOV presets — top-left ───────────────────────────────────── */}
+      {/* ── FOV presets — left side, vertical ──────────────────────── */}
       <div className="sbc-fov-bar">
+        <span className="sbc-ctrl-label">FOV</span>
         {FOV_PRESETS.map(p => (
           <button
             key={p.label}
@@ -655,8 +656,9 @@ export default function SpaceBuilderCanvas({
         ))}
       </div>
 
-      {/* ── Zoom slider — top-right ──────────────────────────────────── */}
+      {/* ── Zoom controls — right side, vertical ─────────────────────── */}
       <div className="sbc-zoom-bar">
+        <span className="sbc-ctrl-label">Zoom</span>
         <button
           className="sbc-zoom-btn"
           title="Zoom in"
@@ -667,14 +669,7 @@ export default function SpaceBuilderCanvas({
             if (t) { t.orbit.radius = r; t.applyOrbit() }
           }}
         >+</button>
-        <input
-          type="range"
-          className="sbc-zoom-slider"
-          min={0} max={100} step={0.5}
-          value={radiusToSlider(zoomRadius)}
-          onChange={handleZoomSlider}
-          title={`Zoom — distance ${zoomRadius.toFixed(1)} m`}
-        />
+        <span className="sbc-zoom-val">{radiusToSlider(zoomRadius).toFixed(0)}%</span>
         <button
           className="sbc-zoom-btn"
           title="Zoom out"
@@ -685,7 +680,6 @@ export default function SpaceBuilderCanvas({
             if (t) { t.orbit.radius = r; t.applyOrbit() }
           }}
         >−</button>
-        <span className="sbc-zoom-label">Zoom</span>
       </div>
 
       {/* ── Joystick group — centered at top ─────────────────────────── */}

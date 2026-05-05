@@ -114,9 +114,6 @@ export async function stitchSeams(surfaces, onProgress) {
       reject(new Error('seamBlendWorker crashed: ' + (e.message || 'unknown')))
     }
 
-    // Pass the full absolute opencv.js URL — worker can't rely on self.location
-    // because in production the worker chunk lives under /assets/.
-    const opencvUrl = new URL('opencv.js', window.location.origin + import.meta.env.BASE_URL).href
-    worker.postMessage({ type: 'stitch', pairs, opencvUrl })
+    worker.postMessage({ type: 'stitch', pairs })
   })
 }

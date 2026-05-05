@@ -793,7 +793,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 <circle cx="4.5" cy="6.5" r="1.5" stroke="currentColor" strokeWidth="1.2"/>
                 <path d="M7 10l2-3 3 3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
               </svg>
-              Add Photo
+              Add
             </button>
 
             <button
@@ -810,7 +810,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                     <path d="M2 6.5h9M2 6.5L5 4M2 6.5L5 9M11 6.5L8 4M11 6.5L8 9"
                       stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
-                  Stitch Seams
+                  Stitch
                 </>
               )}
             </button>
@@ -822,11 +822,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               title="Erase an object from the active surface using content-aware fill"
             >
               <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                <path d="M10 3L3 10M3 10l3.5-.5L10 6M3 10l.5-3.5L7 3"
-                  stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M2 11h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                {/* Eraser body (angled block) */}
+                <path d="M4 11L9.5 4 12 6.5 6.5 11H4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                {/* Ferrule band */}
+                <line x1="6.5" y1="8" x2="9" y2="5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                {/* Erased mark at bottom */}
+                <path d="M1 11h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
               </svg>
-              Erase Object
+              Erase
             </button>
 
             {/* Save Room popover */}
@@ -838,14 +841,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 title="Save room"
               >
                 {isSaving ? <><span className="btn-spinner" />Saving…</> : (
-                  <>
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                      <path d="M1 1h7.5L11 3.5V11H1V1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                      <rect x="3" y="1" width="3.5" height="2.5" rx="0.4" stroke="currentColor" strokeWidth="1"/>
-                      <rect x="2" y="7" width="8" height="3" rx="0.4" stroke="currentColor" strokeWidth="1"/>
-                    </svg>
-                    Save Room
-                  </>
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <path d="M1 1h7.5L11 3.5V11H1V1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                    <rect x="3" y="1" width="3.5" height="2.5" rx="0.4" stroke="currentColor" strokeWidth="1"/>
+                    <rect x="2" y="7" width="8" height="3" rx="0.4" stroke="currentColor" strokeWidth="1"/>
+                  </svg>
                 )}
               </button>
               {showSaveMenu && (

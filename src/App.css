@@ -6033,14 +6033,28 @@ kbd {
 /* ── FOV preset bar — top-left of 3D viewport ─────────────────────────── */
 .sbc-fov-bar {
   position: absolute;
-  top: 12px;
-  left: 12px;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 4px;
   z-index: 20;
 }
+.sbc-ctrl-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.3);
+  text-align: center;
+  user-select: none;
+  pointer-events: none;
+  margin-bottom: 2px;
+}
 .sbc-fov-btn {
-  padding: 4px 9px;
+  padding: 6px 10px;
   border-radius: 6px;
   border: 1px solid rgba(255,255,255,0.12);
   background: rgba(8,13,20,0.72);
@@ -6050,6 +6064,8 @@ kbd {
   cursor: pointer;
   backdrop-filter: blur(6px);
   transition: color 0.12s, border-color 0.12s, background 0.12s;
+  white-space: nowrap;
+  text-align: center;
 }
 .sbc-fov-btn:hover { color: #c8dde8; border-color: rgba(255,255,255,0.25); }
 .sbc-fov-btn--active {
@@ -6149,29 +6165,31 @@ kbd {
   pointer-events: none;
 }
 
-/* ── Zoom slider bar — top-right of 3D viewport ────────────────────────── */
+/* ── Zoom controls bar — right side, vertical ──────────────────────────── */
 .sbc-zoom-bar {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   z-index: 20;
   background: rgba(8,13,20,0.72);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 8px;
-  padding: 4px 8px;
+  padding: 8px 6px;
   backdrop-filter: blur(6px);
 }
 .sbc-zoom-btn {
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   border-radius: 5px;
   border: 1px solid rgba(255,255,255,0.12);
   background: transparent;
   color: #7a9baf;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -6180,42 +6198,15 @@ kbd {
   transition: color 0.12s, border-color 0.12s;
 }
 .sbc-zoom-btn:hover { color: #c8dde8; border-color: rgba(255,255,255,0.3); }
-.sbc-zoom-slider {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 80px;
-  height: 3px;
-  border-radius: 2px;
-  background: rgba(74,158,255,0.3);
-  outline: none;
-  cursor: pointer;
-}
-.sbc-zoom-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: #4a9eff;
-  box-shadow: 0 0 5px rgba(74,158,255,0.5);
-  cursor: pointer;
-}
-.sbc-zoom-slider::-moz-range-thumb {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  border: none;
-  background: #4a9eff;
-  cursor: pointer;
-}
-.sbc-zoom-label {
+.sbc-zoom-val {
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,0.35);
+  color: rgba(255,255,255,0.4);
+  font-family: 'DM Mono', monospace;
   user-select: none;
-  white-space: nowrap;
+  pointer-events: none;
+  min-width: 28px;
+  text-align: center;
 }
 .sbc-3d-empty {
   position: absolute;

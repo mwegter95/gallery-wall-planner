@@ -38,47 +38,39 @@
 
 let _cv = null
 
-// Populated from the first 'stitch' message so the main thread controls the URL.
-let _opencvUrl = null
-
 async function loadCV() {
-  if (_cv) return _cv
+  if (_cv) { console.log('[seamBlendWorker] loadCV: cached'); return _cv }
+  console.log('[seamBlendWorker] loadCV: starting…')
   try {
-    // Use the URL provided by the main thread (which knows the correct Vite base path).
-    // Fall back to origin root only if no URL was sent yet.
-    const url = _opencvUrl || (self.location.origin + '/opencv.js')
-    console.log('[seamBlendWorker] loadCV: fetching', url)
-
-    // Fetch the script and load via a blob URL.
-    // This avoids importScripts CORS/path failures when the app is deployed at
-    // a subdirectory or custom domain — the fetch goes to the exact URL we built
-    // in the main thread, and the blob URL is always same-origin for importScripts.
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`fetch ${url} → ${response.status}`)
-    const text    = await response.text()
-    const blob    = new Blob([text], { type: 'text/javascript' })
-    const blobUrl = URL.createObjectURL(blob)
-    try {
-      importScripts(blobUrl)
-    } finally {
-      URL.revokeObjectURL(blobUrl)
-    }
+    // opencv.js is served from public/ as a plain static file.
+    // importScripts() is synchronous — it blocks until fully downloaded and executed.
+    // The UMD wrapper detects `typeof importScripts === 'function'` and sets
+    // root.cv = factory(), so self.cv becomes the init Promise immediately.
+    const url = self.location.origin + '/opencv.js'
+    console.log('[seamBlendWorker] loadCV: importScripts from', url)
+    importScripts(url)
+    console.log('[seamBlendWorker] loadCV: importScripts done, typeof self.cv =', typeof self.cv)
 
     const raw = self.cv
     if (raw == null) throw new Error('self.cv not set after importScripts')
+
+    // Await the Promise that resolves once WASM is compiled and initialised.
     const cv = typeof raw.then === 'function'
       ? await Promise.race([
           raw,
-          new Promise((_, rej) => setTimeout(() => rej(new Error('cv init timeout after 60 s')), 60_000)),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('cv Promise timed out after 60 s')), 60_000)
+          ),
         ])
       : raw
-    if (typeof cv?.Mat === 'undefined') throw new Error('cv.Mat missing after load')
+
+    if (typeof cv?.Mat === 'undefined') throw new Error('cv.Mat not found — unexpected module shape')
     _cv = cv
-    console.log('[seamBlendWorker] OpenCV ready')
-    return cv
+    console.log('[seamBlendWorker] loadCV: SUCCESS')
+    return _cv
   } catch (err) {
-    console.warn('[seamBlendWorker] OpenCV load failed:', err.message)
-    return null   // caller falls back to feather-only mode
+    console.warn('[seamBlendWorker] loadCV FAILED:', err.message)
+    return null   // caller falls back to colour-only mode
   }
 }
 
@@ -438,8 +430,7 @@ self.onmessage = ({ data }) => {
   // (An async onmessage that throws gives no worker.onerror — the spinner hangs forever.)
   ;(async () => {
     try {
-      const { pairs, opencvUrl } = data
-      if (opencvUrl) _opencvUrl = opencvUrl
+      const { pairs } = data
 
       self.postMessage({ type: 'progress', pct: 2, status: 'Loading OpenCV…' })
       const cv = await loadCV()
