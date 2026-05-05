@@ -33,6 +33,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [warpProgress,    setWarpProgress]    = useState(0)
   const [isStitching,     setIsStitching]     = useState(false)
   const [stitchProgress,  setStitchProgress]  = useState(0)
+  const [stitchStatus,    setStitchStatus]    = useState('')
   const [isSaving,        setIsSaving]        = useState(false)
   const [isDragOver,      setIsDragOver]      = useState(false)
   // Layout management state (scoped to active surface)
@@ -351,7 +352,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       const { stitchSeams } = await import('../utils/seamBlend')
       const results = await stitchSeams(
         space.surfaces,
-        pct => setStitchProgress(pct),
+        (pct, status) => { setStitchProgress(pct); if (status) setStitchStatus(status) },
       )
       if (results.size > 0) {
         setSpace(prev => ({
@@ -366,6 +367,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     } finally {
       setIsStitching(false)
       setStitchProgress(0)
+      setStitchStatus('')
     }
   }
 
@@ -758,7 +760,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               title="Blend seams between connected surfaces"
             >
               {isStitching ? (
-                <><span className="btn-spinner" />{stitchProgress > 0 ? `${stitchProgress}%` : 'Stitching…'}</>
+                <><span className="btn-spinner" />{stitchStatus || (stitchProgress > 0 ? `${stitchProgress}%` : 'Loading OpenCV…')}</>
               ) : (
                 <>
                   <svg width="13" height="13" viewBox="0 0 13 13" fill="none">

@@ -41,6 +41,11 @@ async function getCv() {
   return _cvPromise
 }
 
+// ── Yield helper ────────────────────────────────────────────────────────────
+// Give the browser one event-loop tick so React can re-render progress
+// and the browser won't mark the tab as unresponsive between heavy steps.
+const yieldToUI = () => new Promise(r => setTimeout(r, 0))
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const BLEND_FRACTION = 0.13   // blend zone = 13 % of perpendicular dimension
 const MAX_BLEND_PX   = 130    // px cap
@@ -90,6 +95,7 @@ function stripRect(edge, cw, ch, blendW) {
  */
 async function computeStripHomography(imgDataA, imgDataB) {
   const cv = await getCv()
+  await yieldToUI()  // let the UI breathe after (potentially slow) WASM load
 
   // Use a fixed normalisation size so features are always dense enough
   const NORM = 256
@@ -114,7 +120,9 @@ async function computeStripHomography(imgDataA, imgDataB) {
   const dB   = new cv.Mat()
   const none = new cv.Mat()
   orb.detectAndCompute(rA, none, kpA, dA)
+  await yieldToUI()  // ORB detection is the single most expensive call
   orb.detectAndCompute(rB, none, kpB, dB)
+  await yieldToUI()
 
   if (dA.rows < 4 || dB.rows < 4) {
     cvDelete(matA, matB, gA, gB, rA, rB, kpA, kpB, dA, dB, none)
@@ -320,7 +328,7 @@ function applyColorCorrection(ctx, edge, cw, ch, blendW, seamAvg, targetSeam) {
  *
  * useGeometric: set false to skip the OpenCV step (color-only, faster).
  */
-export async function blendEdgePair(dataUrlA, edgeA, dataUrlB, edgeB, useGeometric = true) {
+export async function blendEdgePair(dataUrlA, edgeA, dataUrlB, edgeB, useGeometric = false) {
   const [imgA, imgB] = await Promise.all([loadImg(dataUrlA), loadImg(dataUrlB)])
   const cA = imgToCanvas(imgA)
   const cB = imgToCanvas(imgB)
@@ -392,17 +400,14 @@ export async function blendEdgePair(dataUrlA, edgeA, dataUrlB, edgeB, useGeometr
 
 /**
  * Stitch all connected surface pairs in a space.
- * Returns Map<surfaceId, stitchedDataUrl>.
- *
- * Surfaces without warpedDataUrl are skipped.
- * Multi-edge surfaces accumulate corrections sequentially.
+ * All OpenCV + pixel work runs in a Web Worker — the UI stays fully responsive.
+ * Returns Promise<Map<surfaceId, stitchedDataUrl>>.
  *
  * @param {Array}    surfaces   - space.surfaces
- * @param {Function} onProgress - callback(0..100)
- * @param {boolean}  geometric  - true = use OpenCV (default), false = color-only
+ * @param {Function} onProgress - optional callback(0..100 integer)
  */
-export async function stitchSeams(surfaces, onProgress, geometric = true) {
-  // Collect unique pairs (avoid double-processing A↔B and B↔A)
+export function stitchSeams(surfaces, onProgress) {
+  // Collect unique connected pairs
   const seen  = new Set()
   const pairs = []
 
@@ -419,30 +424,35 @@ export async function stitchSeams(surfaces, onProgress, geometric = true) {
     }
   }
 
-  if (pairs.length === 0) { onProgress?.(100); return new Map() }
+  if (pairs.length === 0) { onProgress?.(100); return Promise.resolve(new Map()) }
 
-  // Seed with best available texture
-  const resultMap = new Map()
-  for (const s of surfaces) {
-    if (s.warpedDataUrl) resultMap.set(s.id, s.stitchedDataUrl || s.warpedDataUrl)
-  }
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(
+      new URL('./seamBlendWorker.js', import.meta.url),
+      { type: 'module' },
+    )
 
-  for (let i = 0; i < pairs.length; i++) {
-    const { surfA, edgeA, surfB, edgeB } = pairs[i]
-    onProgress?.(Math.round((i / pairs.length) * 95))
-
-    const urlA = resultMap.get(surfA.id) || surfA.warpedDataUrl
-    const urlB = resultMap.get(surfB.id) || surfB.warpedDataUrl
-
-    try {
-      const { modifiedA, modifiedB } = await blendEdgePair(urlA, edgeA, urlB, edgeB, geometric)
-      resultMap.set(surfA.id, modifiedA)
-      resultMap.set(surfB.id, modifiedB)
-    } catch (err) {
-      console.error('[seamBlend] pair failed:', surfA.id, '↔', surfB.id, err)
+    worker.onmessage = ({ data }) => {
+      if      (data.type === 'progress') onProgress?.(data.pct, data.status)
+      else if (data.type === 'warn')     console.warn('[seamBlend]', data.msg)
+      else if (data.type === 'done') {
+        worker.terminate()
+        resolve(new Map(data.results))
+      }
     }
-  }
 
-  onProgress?.(100)
-  return resultMap
+    worker.onerror = e => { worker.terminate(); reject(new Error(e.message)) }
+
+    worker.postMessage({
+      type: 'stitch',
+      pairs: pairs.map(({ surfA, edgeA, surfB, edgeB }) => ({
+        idA:      surfA.id,
+        dataUrlA: surfA.stitchedDataUrl || surfA.warpedDataUrl,
+        edgeA,
+        idB:      surfB.id,
+        dataUrlB: surfB.stitchedDataUrl || surfB.warpedDataUrl,
+        edgeB,
+      })),
+    })
+  })
 }
