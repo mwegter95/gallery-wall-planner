@@ -14,22 +14,47 @@
 let _cv = null
 
 async function loadCV() {
-  if (_cv) return _cv
+  if (_cv) { console.log('[seamBlendWorker] loadCV: returning cached cv'); return _cv }
+  console.log('[seamBlendWorker] loadCV: starting…')
   try {
-    // @techstark/opencv-js exports a Promise that resolves to the cv object.
-    // The module.exports IS the Promise — we must await it directly.
-    const mod = await import('@techstark/opencv-js')
-    // The default export (or the module itself when bundled as CJS/UMD) is a Promise
+    console.log('[seamBlendWorker] loadCV: calling import(@techstark/opencv-js)…')
+    const mod = await Promise.race([
+      import('@techstark/opencv-js'),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('import() timed out after 30 s')), 30_000)
+      ),
+    ])
+    console.log('[seamBlendWorker] loadCV: import() resolved')
+    console.log('[seamBlendWorker] loadCV: mod type =', typeof mod)
+    console.log('[seamBlendWorker] loadCV: mod keys =', Object.keys(mod || {}).join(', '))
+    console.log('[seamBlendWorker] loadCV: typeof mod.default =', typeof mod?.default)
+
+    // @techstark/opencv-js exports a Promise as module.exports (CJS/UMD).
+    // import() gives { default: <Promise> }.  We must await the Promise itself.
     const raw = mod.default ?? mod
-    const cv  = typeof raw.then === 'function' ? await raw : raw
-    // Sanity-check: cv.Mat should now exist
+    console.log('[seamBlendWorker] loadCV: raw is Promise?', typeof raw?.then === 'function')
+
+    const cv = typeof raw.then === 'function'
+      ? await Promise.race([
+          raw,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('cv Promise timed out after 45 s')), 45_000)
+          ),
+        ])
+      : raw
+
+    console.log('[seamBlendWorker] loadCV: cv resolved, typeof cv =', typeof cv)
+    console.log('[seamBlendWorker] loadCV: typeof cv.Mat =', typeof cv?.Mat)
+    console.log('[seamBlendWorker] loadCV: typeof cv.ORB =', typeof cv?.ORB)
+
     if (typeof cv.Mat === 'undefined') {
       throw new Error('cv.Mat not found after await — unexpected module shape')
     }
     _cv = cv
+    console.log('[seamBlendWorker] loadCV: SUCCESS — OpenCV ready')
     return _cv
   } catch (err) {
-    console.warn('[seamBlendWorker] OpenCV load failed:', err.message)
+    console.warn('[seamBlendWorker] loadCV FAILED:', err.message)
     return null
   }
 }
@@ -276,7 +301,9 @@ function applyColorCorrection(ctx, edge, cw, ch, blendW, seamAvg, targetSeam) {
 // ── Main per-pair blend ───────────────────────────────────────────────────────
 
 async function blendPair(cv, dataUrlA, edgeA, dataUrlB, edgeB) {
+  console.log('[seamBlendWorker] blendPair: decoding canvases…')
   const [cA, cB] = await Promise.all([dataUrlToCanvas(dataUrlA), dataUrlToCanvas(dataUrlB)])
+  console.log(`[seamBlendWorker] blendPair: canvases decoded — A(${cA.width}×${cA.height}) B(${cB.width}×${cB.height})`)
   const ctxA = cA.getContext('2d', { willReadFrequently: true })
   const ctxB = cB.getContext('2d', { willReadFrequently: true })
 
@@ -334,11 +361,15 @@ async function blendPair(cv, dataUrlA, edgeA, dataUrlB, edgeB) {
 // ── Message handler ───────────────────────────────────────────────────────────
 
 self.onmessage = async ({ data }) => {
+  console.log('[seamBlendWorker] onmessage received, type =', data.type)
   if (data.type !== 'stitch') return
   const { pairs } = data
+  console.log('[seamBlendWorker] pairs count =', pairs.length)
 
   self.postMessage({ type: 'progress', pct: 2, status: 'Loading OpenCV…' })
+  console.log('[seamBlendWorker] calling loadCV()…')
   const cv = await loadCV()
+  console.log('[seamBlendWorker] loadCV() returned:', cv ? 'cv object' : 'null (colour-only mode)')
   self.postMessage({
     type: 'progress', pct: 12,
     status: cv
@@ -351,19 +382,24 @@ self.onmessage = async ({ data }) => {
   for (let i = 0; i < pairs.length; i++) {
     const { idA, dataUrlA, edgeA, idB, dataUrlB, edgeB } = pairs[i]
     const pct = 12 + Math.round((i / pairs.length) * 85)
+    console.log(`[seamBlendWorker] seam ${i + 1}/${pairs.length}: idA=${idA} edgeA=${edgeA} idB=${idB} edgeB=${edgeB}`)
     self.postMessage({ type: 'progress', pct, status: `Seam ${i + 1} of ${pairs.length}…` })
 
     const srcA = resultMap[idA] || dataUrlA
     const srcB = resultMap[idB] || dataUrlB
 
     try {
+      console.log(`[seamBlendWorker] seam ${i + 1}: calling blendPair…`)
       const result = await blendPair(cv, srcA, edgeA, srcB, edgeB)
+      console.log(`[seamBlendWorker] seam ${i + 1}: blendPair done`)
       resultMap[idA] = result.dataUrlA
       resultMap[idB] = result.dataUrlB
     } catch (err) {
+      console.error(`[seamBlendWorker] seam ${i + 1} FAILED:`, err)
       self.postMessage({ type: 'warn', msg: `Seam ${i + 1} failed: ${err.message}` })
     }
   }
 
+  console.log('[seamBlendWorker] all seams done, posting result')
   self.postMessage({ type: 'done', results: Object.entries(resultMap) })
 }

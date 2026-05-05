@@ -423,24 +423,40 @@ export function stitchSeams(surfaces, onProgress) {
     }
   }
 
+  console.log('[seamBlend] stitchSeams: pairs found =', pairs.length)
   if (pairs.length === 0) { onProgress?.(100); return Promise.resolve(new Map()) }
 
   return new Promise((resolve, reject) => {
-    const worker = new Worker(
-      new URL('./seamBlendWorker.js', import.meta.url),
-      { type: 'module' },
-    )
+    console.log('[seamBlend] spawning Worker…')
+    let worker
+    try {
+      worker = new Worker(
+        new URL('./seamBlendWorker.js', import.meta.url),
+        { type: 'module' },
+      )
+      console.log('[seamBlend] Worker spawned OK:', worker)
+    } catch (err) {
+      console.error('[seamBlend] Worker spawn FAILED:', err)
+      return reject(err)
+    }
 
     worker.onmessage = ({ data }) => {
+      console.log('[seamBlend] worker message:', data.type, data.pct ?? '', data.status ?? data.msg ?? '')
       if      (data.type === 'progress') onProgress?.(data.pct, data.status)
       else if (data.type === 'warn')     console.warn('[seamBlend]', data.msg)
       else if (data.type === 'done') {
+        console.log('[seamBlend] worker done, results count =', data.results.length)
         worker.terminate()
         resolve(new Map(data.results))
       }
     }
 
-    worker.onerror = e => { worker.terminate(); reject(new Error(e.message)) }
+    worker.onerror = e => {
+      console.error('[seamBlend] worker.onerror:', e)
+      worker.terminate()
+      reject(new Error(e.message))
+    }
+    worker.onmessageerror = e => console.error('[seamBlend] worker.onmessageerror:', e)
 
     worker.postMessage({
       type: 'stitch',
