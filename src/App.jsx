@@ -1211,6 +1211,7 @@ export default function App() {
                 : `${activeWall?.width}" × ${activeWall?.height}"`}
             </span>
           </button>
+          {/* [ROOMS — 3D Room Tour feature not yet implemented; button hidden until ready]
           <button
             className="room-3d-btn"
             onClick={() => setShowRoomMgr(true)}
@@ -1225,6 +1226,7 @@ export default function App() {
               <span className="room-count-badge">{Object.keys(rooms).filter(id => rooms[id].roomType !== 'space').length}</span>
             )}
           </button>
+          */}
           <button
             className="space-builder-btn"
             onClick={() => {
@@ -1592,6 +1594,7 @@ export default function App() {
           existingSpace={editingSpaceId ? rooms[editingSpaceId] : null}
           library={library}
           allLayouts={allLayouts}
+          walls={walls}
           rooms={rooms}
           onSave={handleSaveSpace}
           onClose={() => { setShowSpaceBuilder(false); setEditingSpaceId(null) }}

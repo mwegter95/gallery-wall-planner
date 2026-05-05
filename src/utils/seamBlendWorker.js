@@ -44,25 +44,41 @@ let _opencvUrl = null
 async function loadCV() {
   if (_cv) return _cv
   try {
-    // Use the URL provided by the main thread (knows the correct Vite base path).
-    // Fall back to origin root only in unusual environments.
+    // Use the URL provided by the main thread (which knows the correct Vite base path).
+    // Fall back to origin root only if no URL was sent yet.
     const url = _opencvUrl || (self.location.origin + '/opencv.js')
-    console.log('[seamBlendWorker] loadCV: importScripts', url)
-    importScripts(url)
+    console.log('[seamBlendWorker] loadCV: fetching', url)
+
+    // Fetch the script and load via a blob URL.
+    // This avoids importScripts CORS/path failures when the app is deployed at
+    // a subdirectory or custom domain — the fetch goes to the exact URL we built
+    // in the main thread, and the blob URL is always same-origin for importScripts.
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`fetch ${url} → ${response.status}`)
+    const text    = await response.text()
+    const blob    = new Blob([text], { type: 'text/javascript' })
+    const blobUrl = URL.createObjectURL(blob)
+    try {
+      importScripts(blobUrl)
+    } finally {
+      URL.revokeObjectURL(blobUrl)
+    }
+
     const raw = self.cv
     if (raw == null) throw new Error('self.cv not set after importScripts')
     const cv = typeof raw.then === 'function'
       ? await Promise.race([
           raw,
-          new Promise((_, rej) => setTimeout(() => rej(new Error('cv timeout')), 60_000)),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('cv init timeout after 60 s')), 60_000)),
         ])
       : raw
-    if (typeof cv?.Mat === 'undefined') throw new Error('cv.Mat missing')
+    if (typeof cv?.Mat === 'undefined') throw new Error('cv.Mat missing after load')
     _cv = cv
+    console.log('[seamBlendWorker] OpenCV ready')
     return cv
   } catch (err) {
     console.warn('[seamBlendWorker] OpenCV load failed:', err.message)
-    return null
+    return null   // caller falls back to feather-only mode
   }
 }
 

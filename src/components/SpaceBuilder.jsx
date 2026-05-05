@@ -22,7 +22,7 @@ const MAX_HISTORY = 50
 // Properties that count as "moveable" actions worth undo-ing
 const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
 
-export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, rooms = {} }) {
+export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, walls = {}, rooms = {} }) {
   const [space, setSpace]                 = useState(() => existingSpace
     ? JSON.parse(JSON.stringify(existingSpace))
     : createSpace()
@@ -45,6 +45,8 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
+  // Wall-layout picker: which wall is expanded in the "Load from wall" section
+  const [pickerWallId,    setPickerWallId]    = useState('')
   const [showEraseModal,  setShowEraseModal]  = useState(false)
   // Undo / redo
   const [canUndo, setCanUndo] = useState(false)
@@ -483,65 +485,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           </select>
         </div>
 
-        {/* Edge connections */}
-        <div className="sb-se-connections">
-          <div className="sb-se-conn-title">Edge Connections</div>
-          {EDGES.map(edge => {
-            const conn = activeSurface.connections[edge]
-            return (
-              <div key={edge} className="sb-se-conn-row">
-                <span className="sb-se-conn-edge">{edge}</span>
-
-                <select
-                  className="sb-se-select sb-se-conn-sel"
-                  value={conn?.surfaceId || ''}
-                  onChange={e => {
-                    const val = e.target.value
-                    if (!val) {
-                      setConnection(activeSurface.id, edge, null)
-                    } else {
-                      setConnection(activeSurface.id, edge, {
-                        surfaceId: val,
-                        edge:      conn?.edge || 'left',
-                        angleDeg:  conn?.angleDeg ?? 90,
-                      })
-                    }
-                  }}
-                >
-                  <option value="">— none —</option>
-                  {otherSurfaces.map(s => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-
-                {conn && (
-                  <>
-                    <select
-                      className="sb-se-select sb-se-conn-edge-sel"
-                      value={conn.edge}
-                      onChange={e => setConnection(activeSurface.id, edge, { ...conn, edge: e.target.value })}
-                    >
-                      {EDGES.map(eg => <option key={eg} value={eg}>{eg}</option>)}
-                    </select>
-
-                    <div className="sb-se-angle-wrap">
-                      <input
-                        type="number" min="10" max="180"
-                        className="sb-se-angle-input"
-                        value={conn.angleDeg ?? 90}
-                        onChange={e => setConnection(activeSurface.id, edge, {
-                          ...conn, angleDeg: Number(e.target.value),
-                        })}
-                      />
-                      <span className="sb-se-unit">°</span>
-                    </div>
-                  </>
-                )}
-              </div>
-            )
-          })}
-        </div>
-
         {/* Re-crop button */}
         <button
           className="sb-se-rewarp-btn"
@@ -552,33 +495,58 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           {activeSurface.warpedDataUrl ? '↺ Re-crop on next preview' : 'Not yet warped'}
         </button>
 
-        {/* ── Wall layouts from main app ────────────────────────── */}
+        {/* ── Load Layout from Wall ────────────────────────────── */}
         {(() => {
-          const wallLayouts = allLayouts[activeSurface.id] || {}
-          const names = Object.keys(wallLayouts)
-          if (names.length === 0) return null
+          // Collect all walls that have at least one saved layout
+          const wallsWithLayouts = Object.entries(allLayouts).filter(([, wl]) => Object.keys(wl).length > 0)
+          if (wallsWithLayouts.length === 0) return null
+
+          const pickerLayouts = pickerWallId ? (allLayouts[pickerWallId] || {}) : {}
+
           return (
             <div className="sb-wall-layouts">
-              <div className="sb-se-section-title">Wall Layouts</div>
-              <div className="sb-layout-list">
-                {names.map(name => {
-                  const data = wallLayouts[name]
-                  const pieces = Array.isArray(data) ? data : (data?.pieces || [])
-                  const isActive = name === activeSurface.activeLayout
+              <div className="sb-se-section-title">Load Layout from Wall</div>
+              {/* Step 1: pick a wall */}
+              <select
+                className="sb-se-select"
+                value={pickerWallId}
+                onChange={e => setPickerWallId(e.target.value)}
+              >
+                <option value="">— pick a wall —</option>
+                {wallsWithLayouts.map(([wallId, wl]) => {
+                  const wallName = walls[wallId]?.name || `Wall ${wallId.slice(0, 6)}`
                   return (
-                    <div key={name} className={`sb-layout-row${isActive ? ' sb-layout-row--active' : ''}`}>
-                      <span className="sb-layout-row-name">{name}</span>
-                      <span className="sb-layout-row-count">{pieces.length}p</span>
-                      <div className="sb-layout-row-actions">
-                        <button
-                          className="btn btn-ghost btn-xs"
-                          onClick={() => loadWallLayout(activeSurface.id, name, wallLayouts[name])}
-                        >{isActive ? '✓ Active' : 'Load'}</button>
-                      </div>
-                    </div>
+                    <option key={wallId} value={wallId}>
+                      {wallName} ({Object.keys(wl).length} layout{Object.keys(wl).length !== 1 ? 's' : ''})
+                    </option>
                   )
                 })}
-              </div>
+              </select>
+
+              {/* Step 2: pick a layout from that wall */}
+              {pickerWallId && Object.keys(pickerLayouts).length > 0 && (
+                <div className="sb-layout-list" style={{ marginTop: 6 }}>
+                  {Object.entries(pickerLayouts).map(([name, data]) => {
+                    const pieces = Array.isArray(data) ? data : (data?.pieces || [])
+                    const isActive = name === activeSurface.activeLayout
+                    return (
+                      <div key={name} className={`sb-layout-row${isActive ? ' sb-layout-row--active' : ''}`}>
+                        <span className="sb-layout-row-name">{name}</span>
+                        <span className="sb-layout-row-count">{pieces.length}p</span>
+                        <div className="sb-layout-row-actions">
+                          <button
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => {
+                              loadWallLayout(activeSurface.id, name, data)
+                              setPickerWallId('')
+                            }}
+                          >{isActive ? '✓ Active' : 'Load'}</button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )
         })()}
