@@ -99,6 +99,9 @@ export default function SpaceBuilderCanvas({
   const [snapHint,      setSnapHint]      = useState(null)
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   const [fov,           setFov]           = useState(55)
+  const [zoomRadius,    setZoomRadius]    = useState(8)   // mirrors orbit.radius for slider UI
+  const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
+  setZoomRef.current = setZoomRadius
   const [joyPos,        setJoyPos]        = useState({ x: 0, y: 0 }) // orbit thumb CSS offset
   const [panJoyPos,     setPanJoyPos]     = useState({ x: 0, y: 0 }) // pan thumb CSS offset
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection }
@@ -135,10 +138,11 @@ export default function SpaceBuilderCanvas({
     const meshMap = {}   // { [surfaceId]: { mesh, wM, hM } }
 
     // Returns the best available texture URL for a surface.
-    // Priority: composite overlay (pieces) > stitched seam > warped > raw photo.
+    // Priority: composite overlay (pieces) > inpaint layer > stitched seam > warped > raw photo.
     function getTexUrl(surface) {
       const cached = compTexCacheRef.current.get(surface.id)
       if (cached) return cached.dataUrl
+      if (surface.inpaintDataUrl)  return surface.inpaintDataUrl
       if (surface.stitchedDataUrl) return surface.stitchedDataUrl
       if (surface.warpedDataUrl)   return surface.warpedDataUrl
       return stateRef.current.space.photos.find(p => p.id === surface.photoId)?.dataUrl || null
@@ -367,6 +371,7 @@ export default function SpaceBuilderCanvas({
       // Allow radius as low as 0.1 m so the camera can move inside the room
       orbit.radius = Math.max(0.1, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
       applyOrbit()
+      setZoomRef.current(orbit.radius)
     }
 
     function onDbl(e) {
@@ -459,7 +464,8 @@ export default function SpaceBuilderCanvas({
         continue
       }
       const pieces = surface.layouts?.[layoutName]?.pieces || []
-      const baseUrl = surface.stitchedDataUrl
+      const baseUrl = surface.inpaintDataUrl
+        || surface.stitchedDataUrl
         || surface.warpedDataUrl
         || space.photos.find(p => p.id === surface.photoId)?.dataUrl
         || null
@@ -568,6 +574,22 @@ export default function SpaceBuilderCanvas({
   const handlePanJoyMove = panJoy.onMove
   const handlePanJoyUp   = panJoy.onUp
 
+  // Zoom slider — logarithmic so drag feels linear in perceptual space
+  // slider value 0–100 maps to orbit.radius 0.1–80 via log scale
+  const ZOOM_MIN = 0.1, ZOOM_MAX = 80
+  const radiusToSlider = r => Math.round(
+    (Math.log(r) - Math.log(ZOOM_MIN)) / (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN)) * 100
+  )
+  const sliderToRadius = v =>
+    Math.exp(Math.log(ZOOM_MIN) + (v / 100) * (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN)))
+
+  function handleZoomSlider(e) {
+    const r = sliderToRadius(Number(e.target.value))
+    setZoomRadius(r)
+    const t = threeRef.current
+    if (t) { t.orbit.radius = r; t.applyOrbit() }
+  }
+
   return (
     <div ref={mountRef} className="sbc-3d-viewport">
       {snapHint && (
@@ -588,6 +610,39 @@ export default function SpaceBuilderCanvas({
         ))}
       </div>
 
+      {/* ── Zoom slider — top-right ──────────────────────────────────── */}
+      <div className="sbc-zoom-bar">
+        <button
+          className="sbc-zoom-btn"
+          title="Zoom in"
+          onClick={() => {
+            const r = Math.max(ZOOM_MIN, zoomRadius * 0.8)
+            setZoomRadius(r)
+            const t = threeRef.current
+            if (t) { t.orbit.radius = r; t.applyOrbit() }
+          }}
+        >+</button>
+        <input
+          type="range"
+          className="sbc-zoom-slider"
+          min={0} max={100} step={0.5}
+          value={radiusToSlider(zoomRadius)}
+          onChange={handleZoomSlider}
+          title={`Zoom — distance ${zoomRadius.toFixed(1)} m`}
+        />
+        <button
+          className="sbc-zoom-btn"
+          title="Zoom out"
+          onClick={() => {
+            const r = Math.min(ZOOM_MAX, zoomRadius * 1.25)
+            setZoomRadius(r)
+            const t = threeRef.current
+            if (t) { t.orbit.radius = r; t.applyOrbit() }
+          }}
+        >−</button>
+        <span className="sbc-zoom-label">Zoom</span>
+      </div>
+
       {/* ── Joystick group — centered at top ─────────────────────────── */}
       <div className="sbc-joystick-group">
         {/* Move/Pan joystick */}
@@ -605,7 +660,7 @@ export default function SpaceBuilderCanvas({
               <path d="M36 13l-7 11h14l-7-11Z" fill="currentColor" opacity=".55"/>
               <path d="M36 59l-7-11h14l-7 11Z" fill="currentColor" opacity=".55"/>
               <path d="M13 36l11-7v14l-11-7Z" fill="currentColor" opacity=".55"/>
-              <path d="M59 36l-11-7v14l11 7Z" fill="currentColor" opacity=".55"/>
+              <path d="M59 36l-11-7v14Z" fill="currentColor" opacity=".55"/>
               <line x1="36" y1="24" x2="36" y2="48" stroke="currentColor" strokeWidth="1" opacity=".2"/>
               <line x1="24" y1="36" x2="48" y2="36" stroke="currentColor" strokeWidth="1" opacity=".2"/>
             </svg>
@@ -697,13 +752,13 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
   const polyStr = ['tl','tr','br','bl'].map(k => toSVG(corners[k]).join(',')).join(' ')
 
   async function applyAndWarp() {
-    onUpdateSurface(surfaceId, { corners, warpedDataUrl: null, stitchedDataUrl: null })
+    onUpdateSurface(surfaceId, { corners, warpedDataUrl: null, stitchedDataUrl: null, inpaintDataUrl: null })
     setIsWarping(true)
     try {
       const url = await warpSurface(
         { ...surface, corners }, photo.dataUrl, photo.displayW, photo.displayH, warpPerspectiveAsync
       )
-      onUpdateSurface(surfaceId, { corners, warpedDataUrl: url, stitchedDataUrl: null })
+      onUpdateSurface(surfaceId, { corners, warpedDataUrl: url, stitchedDataUrl: null, inpaintDataUrl: null })
     } finally { setIsWarping(false); onClose() }
   }
 

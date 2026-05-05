@@ -3,6 +3,7 @@ import Wall from './components/Wall'
 import Sidebar from './components/Sidebar'
 import AddPieceModal from './components/AddPieceModal'
 import PaintModal from './components/PaintModal'
+import EraseModal from './components/EraseModal'
 import WallSetup from './components/WallSetup'
 import WallManager from './components/WallManager'
 import Room3DViewer from './components/Room3DViewer'
@@ -66,6 +67,7 @@ export default function App() {
   const [selectedId,     setSelectedId]     = useState(null)
   const [showAddModal,     setShowAddModal]     = useState(false)
   const [showPaintModal,   setShowPaintModal]   = useState(false)
+  const [showEraseWall,    setShowEraseWall]    = useState(false)
   const [editingLayerId,   setEditingLayerId]   = useState(null)   // which layer is open in PaintModal
   // wallPaintLayers: { [wallId]: { [layerId]: { id, name, color, maskDataUrl, visible, createdAt } } }
   const [wallPaintLayers,  setWallPaintLayers]  = useState({})
@@ -321,6 +323,8 @@ export default function App() {
   const activeWall      = walls[activeWallId] || Object.values(walls)[0] || null
   const wallLayouts     = allLayouts[activeWallId] || {}
   const activeWallImage = activeWall?.imageUrl || null
+  // Effective image = inpaint result (if any) stacked on top of the original photo
+  const activeWallEffectiveImage = activeWall?.inpaintDataUrl || activeWall?.imageUrl || null
 
   /* Paint layers for active wall */
   const activePaintLayers = Object.values(wallPaintLayers[activeWallId] || {})
@@ -939,6 +943,29 @@ export default function App() {
     })
   }, [activeWallId])
 
+  // ── Wall erase (content-aware fill) ──────────────────────────────────────
+  const handleWallEraseApply = useCallback(async (dataUrl) => {
+    if (!activeWallId) return
+    // Upload the inpaint result as a separate file (wallId_inpaint.ext) so we don't
+    // overwrite the original calibrated wall photo.
+    try {
+      const { url } = await api.uploadWallInpaint(activeWallId, dataUrl)
+      setWalls(prev => {
+        const updated = { ...prev[activeWallId], inpaintDataUrl: url }
+        api.putWall(updated).catch(console.error)
+        return { ...prev, [activeWallId]: updated }
+      })
+    } catch (err) {
+      // Fallback: store data URL inline if upload fails (e.g. local dev without backend)
+      console.warn('[App] Wall inpaint upload failed, storing inline:', err)
+      setWalls(prev => {
+        const updated = { ...prev[activeWallId], inpaintDataUrl: dataUrl }
+        api.putWall(updated).catch(console.error)
+        return { ...prev, [activeWallId]: updated }
+      })
+    }
+  }, [activeWallId])
+
   const handlePaintApply = useCallback((color, maskDataUrl) => {
     if (!activeWallId) return
     const id = editingLayerId || genId()
@@ -1272,6 +1299,23 @@ export default function App() {
             </button>
           )}
 
+          {/* Erase Object button — only shown when a wall photo exists */}
+          {activeWallImage && (
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setShowEraseWall(true)}
+              title="Erase an object from the wall photo using content-aware fill"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="btn-icon">
+                <path d="M10.5 3.5L3.5 10.5M3.5 10.5l3-.5 4-3.5M3.5 10.5l.5-3L7.5 3.5"
+                  stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M2.5 12h3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/>
+                {activeWall?.inpaintDataUrl && <circle cx="12" cy="12" r="1.5" fill="currentColor"/>}
+              </svg>
+              <span className="btn-label"> Erase Object</span>
+            </button>
+          )}
+
           <button
             className={`btn btn-ghost btn-sm ${!activeWallImage ? 'btn-calibrate-pulse' : ''}`}
             data-tutorial="header-calibrate"
@@ -1358,7 +1402,7 @@ export default function App() {
           gridSize={gridSize}
           wallWidth={activeWall?.width || 120}
           wallHeight={activeWall?.height || 96}
-          wallImage={activeWallImage}
+          wallImage={activeWallEffectiveImage}
           paintLayers={activePaintLayers.filter(l => l.visible)}
           onCalibrate={openSetup}
           onUndo={handleUndo}
@@ -1425,6 +1469,15 @@ export default function App() {
           existingLayers={activePaintLayers.filter(l => l.id !== editingLayerId && l.maskDataUrl)}
           onApply={handlePaintApply}
           onClose={() => { setShowPaintModal(false); setEditingLayerId(null) }}
+        />
+      )}
+
+      {showEraseWall && activeWallEffectiveImage && (
+        <EraseModal
+          imageUrl={activeWallEffectiveImage}
+          title={`Erase — ${activeWall?.name || 'Wall'}`}
+          onApply={handleWallEraseApply}
+          onClose={() => setShowEraseWall(false)}
         />
       )}
 

@@ -9,9 +9,11 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import * as THREE from 'three'
 import SpaceBuilderCanvas from './SpaceBuilderCanvas'
+import EraseModal from './EraseModal'
 import {
   createSpace, createPhoto, createSurfaceDef, genId,
   assembleSurfaces, warpSurface, createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
+  getEffectiveSurfaceUrl,
 } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 
@@ -39,6 +41,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
+  const [showEraseModal,  setShowEraseModal]  = useState(false)
   // Undo / redo
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
@@ -371,6 +374,15 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     }
   }
 
+  // ── Erase / content-aware fill ────────────────────────────────────────────
+  function handleEraseApply(newDataUrl) {
+    if (!activeSurfaceId) return
+    // Store as inpaintDataUrl — a non-destructive layer on top of warpedDataUrl/stitchedDataUrl.
+    // warpedDataUrl and stitchedDataUrl are preserved so seam-blending can be re-run later.
+    // The inpaint result is the top-most base layer; pieces and paint composite above it.
+    updateSurface(activeSurfaceId, { inpaintDataUrl: newDataUrl })
+  }
+
   // ── Save ─────────────────────────────────────────────────────────────────
   const handleSave = async () => {
     if (!space.name.trim()) return
@@ -690,6 +702,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
 
   return (
     <div className="sb-backdrop">
+      {showEraseModal && activeSurface && (
+        <EraseModal
+          imageUrl={getEffectiveSurfaceUrl(activeSurface)}
+          title={`Erase — ${activeSurface.name}`}
+          onApply={handleEraseApply}
+          onClose={() => setShowEraseModal(false)}
+        />
+      )}
       <div
         className={`sb-modal${isDragOver ? ' sb-modal--drag-over' : ''}`}
         onDragOver={handleDragOver}
@@ -770,6 +790,20 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                   Stitch Seams
                 </>
               )}
+            </button>
+
+            <button
+              className="sb-btn sb-btn--erase"
+              onClick={() => setShowEraseModal(true)}
+              disabled={!activeSurface || !(activeSurface.stitchedDataUrl || activeSurface.warpedDataUrl)}
+              title="Erase an object from the active surface using content-aware fill"
+            >
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                <path d="M10 3L3 10M3 10l3.5-.5L10 6M3 10l.5-3.5L7 3"
+                  stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M2 11h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              </svg>
+              Erase Object
             </button>
 
             <button

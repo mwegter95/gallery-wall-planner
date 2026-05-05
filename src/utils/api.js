@@ -178,6 +178,19 @@ export async function uploadWallImage(wallId, dataUrl) {
   return { ...data, url: `${url}?v=${Date.now()}` }
 }
 
+/**
+ * Upload the content-aware fill (inpaint) result for a wall.
+ * Stored as uploads/walls/{wallId}_inpaint.{ext} — separate from the original wall photo.
+ */
+export async function uploadWallInpaint(wallId, dataUrl) {
+  const data = await apiFetch(`/api/walls/${wallId}_inpaint/image`, {
+    method: 'POST',
+    body: JSON.stringify({ dataUrl }),
+  })
+  const url = data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url
+  return { ...data, url: `${url}?v=${Date.now()}` }
+}
+
 // ── Gallery: layouts ──────────────────────────────────────────────────────────
 export async function putLayout(wallId, name, pieces, paintLayerIds = []) {
   return apiFetch(`/api/layouts/${wallId}/${encodeURIComponent(name)}`, {

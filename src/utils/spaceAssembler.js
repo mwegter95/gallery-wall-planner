@@ -76,6 +76,7 @@ export function createSurfaceDef({ photoId = null, index = 0 } = {}) {
     },
     warpedDataUrl:   null,
     stitchedDataUrl: null,  // set by seamBlend.js; cleared on re-crop
+    inpaintDataUrl:  null,  // set by EraseModal (content-aware fill); stacks on top of stitchedDataUrl
     colorIdx:        index % SURFACE_COLORS.length,
     rotYDeg:         0,     // manual 3D rotation around Y axis (degrees)
     connections: {
@@ -98,6 +99,19 @@ export function createSurfaceDef({ photoId = null, index = 0 } = {}) {
  */
 export function createSurfaceLayout(name = 'Default') {
   return { name, pieces: [], paintLayerIds: [] }
+}
+
+/**
+ * Returns the highest-priority available image URL for a surface.
+ * Priority: inpaintDataUrl > stitchedDataUrl > warpedDataUrl
+ * @param {object} surface – SurfaceDef
+ * @returns {string|null}
+ */
+export function getEffectiveSurfaceUrl(surface) {
+  return surface?.inpaintDataUrl
+    || surface?.stitchedDataUrl
+    || surface?.warpedDataUrl
+    || null
 }
 
 /**
