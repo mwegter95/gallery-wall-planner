@@ -17,7 +17,11 @@ import { warpPerspectiveAsync } from '../utils/homography'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
-export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {} }) {
+const MAX_HISTORY = 50
+// Properties that count as "moveable" actions worth undo-ing
+const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
+
+export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {} }) {
   const [space, setSpace]                 = useState(() => existingSpace
     ? JSON.parse(JSON.stringify(existingSpace))
     : createSpace()
@@ -32,18 +36,83 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
+  // Undo / redo
+  const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
+  const historyRef   = useRef({ stack: [], index: -1, timer: null })
   const fileInputRef  = useRef(null)
   const warpQueueRef  = useRef(new Set())
 
   const activeSurface = space.surfaces.find(s => s.id === activeSurfaceId)
 
+  // ── History helpers ───────────────────────────────────────────────────────
+  // Initialize history once with current surfaces snapshot
+  useEffect(() => {
+    const h = historyRef.current
+    if (h.stack.length === 0) {
+      h.stack = [JSON.parse(JSON.stringify(space.surfaces))]
+      h.index = 0
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function recordHistory(surfaces) {
+    const h = historyRef.current
+    if (h.timer) clearTimeout(h.timer)
+    h.timer = setTimeout(() => {
+      h.timer = null
+      // Truncate any forward (redo) history, push new snapshot, cap at MAX_HISTORY
+      h.stack = [...h.stack.slice(0, h.index + 1), JSON.parse(JSON.stringify(surfaces))].slice(-MAX_HISTORY)
+      h.index = h.stack.length - 1
+      setCanUndo(h.index > 0)
+      setCanRedo(false)
+    }, 350)
+  }
+
+  function undo() {
+    const h = historyRef.current
+    // Flush any pending record so undo targets the most recent committed state
+    if (h.timer) { clearTimeout(h.timer); h.timer = null }
+    if (h.index <= 0) return
+    h.index--
+    const snapshot = h.stack[h.index]
+    setSpace(prev => ({ ...prev, surfaces: JSON.parse(JSON.stringify(snapshot)) }))
+    setCanUndo(h.index > 0)
+    setCanRedo(true)
+  }
+
+  function redo() {
+    const h = historyRef.current
+    if (h.timer) { clearTimeout(h.timer); h.timer = null }
+    if (h.index >= h.stack.length - 1) return
+    h.index++
+    const snapshot = h.stack[h.index]
+    setSpace(prev => ({ ...prev, surfaces: JSON.parse(JSON.stringify(snapshot)) }))
+    setCanUndo(true)
+    setCanRedo(h.index < h.stack.length - 1)
+  }
+
+  // Keyboard shortcuts: Ctrl+Z = undo, Ctrl+Y / Ctrl+Shift+Z = redo
+  useEffect(() => {
+    function onKey(e) {
+      if (!(e.ctrlKey || e.metaKey)) return
+      if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
+      else if (e.key === 'y' || (e.key === 'z' && e.shiftKey)) { e.preventDefault(); redo() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Space / photo mutations ───────────────────────────────────────────────
   const updateSurface = useCallback((surfaceId, update) => {
-    setSpace(prev => ({
-      ...prev,
-      surfaces: prev.surfaces.map(s => s.id === surfaceId ? { ...s, ...update } : s),
-    }))
-  }, [])
+    setSpace(prev => {
+      const newSurfaces = prev.surfaces.map(s => s.id === surfaceId ? { ...s, ...update } : s)
+      // Only push to history for spatial/size changes (not warp results, layout changes, etc.)
+      if (Object.keys(update).some(k => HISTORY_KEYS.has(k))) {
+        recordHistory(newSurfaces)
+      }
+      return { ...prev, surfaces: newSurfaces }
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const updatePhoto = useCallback((photoId, update) => {
     setSpace(prev => ({
@@ -192,6 +261,17 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     updateSurface(surfaceId, {
       layouts:      next,
       activeLayout: surface.activeLayout === name ? '' : surface.activeLayout,
+    })
+  }, [space.surfaces, updateSurface])
+
+  // Load a layout from the main app's allLayouts into this surface
+  const loadWallLayout = useCallback((surfaceId, name, layoutData) => {
+    const surface = space.surfaces.find(s => s.id === surfaceId)
+    if (!surface) return
+    const { pieces = [], paintLayerIds = [] } = layoutData
+    updateSurface(surfaceId, {
+      layouts:      { ...surface.layouts, [name]: { pieces, paintLayerIds } },
+      activeLayout: name,
     })
   }, [space.surfaces, updateSurface])
 
@@ -419,7 +499,38 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           {activeSurface.warpedDataUrl ? '↺ Re-crop on next preview' : 'Not yet warped'}
         </button>
 
-        {/* ── Layouts ─────────────────────────────────────────────── */}
+        {/* ── Wall layouts from main app ────────────────────────── */}
+        {(() => {
+          const wallLayouts = allLayouts[activeSurface.id] || {}
+          const names = Object.keys(wallLayouts)
+          if (names.length === 0) return null
+          return (
+            <div className="sb-wall-layouts">
+              <div className="sb-se-section-title">Wall Layouts</div>
+              <div className="sb-layout-list">
+                {names.map(name => {
+                  const data = wallLayouts[name]
+                  const pieces = Array.isArray(data) ? data : (data?.pieces || [])
+                  const isActive = name === activeSurface.activeLayout
+                  return (
+                    <div key={name} className={`sb-layout-row${isActive ? ' sb-layout-row--active' : ''}`}>
+                      <span className="sb-layout-row-name">{name}</span>
+                      <span className="sb-layout-row-count">{pieces.length}p</span>
+                      <div className="sb-layout-row-actions">
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          onClick={() => loadWallLayout(activeSurface.id, name, wallLayouts[name])}
+                        >{isActive ? '✓ Active' : 'Load'}</button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })()}
+
+        {/* ── Surface-local Layouts ────────────────────────────── */}
         <div className="sb-se-section-title">Layouts</div>
 
         {/* Save / create layout */}
@@ -577,6 +688,31 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               style={{ display: 'none' }}
               onChange={handleFileChange}
             />
+
+            {/* Undo / Redo */}
+            <button
+              className="sb-btn sb-btn--ghost sb-btn--icon"
+              onClick={undo}
+              disabled={!canUndo}
+              title="Undo (Ctrl+Z)"
+            >
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                <path d="M2 5.5C2 3.57 3.57 2 5.5 2c1.2 0 2.27.6 2.92 1.52L9.5 5H7v1.5h4V2.5H9.5v1.8L8.42 3.08A4.5 4.5 0 1 0 10 8.5H8.38A3 3 0 1 1 5.5 3.5c.97 0 1.83.46 2.38 1.17"
+                  stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              </svg>
+            </button>
+            <button
+              className="sb-btn sb-btn--ghost sb-btn--icon"
+              onClick={redo}
+              disabled={!canRedo}
+              title="Redo (Ctrl+Y)"
+            >
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                <path d="M11 5.5C11 3.57 9.43 2 7.5 2c-1.2 0-2.27.6-2.92 1.52L3.5 5H6v1.5H2V2.5h1.5v1.8l1.08-1.22A4.5 4.5 0 1 1 3 8.5h1.62A3 3 0 1 0 7.5 3.5c-.97 0-1.83.46-2.38 1.17"
+                  stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              </svg>
+            </button>
+
             <button className="sb-btn sb-btn--ghost" onClick={handleAddPhotoClick}>
               <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
                 <rect x="1" y="3" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>

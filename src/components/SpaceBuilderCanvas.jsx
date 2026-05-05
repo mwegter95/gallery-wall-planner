@@ -393,10 +393,11 @@ export default function SpaceBuilderCanvas({
       let needsUpdate = false
 
       // Continuous orbit joystick — rotates around the center point
+      // ny is inverted: joystick-up (ny < 0) should move camera higher → phi decreases
       const joy = joystickRef.current
       if (joy.active && (joy.nx !== 0 || joy.ny !== 0)) {
         orbit.theta -= joy.nx * JOY_SPEED
-        orbit.phi   += joy.ny * JOY_SPEED
+        orbit.phi   -= joy.ny * JOY_SPEED
         needsUpdate = true
       }
 
@@ -573,7 +574,7 @@ export default function SpaceBuilderCanvas({
         </div>
       )}
 
-      {/* ── FOV presets — top-center ─────────────────────────────────── */}
+      {/* ── FOV presets — top-left ───────────────────────────────────── */}
       <div className="sbc-fov-bar">
         {FOV_PRESETS.map(p => (
           <button
@@ -585,66 +586,67 @@ export default function SpaceBuilderCanvas({
         ))}
       </div>
 
-      {/* ── Move/Pan joystick — top-left ─────────────────────────────── */}
-      <div className="sbc-joystick-wrapper sbc-joystick-wrapper--left">
-        <div
-          className="sbc-joystick sbc-joystick--pan"
-          style={{ '--jr': `${JOY_RADIUS}px` }}
-          onPointerDown={handlePanJoyDown}
-          onPointerMove={handlePanJoyMove}
-          onPointerUp={handlePanJoyUp}
-          onPointerLeave={handlePanJoyUp}
-          title="Drag to pan / move view"
-        >
-          {/* Flat crosshair arrows */}
-          <svg className="sbc-joystick-arrows" viewBox="0 0 72 72" fill="none">
-            <path d="M36 13l-7 11h14l-7-11Z" fill="currentColor" opacity=".55"/>
-            <path d="M36 59l-7-11h14l-7 11Z" fill="currentColor" opacity=".55"/>
-            <path d="M13 36l11-7v14l-11-7Z" fill="currentColor" opacity=".55"/>
-            <path d="M59 36l-11-7v14l11 7Z" fill="currentColor" opacity=".55"/>
-            <line x1="36" y1="24" x2="36" y2="48" stroke="currentColor" strokeWidth="1" opacity=".2"/>
-            <line x1="24" y1="36" x2="48" y2="36" stroke="currentColor" strokeWidth="1" opacity=".2"/>
-          </svg>
+      {/* ── Joystick group — centered at top ─────────────────────────── */}
+      <div className="sbc-joystick-group">
+        {/* Move/Pan joystick */}
+        <div className="sbc-joystick-wrapper">
           <div
-            className="sbc-joystick-thumb"
-            style={{
-              '--jt': `${JOY_THUMB}px`,
-              transform: `translate(calc(-50% + ${panJoyPos.x}px), calc(-50% + ${panJoyPos.y}px))`,
-            }}
-          />
+            className="sbc-joystick sbc-joystick--pan"
+            style={{ '--jr': `${JOY_RADIUS}px` }}
+            onPointerDown={handlePanJoyDown}
+            onPointerMove={handlePanJoyMove}
+            onPointerUp={handlePanJoyUp}
+            onPointerLeave={handlePanJoyUp}
+            title="Drag to pan / move view"
+          >
+            <svg className="sbc-joystick-arrows" viewBox="0 0 72 72" fill="none">
+              <path d="M36 13l-7 11h14l-7-11Z" fill="currentColor" opacity=".55"/>
+              <path d="M36 59l-7-11h14l-7 11Z" fill="currentColor" opacity=".55"/>
+              <path d="M13 36l11-7v14l-11-7Z" fill="currentColor" opacity=".55"/>
+              <path d="M59 36l-11-7v14l11 7Z" fill="currentColor" opacity=".55"/>
+              <line x1="36" y1="24" x2="36" y2="48" stroke="currentColor" strokeWidth="1" opacity=".2"/>
+              <line x1="24" y1="36" x2="48" y2="36" stroke="currentColor" strokeWidth="1" opacity=".2"/>
+            </svg>
+            <div
+              className="sbc-joystick-thumb"
+              style={{
+                '--jt': `${JOY_THUMB}px`,
+                transform: `translate(calc(-50% + ${panJoyPos.x}px), calc(-50% + ${panJoyPos.y}px))`,
+              }}
+            />
+          </div>
+          <div className="sbc-joystick-label">Move</div>
         </div>
-        <div className="sbc-joystick-label">Move</div>
-      </div>
 
-      {/* ── Orbit joystick — top-right ────────────────────────────────── */}
-      <div className="sbc-joystick-wrapper sbc-joystick-wrapper--right">
-        <div
-          className="sbc-joystick sbc-joystick--orbit"
-          style={{ '--jr': `${JOY_RADIUS}px` }}
-          onPointerDown={handleJoyDown}
-          onPointerMove={handleJoyMove}
-          onPointerUp={handleJoyUp}
-          onPointerLeave={handleJoyUp}
-          title="Drag to orbit / rotate view"
-        >
-          {/* Globe — latitude ellipses + meridian arcs (🌐 style) */}
-          <svg className="sbc-joystick-globe" viewBox="0 0 72 72" fill="none">
-            <circle cx="36" cy="36" r="26" stroke="currentColor" strokeWidth="1.5" opacity=".65"/>
-            <ellipse cx="36" cy="36" rx="26" ry="7.5" stroke="currentColor" strokeWidth="1" opacity=".5"/>
-            <ellipse cx="36" cy="25" rx="19" ry="5.5" stroke="currentColor" strokeWidth="1" opacity=".4"/>
-            <ellipse cx="36" cy="47" rx="19" ry="5.5" stroke="currentColor" strokeWidth="1" opacity=".4"/>
-            <ellipse cx="36" cy="36" rx="7.5" ry="26" stroke="currentColor" strokeWidth="1" opacity=".5"/>
-            <ellipse cx="36" cy="36" rx="7.5" ry="26" stroke="currentColor" strokeWidth="1" opacity=".35" transform="rotate(60 36 36)"/>
-          </svg>
+        {/* Orbit joystick */}
+        <div className="sbc-joystick-wrapper">
           <div
-            className="sbc-joystick-thumb"
-            style={{
-              '--jt': `${JOY_THUMB}px`,
-              transform: `translate(calc(-50% + ${joyPos.x}px), calc(-50% + ${joyPos.y}px))`,
-            }}
-          />
+            className="sbc-joystick sbc-joystick--orbit"
+            style={{ '--jr': `${JOY_RADIUS}px` }}
+            onPointerDown={handleJoyDown}
+            onPointerMove={handleJoyMove}
+            onPointerUp={handleJoyUp}
+            onPointerLeave={handleJoyUp}
+            title="Drag to orbit / rotate view"
+          >
+            <svg className="sbc-joystick-globe" viewBox="0 0 72 72" fill="none">
+              <circle cx="36" cy="36" r="26" stroke="currentColor" strokeWidth="1.5" opacity=".65"/>
+              <ellipse cx="36" cy="36" rx="26" ry="7.5" stroke="currentColor" strokeWidth="1" opacity=".5"/>
+              <ellipse cx="36" cy="25" rx="19" ry="5.5" stroke="currentColor" strokeWidth="1" opacity=".4"/>
+              <ellipse cx="36" cy="47" rx="19" ry="5.5" stroke="currentColor" strokeWidth="1" opacity=".4"/>
+              <ellipse cx="36" cy="36" rx="7.5" ry="26" stroke="currentColor" strokeWidth="1" opacity=".5"/>
+              <ellipse cx="36" cy="36" rx="7.5" ry="26" stroke="currentColor" strokeWidth="1" opacity=".35" transform="rotate(60 36 36)"/>
+            </svg>
+            <div
+              className="sbc-joystick-thumb"
+              style={{
+                '--jt': `${JOY_THUMB}px`,
+                transform: `translate(calc(-50% + ${joyPos.x}px), calc(-50% + ${joyPos.y}px))`,
+              }}
+            />
+          </div>
+          <div className="sbc-joystick-label">Orbit</div>
         </div>
-        <div className="sbc-joystick-label">Orbit</div>
       </div>
 
       <div className="sbc-3d-legend">

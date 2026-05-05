@@ -5186,6 +5186,7 @@ kbd {
 }
 .sb-btn--ghost { background: #1a2a40; border-color: #2a4060; color: #7ab8ff; }
 .sb-btn--ghost:hover { background: #1f3350; border-color: #4a9eff; color: #a8d4ff; }
+.sb-btn--icon { padding: 5px 7px; }   /* tighter padding for icon-only buttons */
 .sb-btn--preview {
   background: linear-gradient(135deg, #1a3a60 0%, #0d2240 100%);
   border-color: #2a5080;
@@ -5573,6 +5574,12 @@ kbd {
 .sb-layout-row-actions { display: flex; gap: 4px; }
 .sb-layout-del-btn { color: #c87070 !important; }
 
+/* ── Wall layouts section (layouts from main app) ──────────────────────────── */
+.sb-wall-layouts { margin-bottom: 2px; }
+.sb-wall-layouts .sb-layout-row { background: rgba(196,135,90,0.07); border-color: rgba(196,135,90,0.18); }
+.sb-wall-layouts .sb-layout-row--active { background: rgba(196,135,90,0.15); border-color: rgba(196,135,90,0.4); }
+.sb-wall-layouts .sb-layout-row-name { color: #e8c89a; }
+
 /* ── Surface panel: Pieces section ─────────────────────────────────────────── */
 .sb-pieces-section { margin-top: 8px; }
 .sb-pieces-header {
@@ -5791,12 +5798,11 @@ kbd {
   letter-spacing: .04em;
 }
 
-/* ── FOV preset bar — top-center of 3D viewport ───────────────────────── */
+/* ── FOV preset bar — top-left of 3D viewport ─────────────────────────── */
 .sbc-fov-bar {
   position: absolute;
   top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 12px;
   display: flex;
   gap: 4px;
   z-index: 20;
@@ -5820,18 +5826,23 @@ kbd {
   color: #4a9eff;
 }
 
-/* ── Joystick wrappers — top-left (Move) and top-right (Orbit) ─────────── */
-.sbc-joystick-wrapper {
+/* ── Joystick group — both joysticks centered at top ──────────────────── */
+.sbc-joystick-group {
   position: absolute;
   top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  z-index: 20;
+}
+.sbc-joystick-wrapper {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 5px;
-  z-index: 20;
 }
-.sbc-joystick-wrapper--left  { left: 12px; }
-.sbc-joystick-wrapper--right { right: 12px; }
 
 .sbc-joystick-label {
   font-size: 10px;
