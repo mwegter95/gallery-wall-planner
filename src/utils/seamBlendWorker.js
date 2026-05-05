@@ -16,22 +16,21 @@ let _cv = null
 async function loadCV() {
   if (_cv) return _cv
   try {
-    const { default: Cv } = await import('@techstark/opencv-js')
-    // Race: either WASM is already initialized, or wait up to 45 s
-    await Promise.race([
-      new Promise(resolve => {
-        if (typeof Cv.Mat !== 'undefined') resolve()
-        else Cv.onRuntimeInitialized = resolve
-      }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OpenCV init timeout')), 45_000)
-      ),
-    ])
-    _cv = Cv
+    // @techstark/opencv-js exports a Promise that resolves to the cv object.
+    // The module.exports IS the Promise — we must await it directly.
+    const mod = await import('@techstark/opencv-js')
+    // The default export (or the module itself when bundled as CJS/UMD) is a Promise
+    const raw = mod.default ?? mod
+    const cv  = typeof raw.then === 'function' ? await raw : raw
+    // Sanity-check: cv.Mat should now exist
+    if (typeof cv.Mat === 'undefined') {
+      throw new Error('cv.Mat not found after await — unexpected module shape')
+    }
+    _cv = cv
     return _cv
   } catch (err) {
     console.warn('[seamBlendWorker] OpenCV load failed:', err.message)
-    return null   // caller falls back to colour-only mode
+    return null
   }
 }
 

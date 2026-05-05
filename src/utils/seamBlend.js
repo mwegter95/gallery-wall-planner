@@ -30,11 +30,10 @@ async function getCv() {
   if (_cvPromise) return _cvPromise
 
   _cvPromise = (async () => {
-    const { default: cv } = await import('@techstark/opencv-js')
-    await new Promise(resolve => {
-      if (cv.Mat !== undefined) resolve()
-      else cv.onRuntimeInitialized = resolve
-    })
+    const mod = await import('@techstark/opencv-js')
+    const raw = mod.default ?? mod
+    const cv  = typeof raw.then === 'function' ? await raw : raw
+    if (typeof cv.Mat === 'undefined') throw new Error('cv.Mat not found')
     _cv = cv
     return cv
   })()
