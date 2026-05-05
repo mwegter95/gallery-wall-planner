@@ -323,8 +323,18 @@ export default function App() {
   const activeWall      = walls[activeWallId] || Object.values(walls)[0] || null
   const wallLayouts     = allLayouts[activeWallId] || {}
   const activeWallImage = activeWall?.imageUrl || null
-  // Effective image = inpaint result (if any) stacked on top of the original photo
-  const activeWallEffectiveImage = activeWall?.inpaintDataUrl || activeWall?.imageUrl || null
+  // Effective image = last erase result (if any) on top of original photo.
+  // Legacy walls may have a single inpaintDataUrl instead of the array — treat it as history[0].
+  const activeWallEraseHistory = activeWall
+    ? (activeWall.eraseHistory?.length > 0
+        ? activeWall.eraseHistory
+        : activeWall.inpaintDataUrl
+          ? [{ id: 'legacy', createdAt: 0, dataUrl: activeWall.inpaintDataUrl }]
+          : [])
+    : []
+  const activeWallEffectiveImage =
+    (activeWallEraseHistory.length > 0 ? activeWallEraseHistory[activeWallEraseHistory.length - 1].dataUrl : null)
+    || activeWall?.imageUrl || null
 
   /* Paint layers for active wall */
   const activePaintLayers = Object.values(wallPaintLayers[activeWallId] || {})
@@ -946,25 +956,32 @@ export default function App() {
   // ── Wall erase (content-aware fill) ──────────────────────────────────────
   const handleWallEraseApply = useCallback(async (dataUrl) => {
     if (!activeWallId) return
-    // Upload the inpaint result as a separate file (wallId_inpaint.ext) so we don't
-    // overwrite the original calibrated wall photo.
+    const eraseEntry = { id: genId(), createdAt: Date.now(), dataUrl }
+    // Try to upload so the URL persists across sessions
     try {
       const { url } = await api.uploadWallInpaint(activeWallId, dataUrl)
-      setWalls(prev => {
-        const updated = { ...prev[activeWallId], inpaintDataUrl: url }
-        api.putWall(updated).catch(console.error)
-        return { ...prev, [activeWallId]: updated }
-      })
-    } catch (err) {
-      // Fallback: store data URL inline if upload fails (e.g. local dev without backend)
-      console.warn('[App] Wall inpaint upload failed, storing inline:', err)
-      setWalls(prev => {
-        const updated = { ...prev[activeWallId], inpaintDataUrl: dataUrl }
-        api.putWall(updated).catch(console.error)
-        return { ...prev, [activeWallId]: updated }
-      })
+      eraseEntry.dataUrl = url
+    } catch {
+      // Keep inline data URL on upload failure (local dev)
     }
+    setWalls(prev => {
+      const wall     = prev[activeWallId] || {}
+      const history  = [...(wall.eraseHistory || []), eraseEntry]
+      const updated  = { ...wall, eraseHistory: history }
+      api.putWall(updated).catch(console.error)
+      return { ...prev, [activeWallId]: updated }
+    })
   }, [activeWallId])
+
+  const handleRemoveErase = useCallback((wallId, eraseId) => {
+    setWalls(prev => {
+      const wall    = prev[wallId] || {}
+      const history = (wall.eraseHistory || []).filter(e => e.id !== eraseId)
+      const updated = { ...wall, eraseHistory: history }
+      api.putWall(updated).catch(console.error)
+      return { ...prev, [wallId]: updated }
+    })
+  }, [])
 
   const handlePaintApply = useCallback((color, maskDataUrl) => {
     if (!activeWallId) return
@@ -1310,7 +1327,7 @@ export default function App() {
                 <path d="M10.5 3.5L3.5 10.5M3.5 10.5l3-.5 4-3.5M3.5 10.5l.5-3L7.5 3.5"
                   stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M2.5 12h3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/>
-                {activeWall?.inpaintDataUrl && <circle cx="12" cy="12" r="1.5" fill="currentColor"/>}
+                {activeWallEraseHistory.length > 0 && <circle cx="12" cy="12" r="1.5" fill="currentColor"/>}
               </svg>
               <span className="btn-label"> Erase Object</span>
             </button>
@@ -1380,6 +1397,9 @@ export default function App() {
           onEditPaintLayer={(layerId) => { setEditingLayerId(layerId); setShowPaintModal(true) }}
           onNewPaintLayer={() => { if (!activeWallImage) return; setEditingLayerId(null); setShowPaintModal(true) }}
           hasWallImage={Boolean(activeWallImage)}
+          eraseHistory={activeWallEraseHistory}
+          onRemoveErase={(eraseId) => handleRemoveErase(activeWallId, eraseId)}
+          onOpenErase={() => { if (activeWallEffectiveImage) setShowEraseWall(true) }}
           library={library}
           onAddFromLibrary={addPieceFromLibrary}
           onDeleteFromLibrary={deleteFromLibrary}

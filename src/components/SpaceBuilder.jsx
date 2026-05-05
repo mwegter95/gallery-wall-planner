@@ -4,18 +4,16 @@
  * Layout:
  *   Left (65%):  SpaceBuilderCanvas — photos + surface warp handles
  *   Right (35%): Surface panel — name, W×H, connections, z-order, delete
- *   Header:      Space name, Add Photo, Preview 3D, Save, Close
+ *   Header:      Space name, Add Photo, Stitch Seams, Erase Object, Save, Close
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
-import * as THREE from 'three'
 import SpaceBuilderCanvas from './SpaceBuilderCanvas'
 import EraseModal from './EraseModal'
 import {
   createSpace, createPhoto, createSurfaceDef, genId,
-  assembleSurfaces, warpSurface, createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
+  createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
   getEffectiveSurfaceUrl,
 } from '../utils/spaceAssembler'
-import { warpPerspectiveAsync } from '../utils/homography'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -29,10 +27,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     : createSpace()
   )
   const [activeSurfaceId, setActiveSurfaceId] = useState(null)
-  const [showPreview,     setShowPreview]     = useState(false)
-  const [previewData,     setPreviewData]     = useState(null) // { placements, warpedSurfaces }
-  const [isWarping,       setIsWarping]       = useState(false)
-  const [warpProgress,    setWarpProgress]    = useState(0)
   const [isStitching,     setIsStitching]     = useState(false)
   const [stitchProgress,  setStitchProgress]  = useState(0)
   const [stitchStatus,    setStitchStatus]    = useState('')
@@ -305,46 +299,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       },
     })
   }, [space.surfaces, updateSurface])
-
-  // ── Warp + Preview ────────────────────────────────────────────────────────
-  const handlePreview = async () => {
-    if (!space.surfaces.length) return
-    setIsWarping(true)
-    setWarpProgress(0)
-    try {
-      const total   = space.surfaces.filter(s => !s.warpedDataUrl).length
-      let   done    = 0
-
-      const warpedSurfaces = await Promise.all(
-        space.surfaces.map(async surface => {
-          if (surface.warpedDataUrl) return surface
-          const photo = space.photos.find(p => p.id === surface.photoId)
-          if (!photo) return surface
-          try {
-            const url = await warpSurface(
-              surface, photo.dataUrl, photo.displayW, photo.displayH,
-              warpPerspectiveAsync
-            )
-            done++
-            setWarpProgress(Math.round(done / Math.max(1, total) * 100))
-            return { ...surface, warpedDataUrl: url, stitchedDataUrl: null }
-          } catch {
-            return surface
-          }
-        })
-      )
-
-      // Persist warped URLs into space so they survive re-preview
-      setSpace(prev => ({ ...prev, surfaces: warpedSurfaces }))
-
-      const placements = assembleSurfaces(warpedSurfaces)
-      setPreviewData({ placements, warpedSurfaces })
-      setShowPreview(true)
-    } finally {
-      setIsWarping(false)
-      setWarpProgress(0)
-    }
-  }
 
   // ── Stitch Seams ──────────────────────────────────────────────────────────
   const handleStitch = async () => {
@@ -687,19 +641,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     )
   }
 
-  // ── 3D Preview overlay ────────────────────────────────────────────────────
-  if (showPreview && previewData) {
-    return (
-      <div className="room-viewer-overlay">
-        <SpacePreviewViewer
-          placements={previewData.placements}
-          spaceName={space.name}
-          onClose={() => setShowPreview(false)}
-        />
-      </div>
-    )
-  }
-
   return (
     <div className="sb-backdrop">
       {showEraseModal && activeSurface && (
@@ -807,27 +748,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
             </button>
 
             <button
-              className={`sb-btn sb-btn--preview${isWarping ? ' sb-btn--loading' : ''}`}
-              onClick={handlePreview}
-              disabled={isWarping || space.surfaces.length === 0}
-            >
-              {isWarping ? (
-                <>
-                  <span className="btn-spinner" />
-                  {warpProgress > 0 ? `${warpProgress}%` : 'Warping…'}
-                </>
-              ) : (
-                <>
-                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                    <path d="M6.5 1L12 4.3v4.4L6.5 12 1 8.7V4.3L6.5 1Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
-                    <path d="M6.5 1v11M1 4.3l5.5 3.4 5.5-3.4" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" opacity=".6"/>
-                  </svg>
-                  Preview 3D
-                </>
-              )}
-            </button>
-
-            <button
               className={`sb-btn sb-btn--save${isSaving ? ' sb-btn--loading' : ''}`}
               onClick={handleSave}
               disabled={isSaving || !space.name.trim() || space.surfaces.length === 0}
@@ -918,259 +838,4 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     </div>
   )
 }
-
-// ── Inline 3D preview — orbit camera, click-to-select, per-surface sliders ──
-function SpacePreviewViewer({ placements, spaceName, onClose }) {
-  const mountRef  = useRef(null)
-  const [localPlacements, setLocalPlacements] = useState(() => placements.map(p => ({ ...p })))
-  const [selectedId, setSelectedId] = useState(null)
-
-  // Three.js handles kept in refs so effects can access without re-running
-  const sceneRef    = useRef(null)
-  const cameraRef   = useRef(null)
-  const rendererRef = useRef(null)
-  const meshMapRef  = useRef({})   // { [surfaceId]: { mesh, frame } }
-  const rafRef      = useRef(null)
-  const orbitRef    = useRef({
-    phi: Math.PI / 2.5, theta: 0.3, radius: 5,
-    center: [0, 0, 0],
-    isDragging: false, hadDrag: false, lastX: 0, lastY: 0,
-  })
-
-  const applyOrbit = useCallback(() => {
-    const cam = cameraRef.current
-    if (!cam) return
-    const o = orbitRef.current
-    o.phi = Math.max(0.05, Math.min(Math.PI - 0.05, o.phi))
-    const [cx, cy, cz] = o.center
-    cam.position.set(
-      cx + o.radius * Math.sin(o.phi) * Math.sin(o.theta),
-      cy + o.radius * Math.cos(o.phi),
-      cz + o.radius * Math.sin(o.phi) * Math.cos(o.theta),
-    )
-    cam.lookAt(cx, cy, cz)
-  }, [])
-
-  // ── Scene init (once) ─────────────────────────────────────────────────────
-  useEffect(() => {
-    const mount = mountRef.current
-    if (!mount) return
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    renderer.setSize(mount.clientWidth || 900, mount.clientHeight || 650)
-    renderer.outputColorSpace = THREE.SRGBColorSpace
-    mount.appendChild(renderer.domElement)
-    rendererRef.current = renderer
-
-    const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x090c10)
-    sceneRef.current = scene
-
-    const camera = new THREE.PerspectiveCamera(
-      60, (mount.clientWidth || 900) / (mount.clientHeight || 650), 0.01, 500
-    )
-    cameraRef.current = camera
-
-    const ro = new ResizeObserver(() => {
-      camera.aspect = mount.clientWidth / mount.clientHeight
-      camera.updateProjectionMatrix()
-      renderer.setSize(mount.clientWidth, mount.clientHeight)
-    })
-    ro.observe(mount)
-
-    const o = orbitRef.current
-    const onDown = e => {
-      if (e.button !== 0) return
-      o.isDragging = true; o.hadDrag = false
-      o.lastX = e.clientX; o.lastY = e.clientY
-    }
-    const onMove = e => {
-      if (!o.isDragging) return
-      const dx = e.clientX - o.lastX
-      const dy = e.clientY - o.lastY
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) o.hadDrag = true
-      o.theta -= dx * 0.005
-      o.phi   += dy * 0.005
-      o.lastX = e.clientX; o.lastY = e.clientY
-      applyOrbit()
-    }
-    const onUp = () => { o.isDragging = false }
-    const onWheel = e => {
-      o.radius = Math.max(0.3, Math.min(80, o.radius * (1 + e.deltaY * 0.001)))
-      applyOrbit()
-    }
-    const onClickCanvas = e => {
-      if (o.hadDrag) return
-      const rect = renderer.domElement.getBoundingClientRect()
-      const mouse = new THREE.Vector2(
-        ((e.clientX - rect.left)  / rect.width)  * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1,
-      )
-      const ray = new THREE.Raycaster()
-      ray.setFromCamera(mouse, camera)
-      const meshes = Object.values(meshMapRef.current).map(v => v.mesh).filter(Boolean)
-      const hits = ray.intersectObjects(meshes)
-      setSelectedId(hits.length ? hits[0].object.userData.surfaceId : null)
-    }
-
-    const canvas = renderer.domElement
-    canvas.addEventListener('mousedown', onDown)
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    canvas.addEventListener('wheel', onWheel, { passive: true })
-    canvas.addEventListener('click', onClickCanvas)
-
-    const animate = () => { rafRef.current = requestAnimationFrame(animate); renderer.render(scene, camera) }
-    animate()
-
-    return () => {
-      cancelAnimationFrame(rafRef.current)
-      ro.disconnect()
-      canvas.removeEventListener('mousedown', onDown)
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      canvas.removeEventListener('wheel', onWheel)
-      canvas.removeEventListener('click', onClickCanvas)
-      scene.traverse(obj => {
-        if (obj.geometry) obj.geometry.dispose()
-        if (obj.material?.map) obj.material.map.dispose()
-        if (obj.material) obj.material.dispose()
-      })
-      renderer.dispose()
-      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement)
-    }
-  }, [applyOrbit])
-
-  // ── Rebuild meshes when localPlacements changes ───────────────────────────
-  useEffect(() => {
-    const scene = sceneRef.current
-    if (!scene) return
-
-    // Remove old surface objects
-    Object.values(meshMapRef.current).forEach(({ mesh, frame }) => {
-      scene.remove(mesh); scene.remove(frame)
-    })
-    meshMapRef.current = {}
-
-    const texLoader = new THREE.TextureLoader()
-    localPlacements.forEach(p => {
-      const geo = new THREE.PlaneGeometry(p.wM, p.hM)
-      let mat
-      if (p.warpedDataUrl) {
-        const tex = texLoader.load(p.warpedDataUrl)
-        tex.colorSpace = THREE.SRGBColorSpace
-        mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
-      } else {
-        const hex = parseInt((SURFACE_COLORS[p.colorIdx ?? 0] || '#4a9eff').replace('#', ''), 16)
-        mat = new THREE.MeshBasicMaterial({ color: hex, side: THREE.DoubleSide, opacity: 0.7, transparent: true })
-      }
-      const mesh = new THREE.Mesh(geo, mat)
-      mesh.position.set(...p.position)
-      mesh.rotation.set(p.rotX ?? 0, p.rotY ?? 0, 0)
-      mesh.userData.surfaceId = p.surfaceId
-      scene.add(mesh)
-
-      const edgesGeo = new THREE.EdgesGeometry(geo)
-      const lineMat  = new THREE.LineBasicMaterial({ color: 0x3a5566 })
-      const frame    = new THREE.LineSegments(edgesGeo, lineMat)
-      frame.position.copy(mesh.position)
-      frame.rotation.copy(mesh.rotation)
-      scene.add(frame)
-      meshMapRef.current[p.surfaceId] = { mesh, frame }
-    })
-
-    // Fit orbit
-    if (localPlacements.length) {
-      const cx = localPlacements.reduce((s, p) => s + p.position[0], 0) / localPlacements.length
-      const cy = localPlacements.reduce((s, p) => s + p.position[1], 0) / localPlacements.length
-      const cz = localPlacements.reduce((s, p) => s + p.position[2], 0) / localPlacements.length
-      const maxDim = Math.max(...localPlacements.flatMap(p => [p.wM, p.hM]))
-      const o = orbitRef.current
-      o.center  = [cx, cy, cz]
-      o.radius  = maxDim * 2.8
-      applyOrbit()
-    }
-  }, [localPlacements, applyOrbit])
-
-  // ── Highlight selected surface ────────────────────────────────────────────
-  useEffect(() => {
-    Object.entries(meshMapRef.current).forEach(([id, { frame }]) => {
-      frame?.material?.color?.set(id === selectedId ? 0xffffff : 0x3a5566)
-    })
-  }, [selectedId])
-
-  // ── Helpers for selected panel ────────────────────────────────────────────
-  const selectedP = localPlacements.find(p => p.surfaceId === selectedId)
-
-  const updateSelPos = (axis, val) => {
-    const idx = { x: 0, y: 1, z: 2 }[axis]
-    setLocalPlacements(prev => prev.map(p => {
-      if (p.surfaceId !== selectedId) return p
-      const pos = [...p.position]; pos[idx] = +val
-      return { ...p, position: pos }
-    }))
-  }
-  const updateSelRot = (key, deg) =>
-    setLocalPlacements(prev => prev.map(p =>
-      p.surfaceId !== selectedId ? p : { ...p, [key]: +deg * Math.PI / 180 }
-    ))
-
-  return (
-    <div className="room-viewer">
-      <div ref={mountRef} className="room-viewer__canvas" />
-      <div className="room-viewer__hud">
-        <div className="room-viewer__hud-top">
-          <button className="room-viewer__close-btn" onClick={onClose}>
-            <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-              <path d="M1 1l9 9M10 1L1 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-            </svg>
-            Back to Builder
-          </button>
-          <span className="room-viewer__room-name">{spaceName} — 3D Preview</span>
-        </div>
-
-        {selectedP ? (
-          <div className="spv-sel-panel">
-            <div className="spv-sel-header">
-              <span className="spv-sel-name" style={{ color: SURFACE_COLORS[selectedP.colorIdx ?? 0] }}>
-                {selectedP.name}
-              </span>
-              <button className="spv-sel-close" onClick={() => setSelectedId(null)}>✕</button>
-            </div>
-            <div className="spv-sel-fields">
-              {[['X', 'x', -20, 20, selectedP.position[0]],
-                ['Y', 'y', -10, 10, selectedP.position[1]],
-                ['Z', 'z', -20, 20, selectedP.position[2]]].map(([label, axis, min, max, val]) => (
-                <label key={axis} className="spv-sel-field">
-                  <span className="spv-sel-fl">{label}</span>
-                  <span className="spv-sel-fv">{(+val).toFixed(2)}m</span>
-                  <input type="range" min={min} max={max} step="0.02" value={val}
-                    onChange={e => updateSelPos(axis, e.target.value)} />
-                </label>
-              ))}
-              <label className="spv-sel-field">
-                <span className="spv-sel-fl">Rotate Y</span>
-                <span className="spv-sel-fv">{Math.round((selectedP.rotY ?? 0) * 180 / Math.PI)}°</span>
-                <input type="range" min="-180" max="180" step="1"
-                  value={Math.round((selectedP.rotY ?? 0) * 180 / Math.PI)}
-                  onChange={e => updateSelRot('rotY', e.target.value)} />
-              </label>
-              <label className="spv-sel-field">
-                <span className="spv-sel-fl">Tilt X</span>
-                <span className="spv-sel-fv">{Math.round((selectedP.rotX ?? 0) * 180 / Math.PI)}°</span>
-                <input type="range" min="-90" max="90" step="1"
-                  value={Math.round((selectedP.rotX ?? 0) * 180 / Math.PI)}
-                  onChange={e => updateSelRot('rotX', e.target.value)} />
-              </label>
-            </div>
-          </div>
-        ) : (
-          <div className="room-viewer__tip">Drag to orbit · Scroll to zoom · Click a surface to move it</div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 

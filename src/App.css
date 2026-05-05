@@ -6269,3 +6269,28 @@ kbd {
 .erase-status--done  { color: #70e090; }
 .erase-status--error { color: #ff7070; }
 
+/* ── Erase history thumbnail in Sidebar ─────────────────────────────────── */
+.erase-hist-thumb {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.paint-layer-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.paint-layer-date {
+  font-size: 9px;
+  color: rgba(255,255,255,0.3);
+  letter-spacing: 0.02em;
+}
+

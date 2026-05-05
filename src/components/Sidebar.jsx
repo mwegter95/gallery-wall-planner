@@ -13,6 +13,7 @@ export default function Sidebar({
   hasUnsavedChanges = false, onDiscardChanges,
   paintLayers = [], onTogglePaintLayer, onDeletePaintLayer, onRenamePaintLayer,
   onEditPaintLayer, onNewPaintLayer, hasWallImage = false,
+  eraseHistory = [], onRemoveErase, onOpenErase,
 }) {
   const [layoutName,     setLayoutName]     = useState('')
   const [saveError,      setSaveError]      = useState('')
@@ -78,6 +79,13 @@ export default function Sidebar({
         >
           Paint
           {paintLayers.some(l => l.visible) && <span className="paint-active-dot" />}
+        </button>
+        <button
+          className={`tab-btn ${section === 'erase' ? 'active' : ''}`}
+          onClick={() => setSection('erase')}
+        >
+          Erase
+          {eraseHistory.length > 0 && <span className="count-badge">{eraseHistory.length}</span>}
         </button>
         <button
           className={`tab-btn ${section === 'settings' ? 'active' : ''}`}
@@ -436,6 +444,74 @@ export default function Sidebar({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ── ERASE tab ──────────────────────────────── */}
+      {section === 'erase' && (
+        <div className="sidebar-section">
+          <div className="sidebar-header">
+            <span className="section-title">Erase History</span>
+            <button
+              className="add-piece-btn"
+              onClick={onOpenErase}
+              disabled={!hasWallImage}
+              title={hasWallImage ? 'Erase an object from this wall' : 'Add a photo to this wall first'}
+            >
+              + New Erase
+            </button>
+          </div>
+
+          {eraseHistory.length === 0 ? (
+            <div className="paint-empty-state">
+              <p>No erases yet.</p>
+              <p style={{ marginTop: 6, fontSize: 11 }}>
+                Use <strong>Erase Object</strong> in the header to remove objects from the wall photo using content-aware fill.
+                Each erase is saved here and can be removed to restore the wall.
+              </p>
+            </div>
+          ) : (
+            <div className="paint-layer-list">
+              {eraseHistory.map((entry, idx) => (
+                <div key={entry.id} className="paint-layer-row">
+                  {/* Thumbnail */}
+                  <div className="erase-hist-thumb">
+                    <img
+                      src={entry.dataUrl}
+                      alt={`Erase ${idx + 1}`}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 3 }}
+                    />
+                  </div>
+                  <div className="paint-layer-meta">
+                    <span className="paint-layer-name">
+                      Erase {idx + 1}
+                      {idx === eraseHistory.length - 1 && (
+                        <span style={{ marginLeft: 6, fontSize: 9, color: '#70e090', fontWeight: 700, letterSpacing: '0.04em' }}>
+                          ACTIVE
+                        </span>
+                      )}
+                    </span>
+                    <span className="paint-layer-date">
+                      {new Date(entry.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <button
+                    className="icon-btn"
+                    title={`Remove this erase (restore to ${idx === 0 ? 'original' : `Erase ${idx}`})`}
+                    onClick={() => {
+                      if (window.confirm('Remove this erase? The wall will revert to the state before it.')) {
+                        onRemoveErase?.(entry.id)
+                      }
+                    }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
