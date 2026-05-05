@@ -57,9 +57,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
       img.onload = () => {
         const displayW = Math.min(680, img.naturalWidth)
         const displayH = Math.round(displayW * img.naturalHeight / img.naturalWidth)
+        // Capture the newly created surface so we can auto-warp outside the updater
+        let autoSurface = null
         setSpace(prev => {
           const photo   = createPhoto({ dataUrl, displayW, displayH, index: prev.photos.length })
           const surface = createSurfaceDef({ photoId: photo.id, index: prev.surfaces.length })
+          autoSurface = surface
           setActiveSurfaceId(surface.id)
           return {
             ...prev,
@@ -67,11 +70,17 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
             surfaces: [...prev.surfaces, surface],
           }
         })
+        // Auto-warp with default corners immediately after adding to state
+        if (autoSurface) {
+          warpSurface(autoSurface, dataUrl, displayW, displayH, warpPerspectiveAsync)
+            .then(url => updateSurface(autoSurface.id, { warpedDataUrl: url }))
+            .catch(() => {})
+        }
       }
       img.src = dataUrl
     }
     reader.readAsDataURL(file)
-  }, [])
+  }, [updateSurface])
 
   const handleAddPhotoClick = () => fileInputRef.current?.click()
 

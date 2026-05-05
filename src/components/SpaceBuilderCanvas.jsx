@@ -181,7 +181,16 @@ export default function SpaceBuilderCanvas({
       )
       raycaster.setFromCamera(mouse, camera)
       const hits = raycaster.intersectObjects(Object.values(meshMap).map(e => e.mesh))
-      return hits[0] ?? null
+      // Only accept hits on the visible (front) face of a surface.
+      // Filters out back-face hits (DoubleSide planes behind other objects) and
+      // nearly edge-on surfaces that the user isn't really aiming at.
+      const validHits = hits.filter(hit => {
+        if (!hit.face) return false
+        const worldNormal = hit.face.normal.clone().applyQuaternion(hit.object.quaternion)
+        // Negative dot = ray opposes normal = front face. Threshold 0.15 ≈ 81° max incidence.
+        return worldNormal.dot(raycaster.ray.direction) < -0.15
+      })
+      return validHits[0] ?? null
     }
 
     function computeSnap(movingId) {
@@ -203,13 +212,13 @@ export default function SpaceBuilderCanvas({
       const { fromId, fromEdge, toId, toEdge } = hint
       const fe = meshMap[fromId]; const te = meshMap[toId]
       if (!fe || !te) return
+      // Move "from" so its snapping edge midpoint coincides with "to"'s edge midpoint.
+      // Rotation is intentionally NOT changed — the user sets the angle with the slider.
       const toMid   = edgeWorldMid(te.mesh, toEdge, te.wM, te.hM)
       const fromMid = edgeWorldMid(fe.mesh, fromEdge, fe.wM, fe.hM)
       fe.mesh.position.add(toMid.sub(fromMid))
-      fe.mesh.rotation.y = te.mesh.rotation.y  // inherit snapped-to surface's Y rotation
-      const newRotYDeg = Math.round(te.mesh.rotation.y * 180 / Math.PI)
+      // Persist position only; keep existing rotYDeg intact
       stateRef.current.onUpdateSurface(fromId, {
-        rotYDeg: newRotYDeg,
         pose3d: { position: fe.mesh.position.toArray(), rotX: fe.mesh.rotation.x },
       })
       stateRef.current.onSetConnection(fromId, fromEdge, { surfaceId: toId, edge: toEdge, angleDeg: 90 })
