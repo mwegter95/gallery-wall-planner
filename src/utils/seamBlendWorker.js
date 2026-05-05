@@ -38,10 +38,17 @@
 
 let _cv = null
 
+// Populated from the first 'stitch' message so the main thread controls the URL.
+let _opencvUrl = null
+
 async function loadCV() {
   if (_cv) return _cv
   try {
-    importScripts(self.location.origin + '/opencv.js')
+    // Use the URL provided by the main thread (knows the correct Vite base path).
+    // Fall back to origin root only in unusual environments.
+    const url = _opencvUrl || (self.location.origin + '/opencv.js')
+    console.log('[seamBlendWorker] loadCV: importScripts', url)
+    importScripts(url)
     const raw = self.cv
     if (raw == null) throw new Error('self.cv not set after importScripts')
     const cv = typeof raw.then === 'function'
@@ -411,7 +418,8 @@ async function blendPair(cv, dataUrlA, edgeA, dataUrlB, edgeB) {
 
 self.onmessage = async ({ data }) => {
   if (data.type !== 'stitch') return
-  const { pairs } = data
+  const { pairs, opencvUrl } = data
+  if (opencvUrl) _opencvUrl = opencvUrl
 
   self.postMessage({ type: 'progress', pct: 2, status: 'Loading OpenCV…' })
   const cv = await loadCV()

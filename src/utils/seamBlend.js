@@ -97,6 +97,9 @@ export async function stitchSeams(surfaces, onProgress) {
       reject(new Error('seamBlendWorker crashed: ' + (e.message || 'unknown')))
     }
 
-    worker.postMessage({ type: 'stitch', pairs })
+    // Pass the correct opencv.js URL so the worker doesn't have to guess the
+    // base path (it varies: '/' on custom domain, '/repo-name/' on GitHub Pages).
+    const opencvUrl = import.meta.env.BASE_URL + 'opencv.js'
+    worker.postMessage({ type: 'stitch', pairs, opencvUrl })
   })
 }
