@@ -5167,13 +5167,14 @@ kbd {
 
 .sb-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding: 8px 14px;
   background: #111820;
   border-bottom: 1px solid #1e2d3d;
   flex-shrink: 0;
-  gap: 12px;
+  gap: 6px 12px;
 }
 .sb-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .sb-name-input {
@@ -5382,7 +5383,7 @@ kbd {
 }
 .sb-guard-btn--discard:hover { background: rgba(248,113,113,0.2); }
 
-.sb-header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.sb-header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; flex-shrink: 0; padding: 2px 0; }
 
 .sb-btn {
   display: inline-flex;
@@ -6604,7 +6605,7 @@ kbd {
   background: var(--stage-ink-2);
   border-bottom: 1px solid var(--stage-border);
   padding: 8px 14px;
-  gap: 10px;
+  gap: 6px 12px;
 }
 .sb-name-input {
   border-bottom-color: var(--stage-border-2);
