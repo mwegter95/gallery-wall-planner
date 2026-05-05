@@ -5791,11 +5791,12 @@ kbd {
   letter-spacing: .04em;
 }
 
-/* ── FOV preset bar — top-left of 3D viewport ─────────────────────────── */
+/* ── FOV preset bar — top-center of 3D viewport ───────────────────────── */
 .sbc-fov-bar {
   position: absolute;
   top: 12px;
-  left: 12px;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   gap: 4px;
   z-index: 20;
@@ -5819,27 +5820,70 @@ kbd {
   color: #4a9eff;
 }
 
-/* ── Joystick — top-center of 3D viewport ─────────────────────────────── */
-.sbc-joystick {
+/* ── Joystick wrappers — top-left (Move) and top-right (Orbit) ─────────── */
+.sbc-joystick-wrapper {
   position: absolute;
   top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  z-index: 20;
+}
+.sbc-joystick-wrapper--left  { left: 12px; }
+.sbc-joystick-wrapper--right { right: 12px; }
+
+.sbc-joystick-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.35);
+  user-select: none;
+  pointer-events: none;
+}
+
+/* ── Joystick base ─────────────────────────────────────────────────────── */
+.sbc-joystick {
   width: calc(var(--jr) * 2);
   height: calc(var(--jr) * 2);
   border-radius: 50%;
-  border: 1.5px solid rgba(74,158,255,0.22);
   background: rgba(8,13,20,0.55);
   backdrop-filter: blur(6px);
   cursor: grab;
   touch-action: none;
   user-select: none;
-  z-index: 20;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 .sbc-joystick:active { cursor: grabbing; }
+
+/* Pan / Move — warm amber, flat crosshair look */
+.sbc-joystick--pan {
+  border: 1.5px solid rgba(229,168,75,0.28);
+}
+.sbc-joystick--pan .sbc-joystick-arrows { color: #e5a84b; }
+.sbc-joystick--pan .sbc-joystick-thumb  {
+  background: rgba(229,168,75,0.75);
+  box-shadow: 0 0 8px rgba(229,168,75,0.4);
+}
+.sbc-joystick--pan:active .sbc-joystick-thumb { background: rgba(229,168,75,0.95); }
+
+/* Orbit — blue, globe look */
+.sbc-joystick--orbit {
+  border: 1.5px solid rgba(74,158,255,0.28);
+}
+.sbc-joystick--orbit .sbc-joystick-globe { color: #4a9eff; }
+.sbc-joystick--orbit .sbc-joystick-thumb {
+  background: rgba(74,158,255,0.75);
+  box-shadow: 0 0 8px rgba(74,158,255,0.4);
+}
+.sbc-joystick--orbit:active .sbc-joystick-thumb { background: rgba(74,158,255,0.95); }
+
+/* ── Joystick thumb (shared) ───────────────────────────────────────────── */
 .sbc-joystick-thumb {
   position: absolute;
   top: 50%;
@@ -5847,19 +5891,19 @@ kbd {
   width: calc(var(--jt) * 2);
   height: calc(var(--jt) * 2);
   border-radius: 50%;
-  background: rgba(74,158,255,0.7);
-  box-shadow: 0 0 8px rgba(74,158,255,0.4);
   pointer-events: none;
   transition: background 0.1s;
+  z-index: 2;
 }
-.sbc-joystick:active .sbc-joystick-thumb { background: rgba(74,158,255,0.95); }
-.sbc-joystick-arrows {
+
+/* ── Joystick SVG overlays (shared) ────────────────────────────────────── */
+.sbc-joystick-arrows,
+.sbc-joystick-globe {
   width: 100%;
   height: 100%;
   position: absolute;
   inset: 0;
   pointer-events: none;
-  color: #4a9eff;
 }
 .sbc-3d-empty {
   position: absolute;

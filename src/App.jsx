@@ -465,37 +465,44 @@ export default function App() {
     await api.putRoom(space)
     setRooms(prev => ({ ...prev, [space.id]: space }))
 
-    // Sync each surface as a linked wall so they appear in the wall selector
-    setWalls(prev => {
-      const next = { ...prev }
-      for (const surface of space.surfaces) {
-        const wallId   = surface.id
-        const existing = prev[wallId]
-        const wall = {
-          id:        wallId,
-          name:      surface.name,
-          width:     surface.widthIn,
-          height:    surface.heightIn,
-          roomId:    space.id,
-          createdAt: existing?.createdAt || Date.now(),
-          imageUrl:  existing?.imageUrl  || null,
+    // ── Upload all warped surface images first, then save walls with URLs ──
+    // We capture existing walls once so the imageUrl lookup is stable.
+    const existingWalls = {}
+    setWalls(prev => { Object.assign(existingWalls, prev); return prev })
+
+    // Upload every surface that has a warpedDataUrl, await them all in parallel
+    const imageUrls = {}
+    await Promise.all(
+      space.surfaces.map(async surface => {
+        if (!surface.warpedDataUrl) return
+        try {
+          const { url } = await api.uploadWallImage(surface.id, surface.warpedDataUrl)
+          imageUrls[surface.id] = url
+        } catch (err) {
+          console.error('[handleSaveSpace] image upload failed for', surface.id, err)
         }
-        next[wallId] = wall
-        // Save wall metadata immediately (fire-and-forget)
-        api.putWall(wall).catch(console.error)
-        // Upload the perspective-warped surface image as the wall photo
-        if (surface.warpedDataUrl) {
-          api.uploadWallImage(wallId, surface.warpedDataUrl)
-            .then(({ url }) => {
-              const updated = { ...wall, imageUrl: url }
-              setWalls(p => ({ ...p, [wallId]: updated }))
-              api.putWall(updated).catch(console.error)
-            })
-            .catch(console.error)
-        }
+      })
+    )
+
+    // Now build wall objects — all imageUrls are resolved
+    const wallUpdates = {}
+    for (const surface of space.surfaces) {
+      const wallId   = surface.id
+      const existing = existingWalls[wallId]
+      const wall = {
+        id:        wallId,
+        name:      surface.name,
+        width:     surface.widthIn,
+        height:    surface.heightIn,
+        roomId:    space.id,
+        createdAt: existing?.createdAt || Date.now(),
+        imageUrl:  imageUrls[wallId] ?? existing?.imageUrl ?? null,
       }
-      return next
-    })
+      wallUpdates[wallId] = wall
+      api.putWall(wall).catch(console.error)
+    }
+
+    setWalls(prev => ({ ...prev, ...wallUpdates }))
 
     setShowSpaceBuilder(false)
     setShowSpaceMgr(false)
