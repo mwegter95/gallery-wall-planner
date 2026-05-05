@@ -752,7 +752,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onClick={handleSave}
               disabled={isSaving || !space.name.trim() || space.surfaces.length === 0}
             >
-              {isSaving ? <><span className="btn-spinner" />Saving…</> : 'Save Space'}
+              {isSaving ? <><span className="btn-spinner" />Saving…</> : 'Save Room'}
             </button>
 
             <button className="sb-close-btn" onClick={onClose} title="Close builder">

@@ -143,14 +143,10 @@ export default function AddPieceModal({ piece, onSubmit, onClose, unitSystem = '
     onSubmit({ name: name.trim(), width: wIn, height: hIn, color, image, transparent })
   }
 
-  const handleImageUpload = useCallback(async (e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    e.target.value = ''   // allow re-selecting the same file later
-
+  const processImageFile = useCallback(async (file) => {
+    if (!file || !file.type.startsWith('image/') && !/\.(heic|heif)$/i.test(file.name)) return
     setConvertError('')
     setConverting(true)
-
     try {
       const dataUrl = await anyImageToJpeg(file)
       setConverting(false)
@@ -159,9 +155,39 @@ export default function AddPieceModal({ piece, onSubmit, onClose, unitSystem = '
     } catch (err) {
       console.error('Image load failed:', err)
       setConverting(false)
-      setConvertError('Could not load this image. Make sure it\'s a valid photo file.')
+      setConvertError("Could not load this image. Make sure it's a valid photo file.")
     }
   }, [])
+
+  const handleImageUpload = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    processImageFile(file)
+  }, [processImageFile])
+
+  const [isDragOver, setIsDragOver] = useState(false)
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if ([...e.dataTransfer.items].some(i => i.kind === 'file' && i.type.startsWith('image/'))) {
+      e.dataTransfer.dropEffect = 'copy'
+      setIsDragOver(true)
+    }
+  }, [])
+
+  const handleDragLeave = useCallback((e) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) setIsDragOver(false)
+  }, [])
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(false)
+    const file = [...(e.dataTransfer.files || [])].find(f => f.type.startsWith('image/'))
+    if (file) processImageFile(file)
+  }, [processImageFile])
 
   return (
     <>
@@ -265,8 +291,11 @@ export default function AddPieceModal({ piece, onSubmit, onClose, unitSystem = '
           <div className="field">
             <label className="field-label">Photo (optional)</label>
             <div
-              className={`image-upload-area ${converting ? 'loading' : ''}`}
+              className={`image-upload-area ${converting ? 'loading' : ''}${isDragOver ? ' drag-over' : ''}`}
               onClick={() => !converting && fileRef.current?.click()}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
             >
               {converting ? (
                 <div className="image-placeholder">
@@ -298,8 +327,8 @@ export default function AddPieceModal({ piece, onSubmit, onClose, unitSystem = '
                 </div>
               ) : (
                 <div className="image-placeholder">
-                  <span class="upload-icon"><svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="7" width="22" height="16" rx="2" stroke="currentColor" strokeWidth="1.5"/><circle cx="14" cy="15" r="4" stroke="currentColor" strokeWidth="1.5"/><path d="M10 7l2-3h4l2 3" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg></span>
-                  <span>Click to upload a photo of this piece</span>
+                  <span className="upload-icon"><svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="7" width="22" height="16" rx="2" stroke="currentColor" strokeWidth="1.5"/><circle cx="14" cy="15" r="4" stroke="currentColor" strokeWidth="1.5"/><path d="M10 7l2-3h4l2 3" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg></span>
+                  <span>{isDragOver ? 'Drop to add photo' : 'Click or drag a photo here'}</span>
                   <span className="upload-sub">Supported: JPG · PNG · WEBP · HEIC</span>
                 </div>
               )}

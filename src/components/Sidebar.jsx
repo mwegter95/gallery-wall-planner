@@ -13,13 +13,14 @@ export default function Sidebar({
   hasUnsavedChanges = false, onDiscardChanges,
   paintLayers = [], onTogglePaintLayer, onDeletePaintLayer, onRenamePaintLayer,
   onEditPaintLayer, onNewPaintLayer, hasWallImage = false,
-  eraseHistory = [], onRemoveErase, onOpenErase,
+  eraseHistory = [], onRemoveErase, onOpenErase, onToggleEraseVisible,
 }) {
   const [layoutName,     setLayoutName]     = useState('')
   const [saveError,      setSaveError]      = useState('')
-  const [section,        setSection]        = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'paint' | 'settings'
+  const [section,        setSection]        = useState('pieces') // 'pieces' | 'layouts' | 'library' | 'paint' | 'erase' | 'settings'
   const [renamingLayer,  setRenamingLayer]  = useState(null)   // layerId being renamed
   const [renameValue,    setRenameValue]    = useState('')
+  const [confirmEraseId, setConfirmEraseId] = useState(null)   // entry.id pending delete confirm
 
   // Preserve scroll position across re-renders triggered by parent state changes
   // (e.g. loading a layout updates pieces, which re-renders Sidebar and can reset scroll)
@@ -466,50 +467,91 @@ export default function Sidebar({
             <div className="paint-empty-state">
               <p>No erases yet.</p>
               <p style={{ marginTop: 6, fontSize: 11 }}>
-                Use <strong>Erase Object</strong> in the header to remove objects from the wall photo using content-aware fill.
-                Each erase is saved here and can be removed to restore the wall.
+                Use <strong>Erase Object</strong> in the header to remove objects from the wall photo using content-aware fill. Each erase is saved here and can be hidden or removed.
               </p>
             </div>
           ) : (
             <div className="paint-layer-list">
-              {eraseHistory.map((entry, idx) => (
-                <div key={entry.id} className="paint-layer-row">
-                  {/* Thumbnail */}
-                  <div className="erase-hist-thumb">
-                    <img
-                      src={entry.dataUrl}
-                      alt={`Erase ${idx + 1}`}
-                      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 3 }}
-                    />
-                  </div>
-                  <div className="paint-layer-meta">
-                    <span className="paint-layer-name">
-                      Erase {idx + 1}
-                      {idx === eraseHistory.length - 1 && (
-                        <span style={{ marginLeft: 6, fontSize: 9, color: '#70e090', fontWeight: 700, letterSpacing: '0.04em' }}>
-                          ACTIVE
-                        </span>
+              {eraseHistory.map((entry, idx) => {
+                const isActive = idx === eraseHistory.length - 1 && entry.visible !== false
+                return (
+                  <div key={entry.id} className={`paint-layer-row${entry.visible === false ? ' erase-row--hidden' : ''}`}>
+                    {/* Thumbnail */}
+                    <div className="erase-hist-thumb">
+                      <img
+                        src={entry.dataUrl}
+                        alt={`Erase ${idx + 1}`}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 3,
+                          opacity: entry.visible === false ? 0.35 : 1 }}
+                      />
+                    </div>
+                    <div className="paint-layer-meta">
+                      <span className="paint-layer-name">
+                        Erase {idx + 1}
+                        {isActive && (
+                          <span className="erase-active-badge">ACTIVE</span>
+                        )}
+                      </span>
+                      <span className="paint-layer-date">
+                        {entry.createdAt
+                          ? new Date(entry.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                          : 'Imported'}
+                      </span>
+                    </div>
+                    {/* Visibility toggle */}
+                    <button
+                      className="icon-btn"
+                      title={entry.visible === false ? 'Show this erase' : 'Hide this erase'}
+                      onClick={() => onToggleEraseVisible?.(entry.id)}
+                    >
+                      {entry.visible === false ? (
+                        <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M1 1l11 11M5.3 3.7A4.5 4.5 0 0 1 6.5 3.5c3 0 5 3 5 3s-.8 1.3-2.1 2.2M3.5 4.8C2.2 5.7 1.5 6.5 1.5 6.5s2 3 5 3c.8 0 1.5-.2 2.2-.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
+                      ) : (
+                        <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M1.5 6.5s2-3 5-3 5 3 5 3-2 3-5 3-5-3-5-3z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/><circle cx="6.5" cy="6.5" r="1.5" stroke="currentColor" strokeWidth="1.2"/></svg>
                       )}
-                    </span>
-                    <span className="paint-layer-date">
-                      {new Date(entry.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                    </span>
+                    </button>
+                    {/* Delete */}
+                    <button
+                      className="icon-btn icon-btn--danger"
+                      title="Remove this erase"
+                      onClick={() => setConfirmEraseId(entry.id)}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                        <path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </button>
                   </div>
-                  <button
-                    className="icon-btn"
-                    title={`Remove this erase (restore to ${idx === 0 ? 'original' : `Erase ${idx}`})`}
-                    onClick={() => {
-                      if (window.confirm('Remove this erase? The wall will revert to the state before it.')) {
-                        onRemoveErase?.(entry.id)
-                      }
-                    }}
-                  >
-                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M2 3.5h9M5 3.5V2.5h3v1M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Custom confirm modal */}
+          {confirmEraseId && (
+            <div className="erase-confirm-backdrop" onClick={() => setConfirmEraseId(null)}>
+              <div className="erase-confirm-modal" onClick={e => e.stopPropagation()}>
+                <div className="erase-confirm-icon">
+                  <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                    <circle cx="14" cy="14" r="13" stroke="#f87171" strokeWidth="1.5"/>
+                    <path d="M14 8v7M14 18v1.5" stroke="#f87171" strokeWidth="2" strokeLinecap="round"/>
+                  </svg>
+                </div>
+                <div className="erase-confirm-title">Remove this erase?</div>
+                <div className="erase-confirm-body">
+                  The wall will revert to the state before this erase was applied. This cannot be undone.
+                </div>
+                <div className="erase-confirm-actions">
+                  <button className="erase-confirm-btn erase-confirm-btn--cancel" onClick={() => setConfirmEraseId(null)}>
+                    Cancel
+                  </button>
+                  <button className="erase-confirm-btn erase-confirm-btn--delete" onClick={() => {
+                    onRemoveErase?.(confirmEraseId)
+                    setConfirmEraseId(null)
+                  }}>
+                    Remove Erase
                   </button>
                 </div>
-              ))}
+              </div>
             </div>
           )}
         </div>

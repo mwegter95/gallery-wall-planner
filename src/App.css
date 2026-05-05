@@ -158,16 +158,17 @@ body::before {
 /* ── Header ─────────────────────────────────────── */
 
 .app-header {
-  height: var(--header-h);
   min-height: var(--header-h);
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   padding: 0 20px;
   background: var(--stage-ink-2);
   border-bottom: 1px solid var(--stage-border);
   z-index: 200;
   box-shadow: 0 1px 0 var(--stage-border);
+  gap: 6px 0;
 }
 
 .header-brand {
@@ -240,7 +241,8 @@ body::before {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
 }
 
 .layout-chip {
@@ -1131,7 +1133,9 @@ kbd {
   transition: border-color 0.15s, background 0.15s;
   overflow: hidden;
 }
-.image-upload-area:hover { border-color: var(--accent); background: var(--accent-dim); }
+.image-upload-area:hover,
+.image-upload-area.drag-over { border-color: var(--accent); background: var(--accent-dim); }
+.image-upload-area.drag-over { border-style: solid; box-shadow: 0 0 0 3px rgba(196,135,90,0.2); }
 
 .image-placeholder {
   display: flex;
@@ -6268,6 +6272,94 @@ kbd {
 }
 .erase-status--done  { color: #70e090; }
 .erase-status--error { color: #ff7070; }
+
+/* ── Erase tab — active badge, hidden row, custom confirm ───────────────── */
+.erase-active-badge {
+  margin-left: 6px;
+  font-size: 9px;
+  color: #70e090;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.erase-row--hidden { opacity: 0.5; }
+
+.icon-btn--danger { color: rgba(248,113,113,0.6); }
+.icon-btn--danger:hover { color: #f87171; }
+
+.erase-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.erase-confirm-modal {
+  background: #131c27;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 14px;
+  padding: 28px 28px 24px;
+  max-width: 320px;
+  width: 90%;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.erase-confirm-icon { margin-bottom: 2px; }
+
+.erase-confirm-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.erase-confirm-body {
+  font-size: 13px;
+  color: rgba(255,255,255,0.5);
+  line-height: 1.5;
+}
+
+.erase-confirm-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.erase-confirm-btn {
+  flex: 1;
+  padding: 9px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.12);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.erase-confirm-btn--cancel {
+  background: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.7);
+}
+.erase-confirm-btn--cancel:hover { background: rgba(255,255,255,0.1); }
+
+.erase-confirm-btn--delete {
+  background: rgba(248,113,113,0.15);
+  color: #f87171;
+  border-color: rgba(248,113,113,0.35);
+}
+.erase-confirm-btn--delete:hover {
+  background: rgba(248,113,113,0.25);
+  border-color: rgba(248,113,113,0.6);
+}
 
 /* ── Erase history thumbnail in Sidebar ─────────────────────────────────── */
 .erase-hist-thumb {

@@ -332,9 +332,9 @@ export default function App() {
           ? [{ id: 'legacy', createdAt: 0, dataUrl: activeWall.inpaintDataUrl }]
           : [])
     : []
-  const activeWallEffectiveImage =
-    (activeWallEraseHistory.length > 0 ? activeWallEraseHistory[activeWallEraseHistory.length - 1].dataUrl : null)
-    || activeWall?.imageUrl || null
+  // Last *visible* erase in the history stack is the effective image
+  const lastVisibleErase = [...activeWallEraseHistory].reverse().find(e => e.visible !== false)
+  const activeWallEffectiveImage = lastVisibleErase?.dataUrl || activeWall?.imageUrl || null
 
   /* Paint layers for active wall */
   const activePaintLayers = Object.values(wallPaintLayers[activeWallId] || {})
@@ -983,6 +983,18 @@ export default function App() {
     })
   }, [])
 
+  const handleToggleEraseVisible = useCallback((wallId, eraseId) => {
+    setWalls(prev => {
+      const wall    = prev[wallId] || {}
+      const history = (wall.eraseHistory || []).map(e =>
+        e.id === eraseId ? { ...e, visible: e.visible === false ? true : false } : e
+      )
+      const updated = { ...wall, eraseHistory: history }
+      api.putWall(updated).catch(console.error)
+      return { ...prev, [wallId]: updated }
+    })
+  }, [])
+
   const handlePaintApply = useCallback((color, maskDataUrl) => {
     if (!activeWallId) return
     const id = editingLayerId || genId()
@@ -1267,7 +1279,7 @@ export default function App() {
                 </svg>
               )}
               <span className="btn-label">
-                {isSaving ? ' Saving…' : saveFlash ? ' Saved!' : ` ${currentLayout || 'Save Layout'}`}
+                {isSaving ? ' Saving…' : saveFlash ? ' Saved!' : ' Save Layout'}
               </span>
             </button>
             {saveMenuOpen && (
@@ -1399,6 +1411,7 @@ export default function App() {
           hasWallImage={Boolean(activeWallImage)}
           eraseHistory={activeWallEraseHistory}
           onRemoveErase={(eraseId) => handleRemoveErase(activeWallId, eraseId)}
+          onToggleEraseVisible={(eraseId) => handleToggleEraseVisible(activeWallId, eraseId)}
           onOpenErase={() => { if (activeWallEffectiveImage) setShowEraseWall(true) }}
           library={library}
           onAddFromLibrary={addPieceFromLibrary}
