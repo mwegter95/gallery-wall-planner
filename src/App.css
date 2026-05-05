@@ -94,6 +94,11 @@
 
   --radius:    var(--r-lg);
   --radius-sm: var(--r-sm);
+
+  /* ── Surface layers (used by modals and room manager) ── */
+  --surface-1: var(--stage-ink-2);   /* #1A1510 — modal background */
+  --surface-2: var(--stage-ink-3);   /* #251D15 — hover / inner panel */
+  --surface-3: var(--stage-ink-4);   /* #30261C — input areas */
 }
 
 /* ── Global base ────────────────────────────────── */
@@ -1584,7 +1589,7 @@ kbd {
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--surface2);
+  background: var(--surface-2);
   color: var(--text);
   font-size: 14px;
   font-family: 'DM Mono', ui-monospace, monospace;

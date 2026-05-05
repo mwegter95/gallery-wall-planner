@@ -517,10 +517,6 @@ export default function App() {
     }
 
     setWalls(prev => ({ ...prev, ...wallUpdates }))
-
-    setShowSpaceBuilder(false)
-    setShowSpaceMgr(false)
-    setEditingSpaceId(null)
   }, [])
 
   const handleDeleteSpace = useCallback(async (spaceId) => {
