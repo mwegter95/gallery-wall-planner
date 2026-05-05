@@ -11,10 +11,10 @@ import SpaceBuilderCanvas from './SpaceBuilderCanvas'
 import EraseModal from './EraseModal'
 import {
   createSpace, createPhoto, createSurfaceDef, genId,
-  createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
+  warpSurface, createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
   getEffectiveSurfaceUrl,
 } from '../utils/spaceAssembler'
-// genId is used for save-as-new room
+import { warpPerspectiveAsync } from '../utils/homography'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
