@@ -14,6 +14,7 @@ import {
   createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
   getEffectiveSurfaceUrl,
 } from '../utils/spaceAssembler'
+// genId is used for save-as-new room
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -21,7 +22,7 @@ const MAX_HISTORY = 50
 // Properties that count as "moveable" actions worth undo-ing
 const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
 
-export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {} }) {
+export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, rooms = {} }) {
   const [space, setSpace]                 = useState(() => existingSpace
     ? JSON.parse(JSON.stringify(existingSpace))
     : createSpace()
@@ -32,6 +33,15 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [stitchStatus,    setStitchStatus]    = useState('')
   const [isSaving,        setIsSaving]        = useState(false)
   const [isDragOver,      setIsDragOver]      = useState(false)
+  // Save Room popover
+  const [showSaveMenu,    setShowSaveMenu]    = useState(false)
+  const [saveAsName,      setSaveAsName]      = useState('')
+  const saveMenuRef = useRef(null)
+  // Room selector + unsaved-changes guard
+  const [pendingRoomId,   setPendingRoomId]   = useState(null) // room to switch to (null = none pending)
+  const [savedSnapshot,   setSavedSnapshot]   = useState(() =>
+    existingSpace ? JSON.stringify(existingSpace.surfaces) : '[]'
+  )
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
@@ -42,6 +52,18 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const historyRef   = useRef({ stack: [], index: -1, timer: null })
   const fileInputRef  = useRef(null)
   const warpQueueRef  = useRef(new Set())
+
+  // Detect unsaved changes by comparing current surfaces to saved snapshot
+  const hasUnsavedChanges = JSON.stringify(space.surfaces) !== savedSnapshot
+
+  // Close save menu on outside click
+  useEffect(() => {
+    function onOutside(e) {
+      if (saveMenuRef.current && !saveMenuRef.current.contains(e.target)) setShowSaveMenu(false)
+    }
+    document.addEventListener('mousedown', onOutside)
+    return () => document.removeEventListener('mousedown', onOutside)
+  }, [])
 
   const activeSurface = space.surfaces.find(s => s.id === activeSurfaceId)
 
@@ -338,13 +360,47 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   }
 
   // ── Save ─────────────────────────────────────────────────────────────────
-  const handleSave = async () => {
-    if (!space.name.trim()) return
+  const handleSave = async (overrideName) => {
+    const nameToUse = (overrideName || space.name).trim()
+    if (!nameToUse) return
+    const spaceToSave = overrideName
+      ? { ...space, id: genId(), name: overrideName }  // save-as-new: fresh id + new name
+      : space
     setIsSaving(true)
+    setShowSaveMenu(false)
+    setSaveAsName('')
     try {
-      await onSave(space)
+      await onSave(spaceToSave)
+      setSavedSnapshot(JSON.stringify(spaceToSave.surfaces))
+      // If saved as new, switch to that space
+      if (overrideName) setSpace(spaceToSave)
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  // ── Load a different room ────────────────────────────────────────────────
+  const doLoadRoom = (roomId) => {
+    const room = rooms[roomId]
+    if (!room) return
+    setSpace(JSON.parse(JSON.stringify(room)))
+    setSavedSnapshot(JSON.stringify(room.surfaces))
+    setActiveSurfaceId(null)
+    warpQueueRef.current = new Set()
+    const h = historyRef.current
+    h.stack = [JSON.parse(JSON.stringify(room.surfaces))]
+    h.index = 0
+    setCanUndo(false)
+    setCanRedo(false)
+    setPendingRoomId(null)
+  }
+
+  const handleRoomSelect = (roomId) => {
+    if (roomId === space.id) return
+    if (hasUnsavedChanges) {
+      setPendingRoomId(roomId)   // show guard modal
+    } else {
+      doLoadRoom(roomId)
     }
   }
 
@@ -657,17 +713,73 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {/* ── Unsaved-changes guard modal ──────────────────────────────────── */}
+        {pendingRoomId && (
+          <div className="sb-guard-backdrop">
+            <div className="sb-guard-modal">
+              <div className="sb-guard-icon">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                  <circle cx="16" cy="16" r="15" stroke="#f59e0b" strokeWidth="1.5"/>
+                  <path d="M16 9v9M16 21v2" stroke="#f59e0b" strokeWidth="2.2" strokeLinecap="round"/>
+                </svg>
+              </div>
+              <div className="sb-guard-title">Unsaved changes</div>
+              <div className="sb-guard-body">
+                You have unsaved changes to <strong>{space.name}</strong>. What would you like to do before switching rooms?
+              </div>
+              <div className="sb-guard-actions">
+                <button className="sb-guard-btn sb-guard-btn--back" onClick={() => setPendingRoomId(null)}>
+                  Go Back
+                </button>
+                <button className="sb-guard-btn sb-guard-btn--save" onClick={async () => {
+                  await handleSave()
+                  doLoadRoom(pendingRoomId)
+                }} disabled={isSaving}>
+                  {isSaving ? 'Saving…' : 'Save Room'}
+                </button>
+                <button className="sb-guard-btn sb-guard-btn--saveas" onClick={() => {
+                  // prompt for new name via saveAs flow then load
+                  const name = window.prompt('Save current room as:', space.name + ' copy')
+                  if (name?.trim()) handleSave(name.trim()).then(() => doLoadRoom(pendingRoomId))
+                }} disabled={isSaving}>
+                  Save as New
+                </button>
+                <button className="sb-guard-btn sb-guard-btn--discard" onClick={() => doLoadRoom(pendingRoomId)}>
+                  Discard & Switch
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Header ──────────────────────────────────────────────────────── */}
         <div className="sb-header">
           <div className="sb-header-left">
+            {/* Room selector dropdown */}
+            {Object.keys(rooms).length > 0 && (
+              <select
+                className="sb-room-select"
+                value={space.id}
+                onChange={e => handleRoomSelect(e.target.value)}
+                title="Switch room"
+              >
+                {!rooms[space.id] && (
+                  <option value={space.id}>{space.name || 'New Room'}</option>
+                )}
+                {Object.values(rooms).map(r => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            )}
             <input
               className="sb-name-input"
               value={space.name}
               onChange={e => setSpace(prev => ({ ...prev, name: e.target.value }))}
-              placeholder="Space name…"
+              placeholder="Room name…"
             />
             <span className="sb-surface-count">
               {space.surfaces.length} surface{space.surfaces.length !== 1 ? 's' : ''}
+              {hasUnsavedChanges && <span className="sb-unsaved-dot" title="Unsaved changes" />}
             </span>
           </div>
 
@@ -747,13 +859,57 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               Erase Object
             </button>
 
-            <button
-              className={`sb-btn sb-btn--save${isSaving ? ' sb-btn--loading' : ''}`}
-              onClick={handleSave}
-              disabled={isSaving || !space.name.trim() || space.surfaces.length === 0}
-            >
-              {isSaving ? <><span className="btn-spinner" />Saving…</> : 'Save Room'}
-            </button>
+            {/* Save Room popover */}
+            <div className="sb-save-wrap" ref={saveMenuRef}>
+              <button
+                className={`sb-btn sb-btn--save${isSaving ? ' sb-btn--loading' : ''}`}
+                onClick={() => { if (!isSaving) setShowSaveMenu(v => !v) }}
+                disabled={isSaving || space.surfaces.length === 0}
+                title="Save room"
+              >
+                {isSaving ? <><span className="btn-spinner" />Saving…</> : (
+                  <>
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M1 1h7.5L11 3.5V11H1V1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                      <rect x="3" y="1" width="3.5" height="2.5" rx="0.4" stroke="currentColor" strokeWidth="1"/>
+                      <rect x="2" y="7" width="8" height="3" rx="0.4" stroke="currentColor" strokeWidth="1"/>
+                    </svg>
+                    Save Room
+                  </>
+                )}
+              </button>
+              {showSaveMenu && (
+                <div className="sb-save-menu">
+                  {/* Overwrite existing */}
+                  {rooms[space.id] && (
+                    <button className="sb-save-menu-item sb-save-menu-overwrite"
+                      onClick={() => handleSave()}>
+                      ↩ Overwrite "{space.name}"
+                    </button>
+                  )}
+                  <div className="sb-save-menu-divider" />
+                  {/* Save as new */}
+                  <div className="sb-save-menu-label">Save as new room</div>
+                  <div className="sb-save-menu-row">
+                    <input
+                      className="sb-save-menu-input"
+                      placeholder="New room name…"
+                      value={saveAsName}
+                      onChange={e => setSaveAsName(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && saveAsName.trim()) handleSave(saveAsName.trim())
+                      }}
+                      autoFocus
+                    />
+                    <button
+                      className="sb-save-menu-go"
+                      disabled={!saveAsName.trim()}
+                      onClick={() => handleSave(saveAsName.trim())}
+                    >Save</button>
+                  </div>
+                </div>
+              )}
+            </div>
 
             <button className="sb-close-btn" onClick={onClose} title="Close builder">
               <svg width="11" height="11" viewBox="0 0 11 11" fill="none">

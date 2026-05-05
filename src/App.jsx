@@ -1596,6 +1596,7 @@ export default function App() {
           existingSpace={editingSpaceId ? rooms[editingSpaceId] : null}
           library={library}
           allLayouts={allLayouts}
+          rooms={rooms}
           onSave={handleSaveSpace}
           onClose={() => { setShowSpaceBuilder(false); setEditingSpaceId(null) }}
         />
