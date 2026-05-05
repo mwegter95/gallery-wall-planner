@@ -760,7 +760,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               title="Blend seams between connected surfaces"
             >
               {isStitching ? (
-                <><span className="btn-spinner" />{stitchStatus || (stitchProgress > 0 ? `${stitchProgress}%` : 'Loading OpenCV…')}</>
+                <><span className="btn-spinner" />{stitchStatus || (stitchProgress > 0 ? `${stitchProgress}%` : 'Blending…')}</>
               ) : (
                 <>
                   <svg width="13" height="13" viewBox="0 0 13 13" fill="none">

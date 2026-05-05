@@ -64,9 +64,12 @@ export default defineConfig({
   },
 
   optimizeDeps: {
-    // These packages bundle WASM loaders / dynamic imports that Vite's
-    // pre-bundler breaks — exclude them so they load at runtime as intended.
-    exclude: ['@imgly/background-removal', 'onnxruntime-web', '@techstark/opencv-js'],
+    // @imgly/background-removal and onnxruntime-web use dynamic WASM loading
+    // that Vite's pre-bundler breaks — keep those excluded.
+    // @techstark/opencv-js is NO LONGER excluded: the worker imports it as a
+    // static top-level import so Vite must be able to pre-bundle / resolve it
+    // for both the dev module graph and the production worker chunk.
+    exclude: ['@imgly/background-removal', 'onnxruntime-web'],
   },
 
   build: {
