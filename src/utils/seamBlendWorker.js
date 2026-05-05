@@ -1,27 +1,28 @@
 /**
- * seamBlendWorker.js — Web Worker for seam blending.
+ * seamBlendWorker.js — Classic Web Worker for seam blending.
+ *
+ * NO import / export statements — this is intentionally a classic worker script,
+ * NOT an ES module.  Vite bundles it as an IIFE which avoids any module-system
+ * interference with the OpenCV WASM initialisation.
+ *
+ * How OpenCV is loaded (the key insight):
+ *   importScripts(origin + '/opencv.js') loads the plain static file that Vite
+ *   copies to public/ via the opencvPublicPlugin.  The opencv.js UMD wrapper
+ *   has a specific `typeof importScripts === 'function'` branch that does:
+ *       root.cv = factory()   // root === self in a classic worker
+ *   so after importScripts returns, self.cv is the Promise that resolves to the
+ *   fully initialised cv object (cv.Mat, cv.ORB, etc.).
+ *
+ *   This completely bypasses Vite/Rollup bundling of the 10 MB Emscripten file,
+ *   which was corrupting the WASM init path in production worker chunks.
  *
  * Pipeline per seam pair:
- *   1. ORB feature matching + RANSAC homography (OpenCV WASM) — geometrically
- *      aligns content that spans the seam (panoramic-style).
- *   2. Per-scanline colour/tone correction — fades any remaining exposure or
- *      white-balance difference across a narrow blend zone at the cut line.
- *   3. Corner-crease shadow — a thin darkening gradient at the seam edge that
- *      mimics the natural shadow a real room corner casts.
- *
- * KEY FIX for deployed builds:
- *   OpenCV is loaded via a STATIC top-level import (not dynamic import()).
- *   Vite bundles static imports into the worker chunk during production build,
- *   so the module is always available.  Dynamic import() of large CJS packages
- *   can produce a separate chunk that the deployed worker cannot locate at
- *   runtime, causing an indefinite hang.
+ *   1. ORB feature matching + RANSAC homography (panoramic alignment).
+ *   2. Per-scanline colour/tone correction at the seam.
+ *   3. Corner-crease shadow gradient.
  *
  * Uses OffscreenCanvas + createImageBitmap (no DOM access needed).
  */
-
-// Static import — Vite bundles this into the worker chunk at build time.
-// In the worker module context `cvPromise` IS the Promise that resolves to cv.
-import cvPromise from '@techstark/opencv-js'
 
 // ── OpenCV loader ─────────────────────────────────────────────────────────────
 
@@ -29,23 +30,41 @@ let _cv = null
 
 async function loadCV() {
   if (_cv) { console.log('[seamBlendWorker] loadCV: cached'); return _cv }
-  console.log('[seamBlendWorker] loadCV: awaiting cv Promise…')
+  console.log('[seamBlendWorker] loadCV: starting…')
   try {
-    // The static import resolves to the Promise exported by @techstark/opencv-js.
-    // Awaiting it gives us the real cv object with cv.Mat, cv.ORB, etc.
-    const cv = await Promise.race([
-      cvPromise,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('cv Promise timed out after 60 s')), 60_000)
-      ),
-    ])
-    console.log('[seamBlendWorker] loadCV: resolved, cv.Mat =', typeof cv?.Mat, 'cv.ORB =', typeof cv?.ORB)
+    // opencv.js is served from public/ as a plain static file.
+    // importScripts() is synchronous — it blocks until the script is fully
+    // downloaded, parsed, and executed in the worker's global scope.
+    // The UMD wrapper in opencv.js detects `typeof importScripts === 'function'`
+    // and does: root.cv = factory()  where root = this = self
+    // So self.cv becomes the cv Promise immediately after importScripts returns.
+    const url = self.location.origin + '/opencv.js'
+    console.log('[seamBlendWorker] loadCV: importScripts from', url)
+    importScripts(url)
+    console.log('[seamBlendWorker] loadCV: importScripts done')
+    console.log('[seamBlendWorker] loadCV: typeof self.cv =', typeof self.cv)
+
+    const raw = self.cv
+    if (raw == null) throw new Error('self.cv not set after importScripts')
+
+    // Await the Promise that resolves once WASM is compiled and initialised.
+    const cv = typeof raw.then === 'function'
+      ? await Promise.race([
+          raw,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('cv Promise timed out after 60 s')), 60_000)
+          ),
+        ])
+      : raw
+
+    console.log('[seamBlendWorker] loadCV: cv resolved — cv.Mat =', typeof cv?.Mat, 'cv.ORB =', typeof cv?.ORB)
     if (typeof cv?.Mat === 'undefined') throw new Error('cv.Mat not found — unexpected module shape')
     _cv = cv
+    console.log('[seamBlendWorker] loadCV: SUCCESS')
     return _cv
   } catch (err) {
-    console.warn('[seamBlendWorker] loadCV failed:', err.message)
-    return null
+    console.warn('[seamBlendWorker] loadCV FAILED:', err.message)
+    return null   // caller falls back to colour-only mode
   }
 }
 

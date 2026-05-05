@@ -432,7 +432,8 @@ export function stitchSeams(surfaces, onProgress) {
     try {
       worker = new Worker(
         new URL('./seamBlendWorker.js', import.meta.url),
-        { type: 'module' },
+        // Classic worker (no { type: 'module' }) — the worker uses importScripts
+        // to load OpenCV, which only works in classic (non-module) workers.
       )
       console.log('[seamBlend] Worker spawned OK:', worker)
     } catch (err) {

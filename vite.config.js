@@ -4,6 +4,27 @@ import { execFile } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { writeFile, readFile, unlink } from 'fs/promises'
+import { copyFileSync, existsSync } from 'fs'
+
+/**
+ * Copies @techstark/opencv-js to public/opencv.js so it can be loaded by the
+ * seam-blend worker via importScripts('/opencv.js').  We serve it as a plain
+ * static file to AVOID Vite/Rollup bundling it — bundling the 10 MB Emscripten
+ * module corrupts the WASM init path in production worker chunks.
+ */
+function opencvPublicPlugin() {
+  return {
+    name: 'opencv-public',
+    buildStart() {
+      const src = join(process.cwd(), 'node_modules/@techstark/opencv-js/dist/opencv.js')
+      const dst = join(process.cwd(), 'public/opencv.js')
+      if (existsSync(src) && !existsSync(dst)) {
+        copyFileSync(src, dst)
+        console.log('[opencv-public] Copied opencv.js → public/opencv.js')
+      }
+    },
+  }
+}
 
 /**
  * Adds a POST /api/heic-to-jpeg endpoint to the Vite dev server.
@@ -51,7 +72,7 @@ export default defineConfig({
   // using a custom domain and the repo is not username.github.io.
   base: process.env.VITE_BASE || '/',
 
-  plugins: [react(), heicConvertPlugin()],
+  plugins: [react(), heicConvertPlugin(), opencvPublicPlugin()],
 
   server: {
     proxy: {
@@ -64,12 +85,10 @@ export default defineConfig({
   },
 
   optimizeDeps: {
-    // @imgly/background-removal and onnxruntime-web use dynamic WASM loading
-    // that Vite's pre-bundler breaks — keep those excluded.
-    // @techstark/opencv-js is NO LONGER excluded: the worker imports it as a
-    // static top-level import so Vite must be able to pre-bundle / resolve it
-    // for both the dev module graph and the production worker chunk.
-    exclude: ['@imgly/background-removal', 'onnxruntime-web'],
+    // These packages use WASM or dynamic loading that Vite's pre-bundler breaks.
+    // @techstark/opencv-js is excluded because we load it via importScripts in
+    // the seam-blend worker (bypassing Vite entirely) — not via import().
+    exclude: ['@imgly/background-removal', 'onnxruntime-web', '@techstark/opencv-js'],
   },
 
   build: {
