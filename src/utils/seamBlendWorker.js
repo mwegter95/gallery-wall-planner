@@ -432,34 +432,44 @@ async function blendPair(cv, dataUrlA, edgeA, dataUrlB, edgeB) {
 
 // ── Message handler ───────────────────────────────────────────────────────────
 
-self.onmessage = async ({ data }) => {
+self.onmessage = ({ data }) => {
   if (data.type !== 'stitch') return
-  const { pairs, opencvUrl } = data
-  if (opencvUrl) _opencvUrl = opencvUrl
-
-  self.postMessage({ type: 'progress', pct: 2, status: 'Loading OpenCV…' })
-  const cv = await loadCV()
-  self.postMessage({
-    type: 'progress', pct: 12,
-    status: cv
-      ? `Stitching ${pairs.length} seam${pairs.length !== 1 ? 's' : ''}…`
-      : `Feathering ${pairs.length} seam${pairs.length !== 1 ? 's' : ''} (no OpenCV)…`,
-  })
-
-  const resultMap = {}
-
-  for (let i = 0; i < pairs.length; i++) {
-    const { idA, dataUrlA, edgeA, idB, dataUrlB, edgeB } = pairs[i]
-    self.postMessage({ type: 'progress', pct: 12 + Math.round(i / pairs.length * 86), status: `Seam ${i+1} of ${pairs.length}…` })
+  // Kick off in an IIFE so any unhandled rejection is caught and reported.
+  // (An async onmessage that throws gives no worker.onerror — the spinner hangs forever.)
+  ;(async () => {
     try {
-      const result = await blendPair(cv, resultMap[idA] || dataUrlA, edgeA, resultMap[idB] || dataUrlB, edgeB)
-      resultMap[idA] = result.dataUrlA
-      resultMap[idB] = result.dataUrlB
-    } catch (err) {
-      console.error(`[seamBlendWorker] seam ${i+1} failed:`, err)
-      self.postMessage({ type: 'warn', msg: `Seam ${i+1} failed: ${err.message}` })
-    }
-  }
+      const { pairs, opencvUrl } = data
+      if (opencvUrl) _opencvUrl = opencvUrl
 
-  self.postMessage({ type: 'done', results: Object.entries(resultMap) })
+      self.postMessage({ type: 'progress', pct: 2, status: 'Loading OpenCV…' })
+      const cv = await loadCV()
+      self.postMessage({
+        type: 'progress', pct: 12,
+        status: cv
+          ? `Stitching ${pairs.length} seam${pairs.length !== 1 ? 's' : ''}…`
+          : `Feathering ${pairs.length} seam${pairs.length !== 1 ? 's' : ''} (no OpenCV)…`,
+      })
+
+      const resultMap = {}
+
+      for (let i = 0; i < pairs.length; i++) {
+        const { idA, dataUrlA, edgeA, idB, dataUrlB, edgeB } = pairs[i]
+        self.postMessage({ type: 'progress', pct: 12 + Math.round(i / pairs.length * 86), status: `Seam ${i+1} of ${pairs.length}…` })
+        try {
+          const result = await blendPair(cv, resultMap[idA] || dataUrlA, edgeA, resultMap[idB] || dataUrlB, edgeB)
+          resultMap[idA] = result.dataUrlA
+          resultMap[idB] = result.dataUrlB
+        } catch (err) {
+          console.error(`[seamBlendWorker] seam ${i+1} failed:`, err)
+          self.postMessage({ type: 'warn', msg: `Seam ${i+1} failed: ${err.message}` })
+        }
+      }
+
+      self.postMessage({ type: 'done', results: Object.entries(resultMap) })
+    } catch (outerErr) {
+      // Catch anything that escaped inner handlers so the main thread always gets a response.
+      console.error('[seamBlendWorker] fatal:', outerErr)
+      self.postMessage({ type: 'error', msg: outerErr?.message || String(outerErr) })
+    }
+  })()
 }

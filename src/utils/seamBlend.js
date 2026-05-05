@@ -66,10 +66,22 @@ export async function stitchSeams(surfaces, onProgress) {
   return new Promise((resolve, reject) => {
     const worker = getWorker()
 
+    let done = false
     const cleanup = () => {
       worker.onmessage = null
       worker.onerror   = null
     }
+
+    // Safety timeout: if the worker never responds (e.g. a silent async error inside
+    // the worker caused an unhandled rejection), kill it and clear the spinner.
+    const timer = setTimeout(() => {
+      if (done) return
+      done = true
+      cleanup()
+      _worker = null
+      worker.terminate()
+      reject(new Error('seamBlendWorker timed out after 120 s — killed'))
+    }, 120_000)
 
     worker.onmessage = ({ data }) => {
       switch (data.type) {
@@ -80,26 +92,31 @@ export async function stitchSeams(surfaces, onProgress) {
           console.warn('[seamBlend]', data.msg)
           break
         case 'done':
-          cleanup()
+          if (done) break
+          done = true; clearTimeout(timer); cleanup()
           onProgress?.(100)
           resolve(new Map(data.results))
           break
         case 'error':
-          cleanup()
+          if (done) break
+          done = true; clearTimeout(timer); cleanup()
+          _worker = null
+          worker.terminate()
           reject(new Error(data.msg || 'Worker error'))
           break
       }
     }
 
     worker.onerror = (e) => {
-      cleanup()
+      if (done) return
+      done = true; clearTimeout(timer); cleanup()
       _worker = null
       reject(new Error('seamBlendWorker crashed: ' + (e.message || 'unknown')))
     }
 
-    // Pass the correct opencv.js URL so the worker doesn't have to guess the
-    // base path (it varies: '/' on custom domain, '/repo-name/' on GitHub Pages).
-    const opencvUrl = import.meta.env.BASE_URL + 'opencv.js'
+    // Pass the full absolute opencv.js URL — worker can't rely on self.location
+    // because in production the worker chunk lives under /assets/.
+    const opencvUrl = new URL('opencv.js', window.location.origin + import.meta.env.BASE_URL).href
     worker.postMessage({ type: 'stitch', pairs, opencvUrl })
   })
 }
