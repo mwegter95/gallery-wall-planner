@@ -15,6 +15,7 @@
     "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@imgly/background-removal": "^1.7.0",
+    "@techstark/opencv-js": "^4.12.0-release.1",
     "heic2any": "^0.0.4",
     "onnxruntime-web": "^1.21.0",
     "react": "^19.2.4",

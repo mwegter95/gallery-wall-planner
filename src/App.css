@@ -5197,6 +5197,16 @@ kbd {
   border-color: #4a9eff;
   color: #a8d4ff;
 }
+.sb-btn--stitch {
+  background: linear-gradient(135deg, #2a1a40 0%, #1a0d28 100%);
+  border-color: #5a3080;
+  color: #c090ff;
+}
+.sb-btn--stitch:hover:not(:disabled) {
+  background: linear-gradient(135deg, #351f50 0%, #221138 100%);
+  border-color: #8855cc;
+  color: #ddb8ff;
+}
 .sb-btn--save {
   background: linear-gradient(135deg, #1a4030 0%, #0d2820 100%);
   border-color: #2a6040;

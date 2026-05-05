@@ -31,6 +31,8 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [previewData,     setPreviewData]     = useState(null) // { placements, warpedSurfaces }
   const [isWarping,       setIsWarping]       = useState(false)
   const [warpProgress,    setWarpProgress]    = useState(0)
+  const [isStitching,     setIsStitching]     = useState(false)
+  const [stitchProgress,  setStitchProgress]  = useState(0)
   const [isSaving,        setIsSaving]        = useState(false)
   const [isDragOver,      setIsDragOver]      = useState(false)
   // Layout management state (scoped to active surface)
@@ -131,7 +133,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       if (!photo) continue
       warpQueueRef.current.add(surface.id)
       warpSurface(surface, photo.dataUrl, photo.displayW, photo.displayH, warpPerspectiveAsync)
-        .then(url => updateSurface(surface.id, { warpedDataUrl: url }))
+        .then(url => updateSurface(surface.id, { warpedDataUrl: url, stitchedDataUrl: null }))
         .catch(err => {
           warpQueueRef.current.delete(surface.id)
           console.error('[SpaceBuilder] Auto-warp failed:', err)
@@ -321,7 +323,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
             )
             done++
             setWarpProgress(Math.round(done / Math.max(1, total) * 100))
-            return { ...surface, warpedDataUrl: url }
+            return { ...surface, warpedDataUrl: url, stitchedDataUrl: null }
           } catch {
             return surface
           }
@@ -337,6 +339,33 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     } finally {
       setIsWarping(false)
       setWarpProgress(0)
+    }
+  }
+
+  // ── Stitch Seams ──────────────────────────────────────────────────────────
+  const handleStitch = async () => {
+    if (isStitching || space.surfaces.length < 2) return
+    setIsStitching(true)
+    setStitchProgress(0)
+    try {
+      const { stitchSeams } = await import('../utils/seamBlend')
+      const results = await stitchSeams(
+        space.surfaces,
+        pct => setStitchProgress(pct),
+      )
+      if (results.size > 0) {
+        setSpace(prev => ({
+          ...prev,
+          surfaces: prev.surfaces.map(s =>
+            results.has(s.id) ? { ...s, stitchedDataUrl: results.get(s.id) } : s
+          ),
+        }))
+      }
+    } catch (err) {
+      console.error('[SpaceBuilder] Stitch seams failed:', err)
+    } finally {
+      setIsStitching(false)
+      setStitchProgress(0)
     }
   }
 
@@ -720,6 +749,25 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 <path d="M7 10l2-3 3 3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
               </svg>
               Add Photo
+            </button>
+
+            <button
+              className={`sb-btn sb-btn--stitch${isStitching ? ' sb-btn--loading' : ''}`}
+              onClick={handleStitch}
+              disabled={isStitching || isWarping || space.surfaces.length < 2}
+              title="Blend seams between connected surfaces"
+            >
+              {isStitching ? (
+                <><span className="btn-spinner" />{stitchProgress > 0 ? `${stitchProgress}%` : 'Stitching…'}</>
+              ) : (
+                <>
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                    <path d="M2 6.5h9M2 6.5L5 4M2 6.5L5 9M11 6.5L8 4M11 6.5L8 9"
+                      stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  Stitch Seams
+                </>
+              )}
             </button>
 
             <button

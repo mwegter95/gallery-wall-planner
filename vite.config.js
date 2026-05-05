@@ -66,7 +66,7 @@ export default defineConfig({
   optimizeDeps: {
     // These packages bundle WASM loaders / dynamic imports that Vite's
     // pre-bundler breaks — exclude them so they load at runtime as intended.
-    exclude: ['@imgly/background-removal', 'onnxruntime-web'],
+    exclude: ['@imgly/background-removal', 'onnxruntime-web', '@techstark/opencv-js'],
   },
 
   build: {

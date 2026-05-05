@@ -74,9 +74,10 @@ export function createSurfaceDef({ photoId = null, index = 0 } = {}) {
       bl: [m,     1 - m],
       br: [1 - m, 1 - m],
     },
-    warpedDataUrl: null,
-    colorIdx:      index % SURFACE_COLORS.length,
-    rotYDeg:       0,   // manual 3D rotation around Y axis (degrees)
+    warpedDataUrl:   null,
+    stitchedDataUrl: null,  // set by seamBlend.js; cleared on re-crop
+    colorIdx:        index % SURFACE_COLORS.length,
+    rotYDeg:         0,     // manual 3D rotation around Y axis (degrees)
     connections: {
       top:    null,  // null | { surfaceId, edge, angleDeg }
       bottom: null,

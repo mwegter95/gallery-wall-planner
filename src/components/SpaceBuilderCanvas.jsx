@@ -135,11 +135,12 @@ export default function SpaceBuilderCanvas({
     const meshMap = {}   // { [surfaceId]: { mesh, wM, hM } }
 
     // Returns the best available texture URL for a surface.
-    // Composited (pieces overlaid) URLs take priority over plain warpedDataUrl.
+    // Priority: composite overlay (pieces) > stitched seam > warped > raw photo.
     function getTexUrl(surface) {
       const cached = compTexCacheRef.current.get(surface.id)
       if (cached) return cached.dataUrl
-      if (surface.warpedDataUrl) return surface.warpedDataUrl
+      if (surface.stitchedDataUrl) return surface.stitchedDataUrl
+      if (surface.warpedDataUrl)   return surface.warpedDataUrl
       return stateRef.current.space.photos.find(p => p.id === surface.photoId)?.dataUrl || null
     }
 
@@ -458,7 +459,8 @@ export default function SpaceBuilderCanvas({
         continue
       }
       const pieces = surface.layouts?.[layoutName]?.pieces || []
-      const baseUrl = surface.warpedDataUrl
+      const baseUrl = surface.stitchedDataUrl
+        || surface.warpedDataUrl
         || space.photos.find(p => p.id === surface.photoId)?.dataUrl
         || null
       if (!baseUrl) continue
@@ -695,13 +697,13 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
   const polyStr = ['tl','tr','br','bl'].map(k => toSVG(corners[k]).join(',')).join(' ')
 
   async function applyAndWarp() {
-    onUpdateSurface(surfaceId, { corners, warpedDataUrl: null })
+    onUpdateSurface(surfaceId, { corners, warpedDataUrl: null, stitchedDataUrl: null })
     setIsWarping(true)
     try {
       const url = await warpSurface(
         { ...surface, corners }, photo.dataUrl, photo.displayW, photo.displayH, warpPerspectiveAsync
       )
-      onUpdateSurface(surfaceId, { corners, warpedDataUrl: url })
+      onUpdateSurface(surfaceId, { corners, warpedDataUrl: url, stitchedDataUrl: null })
     } finally { setIsWarping(false); onClose() }
   }
 
