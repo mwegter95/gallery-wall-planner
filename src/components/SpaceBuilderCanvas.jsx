@@ -88,7 +88,7 @@ const JOY_SPEED  = 0.028
 const PAN_SPEED  = 0.04  // orbit.center translation per frame per unit joystick deflection
 
 export default function SpaceBuilderCanvas({
-  space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection,
+  space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap,
 }) {
   const mountRef = useRef(null)
   const threeRef  = useRef(null)
@@ -104,7 +104,7 @@ export default function SpaceBuilderCanvas({
   setZoomRef.current = setZoomRadius
   const [joyPos,        setJoyPos]        = useState({ x: 0, y: 0 }) // orbit thumb CSS offset
   const [panJoyPos,     setPanJoyPos]     = useState({ x: 0, y: 0 }) // pan thumb CSS offset
-  stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection }
+  stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap }
 
   // ── Scene init (runs once) ───────────────────────────────────────────────
   useEffect(() => {
@@ -363,6 +363,9 @@ export default function SpaceBuilderCanvas({
           })
         }
         setSnapHint(null)
+      } else if (drag.type === 'surface' && !drag.hadMoved) {
+        // Tap (not drag) on a surface — notify parent to open panel on mobile
+        stateRef.current.onSurfaceTap?.()
       }
       drag.active = false; drag.hadMoved = false; drag.type = null; drag.surfaceId = null
     }
@@ -379,12 +382,51 @@ export default function SpaceBuilderCanvas({
       if (hit) setCropSurfaceId(hit.object.userData.surfaceId)
     }
 
+    // ── Touch equivalents for drag (orbit + surface move) ───────────────
+    function onTouchStart(e) {
+      if (e.touches.length !== 1) return
+      // Prevent scroll/zoom while dragging the canvas
+      e.preventDefault()
+      const t = e.touches[0]
+      onDown({ button: 0, clientX: t.clientX, clientY: t.clientY })
+    }
+    function onTouchMove(e) {
+      if (e.touches.length !== 1) return
+      e.preventDefault()
+      const t = e.touches[0]
+      onMove({ clientX: t.clientX, clientY: t.clientY, shiftKey: false })
+    }
+    function onTouchEnd(e) {
+      e.preventDefault()
+      // If double-tap (two rapid taps), treat as dblclick
+      const now = Date.now()
+      if (now - (canvas._lastTap || 0) < 300) {
+        const lx = canvas._lastTapX || 0, ly = canvas._lastTapY || 0
+        const ct = e.changedTouches[0]
+        if (Math.abs(ct.clientX - lx) < 20 && Math.abs(ct.clientY - ly) < 20) {
+          onDbl({ clientX: ct.clientX, clientY: ct.clientY })
+        }
+        canvas._lastTap = 0
+      } else {
+        canvas._lastTap = now
+        if (e.changedTouches[0]) {
+          canvas._lastTapX = e.changedTouches[0].clientX
+          canvas._lastTapY = e.changedTouches[0].clientY
+        }
+      }
+      onUp()
+    }
+
     const canvas = renderer.domElement
     canvas.addEventListener('mousedown', onDown)
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup',   onUp)
     canvas.addEventListener('wheel',     onWheel, { passive: true })
     canvas.addEventListener('dblclick',  onDbl)
+    // Touch events — passive:false so we can preventDefault and stop scroll
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false })
+    canvas.addEventListener('touchmove',  onTouchMove,  { passive: false })
+    canvas.addEventListener('touchend',   onTouchEnd,   { passive: false })
 
     const ro = new ResizeObserver(() => {
       camera.aspect = mount.clientWidth / mount.clientHeight
@@ -432,6 +474,9 @@ export default function SpaceBuilderCanvas({
       window.removeEventListener('mouseup',   onUp)
       canvas.removeEventListener('wheel',     onWheel)
       canvas.removeEventListener('dblclick',  onDbl)
+      canvas.removeEventListener('touchstart', onTouchStart)
+      canvas.removeEventListener('touchmove',  onTouchMove)
+      canvas.removeEventListener('touchend',   onTouchEnd)
       scene.traverse(o => {
         if (o.geometry) o.geometry.dispose()
         if (o.material?.map) o.material.map.dispose()

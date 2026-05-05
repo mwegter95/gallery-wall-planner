@@ -48,6 +48,8 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   // Wall-layout picker: which wall is expanded in the "Load from wall" section
   const [pickerWallId,    setPickerWallId]    = useState('')
   const [showEraseModal,  setShowEraseModal]  = useState(false)
+  // Mobile panel overlay
+  const [showMobilePanel, setShowMobilePanel] = useState(false)
   // Undo / redo
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
@@ -884,13 +886,28 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 <path d="M1 1l9 9M10 1L1 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
               </svg>
             </button>
+
+            {/* Mobile hamburger — opens surface panel */}
+            <button
+              className="sb-hamburger-btn"
+              onClick={() => setShowMobilePanel(v => !v)}
+              title="Open surfaces panel"
+              aria-label="Toggle surfaces panel"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+              </svg>
+            </button>
           </div>
         </div>
 
         {/* ── Body ────────────────────────────────────────────────────────── */}
         <div className="sb-body">
           {/* Canvas area */}
-          <div className="sb-canvas-area">
+          <div
+            className="sb-canvas-area"
+            onClick={() => showMobilePanel && setShowMobilePanel(false)}
+          >
             {isDragOver && (
               <div className="sb-drop-overlay">
                 <div className="sb-drop-message">
@@ -909,14 +926,33 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onSelectSurface={setActiveSurfaceId}
               onUpdateSurface={updateSurface}
               onSetConnection={setConnection}
+              onSurfaceTap={() => setShowMobilePanel(true)}
             />
           </div>
 
+          {/* Mobile overlay backdrop */}
+          {showMobilePanel && (
+            <div
+              className="sb-panel-overlay"
+              onClick={() => setShowMobilePanel(false)}
+            />
+          )}
+
           {/* Surface panel */}
-          <div className="sb-panel">
+          <div className={`sb-panel${showMobilePanel ? ' sb-panel--mobile-open' : ''}`}>
             <div className="sb-panel-header">
               <span className="sb-panel-title">Surfaces</span>
               <span className="sb-panel-count">{space.surfaces.length} / 12</span>
+              {/* Mobile close button */}
+              <button
+                className="sb-panel-close-btn"
+                onClick={() => setShowMobilePanel(false)}
+                title="Close panel"
+              >
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                  <path d="M1 1l9 9M10 1L1 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </button>
             </div>
 
             {/* Surface list (thumbnails / nav) */}

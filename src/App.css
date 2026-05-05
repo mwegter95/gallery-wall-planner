@@ -2997,7 +2997,8 @@ kbd {
   .app-header {
     padding: 0 10px;
     gap: 6px;
-    height: 52px;
+    min-height: 52px;
+    height: auto;
   }
 
   .header-brand {
@@ -3029,6 +3030,13 @@ kbd {
   .header-actions {
     gap: 4px;
     flex-shrink: 0;
+    padding: 4px 0;
+  }
+
+  /* When header wraps to two rows, give it some vertical breathing room */
+  .app-header {
+    padding-top: 6px;
+    padding-bottom: 6px;
   }
 
   /* Hide the login hint text; keep the button */
@@ -6586,3 +6594,480 @@ kbd {
   letter-spacing: 0.02em;
 }
 
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SPACEBUILDER — BRAND REDESIGN (matches main app design tokens)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Backdrop & shell ─────────────────────────────────────────────────── */
+.sb-backdrop {
+  background: rgba(0,0,0,0.9);
+}
+.sb-modal {
+  background: var(--stage-ink);
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+.sb-header {
+  background: var(--stage-ink-2);
+  border-bottom: 1px solid var(--stage-border);
+  padding: 8px 14px;
+  gap: 10px;
+}
+.sb-name-input {
+  border-bottom-color: var(--stage-border-2);
+  color: var(--stage-text-1);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+}
+.sb-name-input:focus { border-bottom-color: var(--stage-purple); }
+.sb-surface-count { color: var(--stage-text-3); }
+.sb-unsaved-dot { background: var(--stage-warning); }
+
+/* ── Room selector ────────────────────────────────────────────────────── */
+.sb-room-select {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+}
+.sb-room-select:focus { border-color: var(--stage-purple); }
+
+/* ── Save menu ────────────────────────────────────────────────────────── */
+.sb-save-menu {
+  background: var(--stage-ink-3);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+}
+.sb-save-menu-item { color: var(--stage-text-2); font-family: 'DM Sans', sans-serif; }
+.sb-save-menu-item:hover { background: var(--stage-mist-2); color: var(--stage-text-1); }
+.sb-save-menu-overwrite { color: var(--stage-purple-lt); font-weight: 600; }
+.sb-save-menu-divider { background: var(--stage-border); }
+.sb-save-menu-label { color: var(--stage-text-3); font-family: 'DM Sans', sans-serif; }
+.sb-save-menu-input {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-1);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-save-menu-input:focus { border-color: var(--stage-purple); }
+.sb-save-menu-go {
+  background: var(--stage-purple-dim);
+  border: 1px solid color-mix(in srgb, var(--stage-purple) 35%, transparent);
+  border-radius: var(--r-sm);
+  color: var(--stage-purple-lt);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 600;
+}
+.sb-save-menu-go:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--stage-purple) 22%, transparent);
+}
+
+/* ── Guard modal ──────────────────────────────────────────────────────── */
+.sb-guard-modal {
+  background: var(--stage-ink-3);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-xl);
+}
+.sb-guard-title { color: var(--stage-text-1); font-family: 'DM Sans', sans-serif; }
+.sb-guard-body  { color: var(--stage-text-3); font-family: 'DM Sans', sans-serif; }
+.sb-guard-btn {
+  border-radius: var(--r-sm);
+  border-color: var(--stage-border-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-guard-btn--back {
+  background: var(--stage-mist);
+  color: var(--stage-text-2);
+}
+.sb-guard-btn--back:hover { background: var(--stage-mist-2); }
+.sb-guard-btn--save {
+  background: var(--stage-purple-dim);
+  color: var(--stage-purple-lt);
+  border-color: color-mix(in srgb, var(--stage-purple) 35%, transparent);
+}
+.sb-guard-btn--save:hover:not(:disabled) { background: color-mix(in srgb, var(--stage-purple) 22%, transparent); }
+.sb-guard-btn--saveas {
+  background: var(--stage-mist);
+  color: var(--stage-text-2);
+  border-color: var(--stage-border-2);
+}
+.sb-guard-btn--saveas:hover:not(:disabled) { background: var(--stage-mist-2); color: var(--stage-text-1); }
+.sb-guard-btn--discard {
+  background: color-mix(in srgb, var(--stage-danger) 10%, transparent);
+  color: var(--stage-danger);
+  border-color: color-mix(in srgb, var(--stage-danger) 30%, transparent);
+}
+.sb-guard-btn--discard:hover { background: color-mix(in srgb, var(--stage-danger) 18%, transparent); }
+
+/* ── Toolbar buttons (sb-btn) — use brand token colors ──────────────── */
+.sb-btn {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--r-sm);
+  transition:
+    background var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+.sb-btn--ghost {
+  background: var(--stage-mist);
+  border-color: var(--stage-border-2);
+  color: var(--stage-text-2);
+}
+.sb-btn--ghost:hover {
+  background: var(--stage-mist-2);
+  border-color: var(--stage-mist-3);
+  color: var(--stage-text-1);
+}
+.sb-btn--preview {
+  background: var(--stage-mist);
+  border-color: var(--stage-border-2);
+  color: var(--stage-text-2);
+}
+.sb-btn--preview:hover:not(:disabled) {
+  background: var(--stage-mist-2);
+  border-color: var(--stage-mist-3);
+  color: var(--stage-text-1);
+}
+.sb-btn--stitch {
+  background: var(--stage-purple-dim);
+  border-color: color-mix(in srgb, var(--stage-purple) 35%, transparent);
+  color: var(--stage-purple-lt);
+}
+.sb-btn--stitch:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--stage-purple) 22%, transparent);
+  border-color: var(--stage-purple);
+  color: var(--stage-white);
+}
+.sb-btn--erase {
+  background: color-mix(in srgb, var(--stage-danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--stage-danger) 28%, transparent);
+  color: var(--stage-danger);
+}
+.sb-btn--erase:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--stage-danger) 18%, transparent);
+  border-color: color-mix(in srgb, var(--stage-danger) 45%, transparent);
+  color: color-mix(in srgb, var(--stage-danger) 80%, white);
+}
+.sb-btn--save {
+  background: var(--stage-purple);
+  border-color: var(--stage-purple);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}
+.sb-btn--save:hover:not(:disabled) {
+  background: var(--stage-purple-lt);
+  border-color: var(--stage-purple-lt);
+  box-shadow: 0 2px 8px var(--stage-purple-glow), var(--shadow-sm);
+}
+
+/* ── Close button ─────────────────────────────────────────────────────── */
+.sb-close-btn {
+  background: transparent;
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-3);
+}
+.sb-close-btn:hover {
+  background: color-mix(in srgb, var(--stage-danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--stage-danger) 45%, transparent);
+  color: var(--stage-danger);
+}
+
+/* ── Canvas area ──────────────────────────────────────────────────────── */
+.sb-canvas-area {
+  background: var(--stage-ink);
+  background-image:
+    repeating-linear-gradient(0deg,  transparent, transparent 39px, rgba(245,240,232,0.03) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(245,240,232,0.03) 40px);
+}
+.sb-modal--drag-over .sb-canvas-area {
+  outline-color: var(--stage-purple);
+}
+.sb-drop-message { color: var(--stage-purple-lt); }
+
+/* ── Surface panel ────────────────────────────────────────────────────── */
+.sb-panel {
+  background: var(--stage-ink-2);
+  border-left: 1px solid var(--stage-border);
+}
+.sb-panel-header {
+  border-bottom: 1px solid var(--stage-border);
+}
+.sb-panel-title {
+  color: var(--stage-text-3);
+  letter-spacing: 0.08em;
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-panel-count { color: var(--stage-text-3); }
+
+/* ── Surface list items ───────────────────────────────────────────────── */
+.sb-surface-list { border-bottom-color: var(--stage-border); }
+.sb-surf-row {
+  background: transparent;
+  border-bottom: 1px solid var(--stage-border);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-surf-row:hover { background: var(--stage-mist); color: var(--stage-text-1); }
+.sb-surf-row--active { background: var(--stage-mist-2) !important; color: var(--stage-text-1) !important; }
+.sb-surf-dims { color: var(--stage-text-3); font-family: 'DM Mono', monospace; }
+.sb-surf-warped-badge { color: var(--stage-success); }
+.sb-surf-add-btn {
+  color: var(--stage-text-3);
+  font-family: 'DM Sans', sans-serif;
+  border-top: 1px solid var(--stage-border);
+}
+.sb-surf-add-btn:hover:not(:disabled) { background: var(--stage-mist); color: var(--stage-text-1); }
+
+/* ── Surface editor section titles & controls ─────────────────────────── */
+.sb-panel-editor {
+  background: var(--stage-ink-2);
+}
+.sb-panel-empty { color: var(--stage-text-3); }
+.sb-panel-empty strong { color: var(--stage-text-2); }
+.sb-se-section-title {
+  color: var(--stage-text-3);
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.sb-se-label { color: var(--stage-text-2); font-family: 'DM Sans', sans-serif; }
+.sb-se-input {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-1);
+  font-family: 'DM Mono', monospace;
+}
+.sb-se-input:focus { border-color: var(--stage-purple); outline: none; }
+.sb-se-select {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-se-select:focus { border-color: var(--stage-purple); outline: none; }
+.sb-se-rewarp-btn {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-se-rewarp-btn:hover { background: var(--stage-mist-2); color: var(--stage-text-1); }
+
+/* ── Layout section ───────────────────────────────────────────────────── */
+.sb-layout-name-input {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-1);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-layout-name-input:focus { border-color: var(--stage-purple); outline: none; }
+.sb-layout-row {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-layout-row:hover { border-color: var(--stage-border-2); color: var(--stage-text-1); }
+.sb-layout-row--active {
+  background: var(--stage-purple-dim);
+  border-color: color-mix(in srgb, var(--stage-purple) 35%, transparent);
+  color: var(--stage-purple-lt);
+}
+.sb-layout-row-count { color: var(--stage-text-3); font-family: 'DM Mono', monospace; }
+.sb-layout-del-btn { color: var(--stage-danger) !important; }
+
+/* ── Pieces section ───────────────────────────────────────────────────── */
+.sb-pieces-header span { color: var(--stage-text-2); font-family: 'DM Sans', sans-serif; }
+.sb-pieces-empty { color: var(--stage-text-3); font-family: 'DM Sans', sans-serif; }
+.sb-piece-row {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border);
+  border-radius: var(--r-sm);
+}
+.sb-piece-row:hover { background: var(--stage-mist-2); }
+.sb-piece-name { color: var(--stage-text-1); font-family: 'DM Sans', sans-serif; }
+.sb-piece-dims { color: var(--stage-text-3); font-family: 'DM Mono', monospace; }
+.sb-piece-del-btn { color: var(--stage-text-3) !important; }
+.sb-piece-del-btn:hover { color: var(--stage-danger) !important; }
+
+/* ── Library picker ───────────────────────────────────────────────────── */
+.sb-lib-picker {
+  background: var(--stage-ink-3);
+  border: 1px solid var(--stage-border);
+  border-radius: var(--r-md);
+}
+.sb-lib-empty { color: var(--stage-text-3); font-family: 'DM Sans', sans-serif; }
+.sb-lib-item {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sb-lib-item:hover {
+  background: var(--stage-mist-2);
+  border-color: var(--stage-purple);
+  color: var(--stage-text-1);
+}
+.sb-lib-item-name { color: var(--stage-text-2); }
+
+/* ── Wall-layouts picker ──────────────────────────────────────────────── */
+.sb-wall-layouts { border-top-color: var(--stage-border); }
+
+/* ── Photo grip / 2D panel ────────────────────────────────────────────── */
+.sbc-photo-wrap {
+  box-shadow: var(--shadow-md), 0 0 0 1px var(--stage-border);
+}
+.sbc-photo-grip {
+  background: var(--stage-ink-3);
+  border: 1px solid var(--stage-border);
+  border-bottom: none;
+}
+.sbc-photo-grip-dots { color: var(--stage-text-3); }
+.sbc-photo-label { color: var(--stage-text-3); font-family: 'DM Sans', sans-serif; }
+.sbc-photo-btn {
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-xs);
+  color: var(--stage-text-2);
+  font-family: 'DM Sans', sans-serif;
+}
+.sbc-photo-btn:hover { background: var(--stage-mist-2); color: var(--stage-text-1); }
+
+/* ── Mobile hamburger button ─────────────────────────────────────────── */
+.sb-hamburger-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: var(--stage-mist);
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-2);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.sb-hamburger-btn:hover { background: var(--stage-mist-2); color: var(--stage-text-1); }
+
+/* ── Panel close button (mobile only) ───────────────────────────────── */
+.sb-panel-close-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid var(--stage-border-2);
+  border-radius: var(--r-sm);
+  color: var(--stage-text-3);
+  cursor: pointer;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.sb-panel-close-btn:hover {
+  color: var(--stage-danger);
+  border-color: color-mix(in srgb, var(--stage-danger) 45%, transparent);
+}
+
+/* ── Mobile overlay backdrop ─────────────────────────────────────────── */
+.sb-panel-overlay {
+  display: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SPACEBUILDER — MOBILE LAYOUT  (@max-width 768px)
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* Header: allow wrapping */
+  .sb-header {
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    min-height: auto;
+    height: auto;
+  }
+  .sb-header-left {
+    flex: 1;
+    min-width: 0;
+    gap: 6px;
+  }
+  .sb-name-input {
+    min-width: 100px;
+    font-size: 13px;
+  }
+  .sb-header-actions {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  /* Show hamburger */
+  .sb-hamburger-btn { display: flex; }
+
+  /* Slightly smaller buttons */
+  .sb-btn {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+  .sb-btn--icon { padding: 5px 7px; }
+
+  /* Body: canvas takes full width */
+  .sb-body {
+    position: relative;
+  }
+  .sb-canvas-area {
+    width: 100%;
+    flex: 1;
+  }
+
+  /* Surface panel: hidden by default on mobile, slides in as overlay */
+  .sb-panel {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 50;
+    width: min(300px, 88vw);
+    transform: translateX(100%);
+    transition: transform var(--t-mid) var(--ease-out);
+    box-shadow: var(--shadow-xl);
+  }
+  .sb-panel--mobile-open {
+    transform: translateX(0);
+  }
+
+  /* Semi-transparent backdrop behind the panel */
+  .sb-panel-overlay {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0,0,0,0.45);
+    backdrop-filter: blur(1px);
+  }
+
+  /* Show close button in panel header */
+  .sb-panel-close-btn { display: flex; }
+
+  /* Comfortable touch targets in surface editor */
+  .sb-panel-editor { padding: 10px 12px; }
+  .sb-se-input { font-size: 13px; padding: 5px 8px; }
+}
