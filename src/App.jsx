@@ -462,9 +462,41 @@ export default function App() {
   /* ── Space Builder save ──────────────────────────────── */
   const handleSaveSpace = useCallback(async (space) => {
     // Store the full space (including photo data URLs) as a room record.
-    // Photos are kept inline for now (same approach as paint layer masks).
     await api.putRoom(space)
     setRooms(prev => ({ ...prev, [space.id]: space }))
+
+    // Sync each surface as a linked wall so they appear in the wall selector
+    setWalls(prev => {
+      const next = { ...prev }
+      for (const surface of space.surfaces) {
+        const wallId   = surface.id
+        const existing = prev[wallId]
+        const wall = {
+          id:        wallId,
+          name:      surface.name,
+          width:     surface.widthIn,
+          height:    surface.heightIn,
+          roomId:    space.id,
+          createdAt: existing?.createdAt || Date.now(),
+          imageUrl:  existing?.imageUrl  || null,
+        }
+        next[wallId] = wall
+        // Save wall metadata immediately (fire-and-forget)
+        api.putWall(wall).catch(console.error)
+        // Upload the perspective-warped surface image as the wall photo
+        if (surface.warpedDataUrl) {
+          api.uploadWallImage(wallId, surface.warpedDataUrl)
+            .then(({ url }) => {
+              const updated = { ...wall, imageUrl: url }
+              setWalls(p => ({ ...p, [wallId]: updated }))
+              api.putWall(updated).catch(console.error)
+            })
+            .catch(console.error)
+        }
+      }
+      return next
+    })
+
     setShowSpaceBuilder(false)
     setShowSpaceMgr(false)
     setEditingSpaceId(null)
@@ -1352,6 +1384,7 @@ export default function App() {
           walls={walls}
           wallImages={wallImages}
           allLayouts={allLayouts}
+          rooms={rooms}
           activeWallId={activeWallId}
           onSelect={handleSelectWall}
           onCreate={handleCreateWall}

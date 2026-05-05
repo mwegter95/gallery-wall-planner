@@ -2340,6 +2340,52 @@ kbd {
    WALL MANAGER MODAL
    ══════════════════════════════════════════════════ */
 
+/* ── WallManager tabs ─────────────────────────────────────────────── */
+.wm-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+.wm-tab {
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.1s;
+}
+.wm-tab:hover { color: var(--text-primary); }
+.wm-tab--active { color: var(--accent); border-bottom-color: var(--accent); }
+.wm-tab-badge {
+  background: var(--accent-muted);
+  color: var(--accent);
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* ── WallManager room groups ────────────────────────────────────────── */
+.wm-room-section { margin-bottom: 6px; }
+.wm-room-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 4px;
+  color: var(--text-secondary);
+}
+.wm-room-name { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+.wm-room-count { font-size: 11px; color: var(--text-secondary); margin-left: auto; }
+.wm-wall-row--indented { padding-left: 24px; }
+
 .wm-backdrop {
   position: fixed;
   inset: 0;
@@ -5743,6 +5789,77 @@ kbd {
   font-size: 10px;
   color: #3a5566;
   letter-spacing: .04em;
+}
+
+/* ── FOV preset bar — top-left of 3D viewport ─────────────────────────── */
+.sbc-fov-bar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 4px;
+  z-index: 20;
+}
+.sbc-fov-btn {
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(8,13,20,0.72);
+  color: #7a9baf;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.sbc-fov-btn:hover { color: #c8dde8; border-color: rgba(255,255,255,0.25); }
+.sbc-fov-btn--active {
+  background: rgba(74,158,255,0.15);
+  border-color: rgba(74,158,255,0.55);
+  color: #4a9eff;
+}
+
+/* ── Joystick — top-center of 3D viewport ─────────────────────────────── */
+.sbc-joystick {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(var(--jr) * 2);
+  height: calc(var(--jr) * 2);
+  border-radius: 50%;
+  border: 1.5px solid rgba(74,158,255,0.22);
+  background: rgba(8,13,20,0.55);
+  backdrop-filter: blur(6px);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sbc-joystick:active { cursor: grabbing; }
+.sbc-joystick-thumb {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--jt) * 2);
+  height: calc(var(--jt) * 2);
+  border-radius: 50%;
+  background: rgba(74,158,255,0.7);
+  box-shadow: 0 0 8px rgba(74,158,255,0.4);
+  pointer-events: none;
+  transition: background 0.1s;
+}
+.sbc-joystick:active .sbc-joystick-thumb { background: rgba(74,158,255,0.95); }
+.sbc-joystick-arrows {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  color: #4a9eff;
 }
 .sbc-3d-empty {
   position: absolute;

@@ -8,6 +8,7 @@ export default function WallManager({
   walls,
   wallImages = {},
   allLayouts = {},
+  rooms = {},
   activeWallId,
   onSelect,
   onCreate,
@@ -18,6 +19,7 @@ export default function WallManager({
   unitSystem = 'imperial',
   onUnitSystemChange,
 }) {
+  const [tab,       setTab]       = useState('walls') // 'walls' | 'rooms'
   const [newName,   setNewName]   = useState('')
   const [newWidth,  setNewWidth]  = useState(unitSystem === 'metric' ? inToCmInt(DEFAULT_W) : DEFAULT_W)
   const [newHeight, setNewHeight] = useState(unitSystem === 'metric' ? inToCmInt(DEFAULT_H) : DEFAULT_H)
@@ -76,6 +78,12 @@ export default function WallManager({
     setEditName('')
   }
 
+  // Group room-linked walls by roomId
+  const roomIds = [...new Set(
+    Object.values(walls).filter(w => w.roomId).map(w => w.roomId)
+  )]
+  const standaloneWalls = wallList.filter(w => !w.roomId)
+
   return (
     <div className="wm-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="wm-modal">
@@ -86,8 +94,102 @@ export default function WallManager({
           </button>
         </div>
 
-        {/* ── Wall list ──────────────────────────────── */}
-        <div className="wm-list">
+        {/* ── Tabs ──────────────────────────────────── */}
+        <div className="wm-tabs">
+          <button className={`wm-tab ${tab === 'walls' ? 'wm-tab--active' : ''}`} onClick={() => setTab('walls')}>
+            All Walls
+          </button>
+          <button className={`wm-tab ${tab === 'rooms' ? 'wm-tab--active' : ''}`} onClick={() => setTab('rooms')}>
+            Rooms
+            {roomIds.length > 0 && <span className="wm-tab-badge">{roomIds.length}</span>}
+          </button>
+        </div>
+
+        {/* ── Rooms tab ─────────────────────────────── */}
+        {tab === 'rooms' && (
+          <div className="wm-list">
+            {roomIds.length === 0 && (
+              <p className="wm-empty">No rooms yet. Build a space in the Space Builder to create one.</p>
+            )}
+            {roomIds.map(roomId => {
+              const room = rooms[roomId]
+              const roomWalls = wallList.filter(w => w.roomId === roomId)
+              return (
+                <div key={roomId} className="wm-room-section">
+                  <div className="wm-room-header">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <path d="M1 12V5l6-4 6 4v7H9V8.5H5V12H1Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/>
+                    </svg>
+                    <span className="wm-room-name">{room?.name || 'Unnamed Room'}</span>
+                    <span className="wm-room-count">{roomWalls.length} wall{roomWalls.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  {roomWalls.map(wall => {
+                    const isActive = wall.id === activeWallId
+                    const layoutCount = Object.keys(allLayouts[wall.id] || {}).length
+                    return (
+                      <div key={wall.id} className={`wm-wall-row wm-wall-row--indented ${isActive ? 'wm-wall-row--active' : ''}`}>
+                        <div className="wm-thumb">
+                          {wallImages[wall.id]
+                            ? <img src={wallImages[wall.id]} alt={wall.name} />
+                            : <span className="wm-thumb-icon"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><rect x="2" y="4" width="16" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><circle cx="7" cy="8.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/><path d="M2 13l4-3 3 3 3-3 4 3" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"/></svg></span>
+                          }
+                        </div>
+                        <div className="wm-wall-info">
+                          <span className="wm-wall-name">
+                            {wall.name}
+                            {isActive && <span className="wm-active-badge">active</span>}
+                          </span>
+                          <span className="wm-wall-dims">{fmtDimPair(wall.width, wall.height, unitSystem)}</span>
+                          <span className="wm-layout-count">
+                            {layoutCount === 0 ? 'No saved layouts' : `${layoutCount} layout${layoutCount !== 1 ? 's' : ''}`}
+                          </span>
+                        </div>
+                        <div className="wm-wall-actions">
+                          {!isActive && (
+                            <button className="btn btn-primary btn-sm" onClick={() => { onSelect(wall.id); onClose() }}>
+                              Open
+                            </button>
+                          )}
+                          <button className="btn btn-ghost btn-sm" title="Upload / recalibrate wall photo" onClick={() => { onSetupWall(wall.id); onClose() }}>
+                            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" className="btn-icon"><rect x="1" y="4" width="11" height="7" rx="1" stroke="currentColor" strokeWidth="1.25"/><path d="M4.5 4V3a1.5 1.5 0 013 0v1" stroke="currentColor" strokeWidth="1.25"/><circle cx="6.5" cy="7.5" r="1.5" stroke="currentColor" strokeWidth="1.25"/></svg>
+                            Recalibrate
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })}
+            {standaloneWalls.length > 0 && roomIds.length > 0 && (
+              <div className="wm-room-section">
+                <div className="wm-room-header">
+                  <span className="wm-room-name" style={{ color: 'var(--text-secondary)' }}>Standalone Walls</span>
+                </div>
+                {standaloneWalls.map(wall => {
+                  const isActive = wall.id === activeWallId
+                  return (
+                    <div key={wall.id} className={`wm-wall-row wm-wall-row--indented ${isActive ? 'wm-wall-row--active' : ''}`}>
+                      <div className="wm-thumb">
+                        {wallImages[wall.id] ? <img src={wallImages[wall.id]} alt={wall.name} /> : <span className="wm-thumb-icon">🖼</span>}
+                      </div>
+                      <div className="wm-wall-info">
+                        <span className="wm-wall-name">{wall.name}{isActive && <span className="wm-active-badge">active</span>}</span>
+                        <span className="wm-wall-dims">{fmtDimPair(wall.width, wall.height, unitSystem)}</span>
+                      </div>
+                      <div className="wm-wall-actions">
+                        {!isActive && <button className="btn btn-primary btn-sm" onClick={() => { onSelect(wall.id); onClose() }}>Open</button>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── All Walls tab ──────────────────────────── */}
+        {tab === 'walls' && <div className="wm-list">
           {wallList.length === 0 && (
             <p className="wm-empty">No walls yet. Create one below.</p>
           )}
@@ -173,7 +275,7 @@ export default function WallManager({
               </div>
             )
           })}
-        </div>
+        </div>}
 
         {/* ── Create new wall ────────────────────────── */}
         <div className="wm-create">

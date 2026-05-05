@@ -76,6 +76,16 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
   })
 }
 
+const FOV_PRESETS = [
+  { label: 'Normal', fov: 55  },
+  { label: 'Wide',   fov: 90  },
+  { label: 'Fish',   fov: 120 },
+  { label: 'Ultra',  fov: 140 },
+]
+const JOY_RADIUS = 36   // outer pad radius px
+const JOY_THUMB  = 13   // thumb radius px
+const JOY_SPEED  = 0.028
+
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection,
 }) {
@@ -83,8 +93,11 @@ export default function SpaceBuilderCanvas({
   const threeRef  = useRef(null)
   const stateRef  = useRef({})
   const compTexCacheRef = useRef(new Map()) // Map<surfaceId, { key: string, dataUrl: string }>
+  const joystickRef = useRef({ active: false, nx: 0, ny: 0 })  // read in RAF loop
   const [snapHint,      setSnapHint]      = useState(null)
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
+  const [fov,           setFov]           = useState(55)
+  const [joyPos,        setJoyPos]        = useState({ x: 0, y: 0 }) // thumb CSS offset
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection }
 
   // ── Scene init (runs once) ───────────────────────────────────────────────
@@ -347,7 +360,8 @@ export default function SpaceBuilderCanvas({
     }
 
     function onWheel(e) {
-      orbit.radius = Math.max(0.5, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
+      // Allow radius as low as 0.1 m so the camera can move inside the room
+      orbit.radius = Math.max(0.1, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
       applyOrbit()
     }
 
@@ -371,10 +385,20 @@ export default function SpaceBuilderCanvas({
     ro.observe(mount)
 
     let raf
-    const animate = () => { raf = requestAnimationFrame(animate); renderer.render(scene, camera) }
+    const animate = () => {
+      raf = requestAnimationFrame(animate)
+      // Continuous joystick orbit — joystickRef is a stable ref, always current
+      const joy = joystickRef.current
+      if (joy.active && (joy.nx !== 0 || joy.ny !== 0)) {
+        orbit.theta -= joy.nx * JOY_SPEED
+        orbit.phi   += joy.ny * JOY_SPEED
+        applyOrbit()
+      }
+      renderer.render(scene, camera)
+    }
     animate()
 
-    threeRef.current = { syncMeshes, applySelection, meshMap }
+    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera }
 
     return () => {
       cancelAnimationFrame(raf)
@@ -473,6 +497,41 @@ export default function SpaceBuilderCanvas({
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Update camera FOV whenever the preset changes
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t?.camera) return
+    t.camera.fov = fov
+    t.camera.updateProjectionMatrix()
+  }, [fov])
+
+  // ── Joystick pointer handlers ────────────────────────────────────────────
+  const handleJoyDown = (e) => {
+    e.currentTarget.setPointerCapture(e.pointerId)
+    joystickRef.current.active = true
+  }
+  const handleJoyMove = (e) => {
+    if (!joystickRef.current.active) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const cx = rect.left + rect.width  / 2
+    const cy = rect.top  + rect.height / 2
+    const dx = e.clientX - cx
+    const dy = e.clientY - cy
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    const maxDist = JOY_RADIUS - JOY_THUMB
+    const clamped = dist > maxDist ? maxDist / dist : 1
+    const tx = dx * clamped, ty = dy * clamped
+    joystickRef.current.nx = tx / maxDist
+    joystickRef.current.ny = ty / maxDist
+    setJoyPos({ x: tx, y: ty })
+  }
+  const handleJoyUp = () => {
+    joystickRef.current.active = false
+    joystickRef.current.nx = 0
+    joystickRef.current.ny = 0
+    setJoyPos({ x: 0, y: 0 })
+  }
+
   return (
     <div ref={mountRef} className="sbc-3d-viewport">
       {snapHint && (
@@ -480,13 +539,52 @@ export default function SpaceBuilderCanvas({
           ⚡ snap: <strong>{snapHint.fromEdge}</strong> → <strong>{snapHint.toEdge}</strong> — release to connect
         </div>
       )}
+
+      {/* ── FOV presets — top-left ────────────────────────────────────── */}
+      <div className="sbc-fov-bar">
+        {FOV_PRESETS.map(p => (
+          <button
+            key={p.label}
+            className={`sbc-fov-btn${fov === p.fov ? ' sbc-fov-btn--active' : ''}`}
+            onClick={() => setFov(p.fov)}
+            title={`${p.fov}° field of view`}
+          >{p.label}</button>
+        ))}
+      </div>
+
+      {/* ── Joystick — top-center ─────────────────────────────────────── */}
+      <div
+        className="sbc-joystick"
+        style={{ '--jr': `${JOY_RADIUS}px` }}
+        onPointerDown={handleJoyDown}
+        onPointerMove={handleJoyMove}
+        onPointerUp={handleJoyUp}
+        onPointerLeave={handleJoyUp}
+        title="Drag to orbit"
+      >
+        <div
+          className="sbc-joystick-thumb"
+          style={{
+            '--jt': `${JOY_THUMB}px`,
+            transform: `translate(calc(-50% + ${joyPos.x}px), calc(-50% + ${joyPos.y}px))`,
+          }}
+        />
+        {/* Cardinal arrows */}
+        <svg className="sbc-joystick-arrows" viewBox="0 0 72 72" fill="none">
+          <path d="M36 10l-5 8h10l-5-8Z" fill="currentColor" opacity=".35"/>
+          <path d="M36 62l-5-8h10l-5 8Z" fill="currentColor" opacity=".35"/>
+          <path d="M10 36l8-5v10l-8-5Z" fill="currentColor" opacity=".35"/>
+          <path d="M62 36l-8-5v10l8-5Z" fill="currentColor" opacity=".35"/>
+        </svg>
+      </div>
+
       <div className="sbc-3d-legend">
-        <span>Drag bg: orbit</span>
+        <span>Drag bg / joystick: orbit</span>
         <span>Drag surface: move XZ</span>
         <span>Shift+drag: raise/lower</span>
         <span>←→↑↓: rotate (Shift=fine)</span>
         <span>Dbl-click: crop corners</span>
-        <span>Scroll: zoom</span>
+        <span>Scroll: zoom in/out</span>
       </div>
       {space.surfaces.length === 0 && (
         <div className="sbc-3d-empty">
