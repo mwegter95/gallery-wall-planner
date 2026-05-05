@@ -215,12 +215,13 @@ self.onmessage = ({ data }) => {
   const { imageData, mask: maskIn } = data
   const { width: w, height: h }     = imageData
 
-  console.log(`[inpaintWorker] start: ${w}×${h}, mask pixels: ${maskIn.data.filter(Boolean).length}`)
-
   try {
     // Working copies — Uint8Array (not Uint8ClampedArray) so we can index freely
+    // imageData.data and maskIn.data arrive as ArrayBuffer (transferred via Transferable).
     const img  = new Uint8Array(imageData.data)
     const mask = new Uint8Array(maskIn.data)
+
+    console.log(`[inpaintWorker] start: ${w}×${h}, mask pixels: ${mask.filter(Boolean).length}`)
 
     const origMask = new Uint8Array(mask)   // keep for feather pass
     const C        = buildConfidence(mask, w, h)
