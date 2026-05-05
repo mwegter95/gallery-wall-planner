@@ -25,7 +25,13 @@ const TOOLS = [
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 function loadImage(src) {
   return new Promise((res, rej) => {
-    const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = src
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => res(img)
+    img.onerror = rej
+    // For remote URLs, append a cache-busting param so the browser re-fetches
+    // with the CORS request rather than serving the cached no-CORS version.
+    img.src = src.startsWith('data:') ? src : src + (src.includes('?') ? '&' : '?') + '_cors=1'
   })
 }
 

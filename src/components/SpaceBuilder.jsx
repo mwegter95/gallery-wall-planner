@@ -717,7 +717,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
             <button
               className={`sb-btn sb-btn--stitch${isStitching ? ' sb-btn--loading' : ''}`}
               onClick={handleStitch}
-              disabled={isStitching || isWarping || space.surfaces.length < 2}
+              disabled={isStitching || space.surfaces.length < 2}
               title="Blend seams between connected surfaces"
             >
               {isStitching ? (
