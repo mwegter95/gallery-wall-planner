@@ -16,10 +16,27 @@
  *   This completely bypasses Vite/Rollup bundling of the 10 MB Emscripten file,
  *   which was corrupting the WASM init path in production worker chunks.
  *
- * Pipeline per seam pair:
- *   1. ORB feature matching + RANSAC homography (panoramic alignment).
- *   2. Per-scanline colour/tone correction at the seam.
- *   3. Corner-crease shadow gradient.
+ * Two-pass pipeline per connected pair (A.rightEdge ↔ B.leftEdge):
+ *
+ *   Pass 1 — Geometric alignment  (wide zone, ~13 % of texture width)
+ *     • ORB keypoint detection + BFMatcher cross-check on both edge strips
+ *     • RANSAC homography H (B-strip coords → A-strip coords)
+ *     • Warp B's blend zone using H (content re-alignment, NO colour change)
+ *     • Smoothstep blend: 100 % warped at seam edge, 0 % at boundary
+ *     • Falls back silently if < MIN_MATCHES inliers found
+ *
+ *   Pass 2 — Narrow pixel feather  (SEAM_FEATHER_PX ≈ 12 px)
+ *     • Sample the single-pixel-wide edge column of each surface
+ *     • Blend each surface toward the neighbour's actual edge colour
+ *     • Linear fade over 12 px — invisible but removes any remaining
+ *       hard colour discontinuity at the seam
+ *     • MAX blend strength 50 % so it never "averages in" a visible band
+ *
+ * Why this avoids the "shadow in the corner" problem:
+ *   Colour work is confined to 12 px at 50% max — sub-perceptual.
+ *   The heavy lifting is done by the geometric warp which rearranges
+ *   pixels without changing their colours.  No additive tinting, no
+ *   dark gradient overlay, no colour-correction smear.
  *
  * Uses OffscreenCanvas + createImageBitmap (no DOM access needed).
  */
@@ -32,17 +49,10 @@ async function loadCV() {
   if (_cv) { console.log('[seamBlendWorker] loadCV: cached'); return _cv }
   console.log('[seamBlendWorker] loadCV: starting…')
   try {
-    // opencv.js is served from public/ as a plain static file.
-    // importScripts() is synchronous — it blocks until the script is fully
-    // downloaded, parsed, and executed in the worker's global scope.
-    // The UMD wrapper in opencv.js detects `typeof importScripts === 'function'`
-    // and does: root.cv = factory()  where root = this = self
-    // So self.cv becomes the cv Promise immediately after importScripts returns.
     const url = self.location.origin + '/opencv.js'
     console.log('[seamBlendWorker] loadCV: importScripts from', url)
     importScripts(url)
     console.log('[seamBlendWorker] loadCV: importScripts done')
-    console.log('[seamBlendWorker] loadCV: typeof self.cv =', typeof self.cv)
 
     const raw = self.cv
     if (raw == null) throw new Error('self.cv not set after importScripts')
@@ -64,7 +74,7 @@ async function loadCV() {
     return _cv
   } catch (err) {
     console.warn('[seamBlendWorker] loadCV FAILED:', err.message)
-    return null   // caller falls back to colour-only mode
+    return null   // caller falls back to feather-only mode
   }
 }
 
@@ -96,21 +106,17 @@ async function canvasToDataUrl(canvas) {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-// Blend zone for colour correction / shadow — kept tight so the only visible
-// change is right at the physical corner, not a wide smear into the image.
-const BLEND_FRACTION = 0.05
-const MAX_BLEND_PX   = 48
-const SAMPLE_PX      = 28      // wider sample → more stable per-scanline average
+const BLEND_FRACTION  = 0.13   // geometric warp zone width (% of perpendicular dim)
+const MAX_BLEND_PX    = 130    // px cap on warp zone
+const SEAM_FEATHER_PX = 12     // narrow colour-feather width (pass 2)
 // ORB panoramic alignment
-const ORB_FEATURES   = 800     // more features → better match on wall photos
-const MIN_MATCHES    = 6
-const NORM_SIZE      = 512     // higher res strip for ORB → more accurate H
-// Corner-crease shadow
-const SHADOW_PX      = 60
-const SHADOW_ALPHA   = 0.30
+const ORB_FEATURES    = 800    // more features → better match on wall photos
+const MIN_MATCHES     = 6
+const NORM_SIZE       = 512    // higher res strip for ORB → more accurate H
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
+/** { x, y, w, h } of the blend zone strip for the given edge + width. */
 function stripRect(edge, cw, ch, blendW) {
   switch (edge) {
     case 'right':  return { x: cw - blendW, y: 0,           w: blendW, h: ch }
@@ -121,16 +127,10 @@ function stripRect(edge, cw, ch, blendW) {
   }
 }
 
-// ── ORB geometric alignment ───────────────────────────────────────────────────
+// ── Pass 1: ORB geometric alignment ──────────────────────────────────────────
 
 /**
- * Estimate a homography H that maps pixels in strip B into the coordinate
- * frame of strip A (RANSAC, NORM_SIZE normalisation).
- *
- * This is the panoramic-stitching step: if the sofa arm, doorframe, or any
- * structural element crosses the room corner, ORB finds corresponding points
- * on both walls and H corrects the perspective so they line up cleanly.
- *
+ * Estimate homography H that maps pixels in strip B into strip A's frame.
  * Returns a cv.Mat (caller must .delete() it) or null on failure.
  */
 function computeHomography(cv, imgDataA, imgDataB) {
@@ -164,7 +164,7 @@ function computeHomography(cv, imgDataA, imgDataB) {
     return null
   }
 
-  const bf      = new cv.BFMatcher(cv.NORM_HAMMING, true)  // cross-check enabled
+  const bf      = new cv.BFMatcher(cv.NORM_HAMMING, true)
   const matches = new cv.DMatchVector()
   bf.match(dA, dB, matches)
 
@@ -180,6 +180,7 @@ function computeHomography(cv, imgDataA, imgDataB) {
     return null
   }
 
+  // H maps B coords → A coords
   const srcPts = [], dstPts = []
   for (const m of best) {
     srcPts.push(kpB.get(m.trainIdx).pt.x, kpB.get(m.trainIdx).pt.y)
@@ -200,48 +201,41 @@ function computeHomography(cv, imgDataA, imgDataB) {
 
   if (inliers < MIN_MATCHES || !H || H.empty()) {
     if (H && !H.empty()) H.delete()
-    console.log('[seamBlendWorker] ORB: not enough inliers, falling back to colour-only')
+    console.log('[seamBlendWorker] ORB: not enough inliers, falling back to feather-only')
     return null
   }
   return H
 }
 
 /**
- * Warp a strip's ImageData using H (NORM_SIZE-normalised → native resolution).
- * Returns a new ImageData the same size as origData.
+ * Warp B's blend zone using H (normalised space) and blend into ctx with smoothstep.
+ * Pixels at the seam edge are 100 % warped; at blendW they are 100 % original.
+ * Only pixel positions are rearranged — colours are never mixed or tinted.
  */
-function warpStrip(cv, H, origData) {
-  const { width: sw, height: sh } = origData
+function applyGeometricWarp(cv, ctx, edge, cw, ch, blendW, H) {
   const del = (...m) => m.forEach(x => { try { x?.delete() } catch (_) {} })
-
-  const mat     = cv.matFromImageData(origData)
-  const resized = new cv.Mat()
-  cv.resize(mat, resized, new cv.Size(NORM_SIZE, NORM_SIZE))
-  const warped  = new cv.Mat()
-  cv.warpPerspective(resized, warped, H,
-    new cv.Size(NORM_SIZE, NORM_SIZE), cv.INTER_LINEAR, cv.BORDER_REFLECT)
-  const full = new cv.Mat()
-  cv.resize(warped, full, new cv.Size(sw, sh))
-  const rgba = new cv.Mat()
-  if      (full.channels() === 1) cv.cvtColor(full, rgba, cv.COLOR_GRAY2RGBA)
-  else if (full.channels() === 3) cv.cvtColor(full, rgba, cv.COLOR_RGB2RGBA)
-  else    full.copyTo(rgba)
-
-  const result = new ImageData(new Uint8ClampedArray(rgba.data), sw, sh)
-  del(mat, resized, warped, full, rgba)
-  return result
-}
-
-/**
- * Feather-blend a warped strip back into the canvas blend zone.
- *
- * Weight: smoothstep 1→0 from the seam edge inward.
- * Only the blend zone pixels are overwritten; the rest of the image is untouched.
- */
-function applyWarpedStrip(ctx, edge, cw, ch, blendW, origData, warpedData) {
   const { x, y, w, h } = stripRect(edge, cw, ch, blendW)
-  const od = origData.data, wd = warpedData.data
-  const bd = new Uint8ClampedArray(w * h * 4)
+
+  const origData = ctx.getImageData(x, y, w, h)
+  const origMat  = cv.matFromImageData(origData)
+  const resized  = new cv.Mat()
+  cv.resize(origMat, resized, new cv.Size(NORM_SIZE, NORM_SIZE))
+  const warped   = new cv.Mat()
+  cv.warpPerspective(resized, warped, H, new cv.Size(NORM_SIZE, NORM_SIZE),
+    cv.INTER_LINEAR, cv.BORDER_REFLECT)
+  const warpedFull = new cv.Mat()
+  cv.resize(warped, warpedFull, new cv.Size(w, h))
+
+  // Ensure RGBA
+  const rgba = new cv.Mat()
+  const ch4 = warpedFull.channels()
+  if      (ch4 === 1) cv.cvtColor(warpedFull, rgba, cv.COLOR_GRAY2RGBA)
+  else if (ch4 === 3) cv.cvtColor(warpedFull, rgba, cv.COLOR_RGB2RGBA)
+  else                warpedFull.copyTo(rgba)
+
+  const wd  = rgba.data
+  const od  = origData.data
+  const out = new Uint8ClampedArray(od.length)
 
   for (let row = 0; row < h; row++) {
     for (let col = 0; col < w; col++) {
@@ -251,113 +245,100 @@ function applyWarpedStrip(ctx, edge, cw, ch, blendW, origData, warpedData) {
         case 'right':  dist = w - 1 - col; break
         case 'top':    dist = row;         break
         case 'bottom': dist = h - 1 - row; break
-        default:       dist = 0
+        default: dist = 0
       }
       const t  = Math.min(1, dist / blendW)
-      const wt = 1 - t * t * (3 - 2 * t)   // smoothstep: 1 at seam, 0 at blendW
+      const wt = 1 - t * t * (3 - 2 * t)   // smoothstep: 1 at seam edge, 0 at boundary
       const i  = (row * w + col) * 4
-      bd[i]     = Math.round(od[i]     * (1 - wt) + wd[i]     * wt)
-      bd[i + 1] = Math.round(od[i + 1] * (1 - wt) + wd[i + 1] * wt)
-      bd[i + 2] = Math.round(od[i + 2] * (1 - wt) + wd[i + 2] * wt)
-      bd[i + 3] = 255
+      out[i]     = Math.round(od[i]     * (1 - wt) + wd[i]     * wt)
+      out[i + 1] = Math.round(od[i + 1] * (1 - wt) + wd[i + 1] * wt)
+      out[i + 2] = Math.round(od[i + 2] * (1 - wt) + wd[i + 2] * wt)
+      out[i + 3] = 255
     }
   }
-  ctx.putImageData(new ImageData(bd, w, h), x, y)
+  ctx.putImageData(new ImageData(out, w, h), x, y)
+  del(origMat, resized, warped, warpedFull, rgba)
 }
 
-// ── Colour correction helpers ─────────────────────────────────────────────────
+// ── Pass 2: Narrow pixel feather ──────────────────────────────────────────────
 
-function getSeamAvg(ctx, edge, cw, ch) {
-  const sp    = Math.min(SAMPLE_PX, (edge === 'left' || edge === 'right') ? cw : ch)
-  const { x, y, w, h } = stripRect(edge, cw, ch, sp)
+/**
+ * Sample the single-pixel column (or row) right at the seam edge.
+ * Returns Float32Array of length seamLen * 3 (one RGB per scanline position).
+ */
+function getSeamEdgePixels(ctx, edge, cw, ch) {
+  const isVert = edge === 'left' || edge === 'right'
+  let x, y, w, h
+  switch (edge) {
+    case 'right':  x = cw - 1; y = 0;      w = 1;  h = ch; break
+    case 'left':   x = 0;      y = 0;      w = 1;  h = ch; break
+    case 'bottom': x = 0;      y = ch - 1; w = cw; h = 1;  break
+    case 'top':    x = 0;      y = 0;      w = cw; h = 1;  break
+    default:       x = 0;      y = 0;      w = 1;  h = ch
+  }
   const { data } = ctx.getImageData(x, y, w, h)
-  const isVert  = edge === 'left' || edge === 'right'
-  const seamLen = isVert ? h : w
-  const scanLen = isVert ? w : h
-  const avg     = new Float32Array(seamLen * 3)
-  for (let i = 0; i < seamLen; i++) {
-    let r = 0, g = 0, b = 0
-    for (let j = 0; j < scanLen; j++) {
-      const pi = isVert ? (i * w + j) * 4 : (j * w + i) * 4
-      r += data[pi]; g += data[pi + 1]; b += data[pi + 2]
-    }
-    avg[i * 3] = r / scanLen; avg[i * 3 + 1] = g / scanLen; avg[i * 3 + 2] = b / scanLen
+  const len = isVert ? ch : cw
+  const result = new Float32Array(len * 3)
+  for (let i = 0; i < len; i++) {
+    result[i * 3]     = data[i * 4]
+    result[i * 3 + 1] = data[i * 4 + 1]
+    result[i * 3 + 2] = data[i * 4 + 2]
   }
-  return avg
+  return result
 }
 
+/** Linear resample a seamLen*3 Float32Array to dstLen*3. */
 function resampleSeam(src, srcLen, dstLen) {
   if (srcLen === dstLen) return src
   const dst = new Float32Array(dstLen * 3)
   for (let i = 0; i < dstLen; i++) {
-    const t   = i / Math.max(1, dstLen - 1)
-    const pos = t * (srcLen - 1)
-    const lo  = Math.floor(pos), hi = Math.min(srcLen - 1, lo + 1)
-    const f   = pos - lo
-    for (let c = 0; c < 3; c++) dst[i * 3 + c] = src[lo * 3 + c] * (1 - f) + src[hi * 3 + c] * f
+    const t    = i / Math.max(1, dstLen - 1)
+    const pos  = t * (srcLen - 1)
+    const lo   = Math.floor(pos)
+    const hi   = Math.min(srcLen - 1, lo + 1)
+    const frac = pos - lo
+    dst[i * 3]     = src[lo * 3]     * (1 - frac) + src[hi * 3]     * frac
+    dst[i * 3 + 1] = src[lo * 3 + 1] * (1 - frac) + src[hi * 3 + 1] * frac
+    dst[i * 3 + 2] = src[lo * 3 + 2] * (1 - frac) + src[hi * 3 + 2] * frac
   }
   return dst
 }
 
-function applyColorCorrection(ctx, edge, cw, ch, blendW, seamAvg, targetSeam) {
-  const isVert = edge === 'left' || edge === 'right'
-  const { x: x0, y: y0, w: scanW, h: scanH } = stripRect(edge, cw, ch, blendW)
-  const iData = ctx.getImageData(x0, y0, scanW, scanH)
+/**
+ * Blend the surface's edge pixels toward targetColors (from the neighbour)
+ * over a narrow SEAM_FEATHER_PX strip.  Max blend = 50 % so it never
+ * "averages in" a visible band — just eliminates the hard colour jump.
+ */
+function applyNarrowSeamFeather(ctx, edge, cw, ch, targetColors, seamLen) {
+  const fp = Math.min(SEAM_FEATHER_PX, edge === 'left' || edge === 'right' ? cw : ch)
+  const { x, y, w, h } = stripRect(edge, cw, ch, fp)
+  const iData = ctx.getImageData(x, y, w, h)
   const d     = iData.data
+  const isVert = edge === 'left' || edge === 'right'
 
-  for (let row = 0; row < scanH; row++) {
-    for (let col = 0; col < scanW; col++) {
+  for (let row = 0; row < h; row++) {
+    for (let col = 0; col < w; col++) {
       let dist
       switch (edge) {
-        case 'right':  dist = scanW - 1 - col; break
-        case 'left':   dist = col;              break
-        case 'bottom': dist = scanH - 1 - row; break
-        case 'top':    dist = row;              break
-        default:       dist = 0
+        case 'left':   dist = col;         break
+        case 'right':  dist = w - 1 - col; break
+        case 'top':    dist = row;         break
+        case 'bottom': dist = h - 1 - row; break
+        default: dist = 0
       }
-      const t  = Math.min(1, dist / blendW)
-      const wt = 1 - t * t * (3 - 2 * t)
-      if (wt <= 0.002) continue
-      const si = (isVert ? row : col) * 3
-      const pi = (row * scanW + col) * 4
-      // 60% additive + 40% multiplicative: handles both dark and bright pixels
-      // without the hue drift of pure-additive or the near-black failure of pure-mult.
-      for (let c = 0; c < 3; c++) {
-        const src  = d[pi + c]
-        const avg  = seamAvg[si + c]
-        const tgt  = targetSeam[si + c]
-        const add  = src + (tgt - avg) * wt
-        const mult = avg > 4 ? src * (1 + ((tgt / avg) - 1) * wt) : add
-        d[pi + c]  = Math.round(Math.min(255, Math.max(0, add * 0.6 + mult * 0.4)))
-      }
+      const t  = dist / fp
+      const wt = 0.5 * (1 - t)   // max 50 %, linear — keeps things subtle
+      if (wt < 0.002) continue
+
+      const scanPos = isVert ? row : col
+      const si = Math.min(scanPos, seamLen - 1) * 3
+      const pi = (row * w + col) * 4
+      d[pi]     = Math.round(d[pi]     * (1 - wt) + targetColors[si]     * wt)
+      d[pi + 1] = Math.round(d[pi + 1] * (1 - wt) + targetColors[si + 1] * wt)
+      d[pi + 2] = Math.round(d[pi + 2] * (1 - wt) + targetColors[si + 2] * wt)
     }
   }
-  ctx.putImageData(iData, x0, y0)
-}
-
-/**
- * Paint a natural corner-crease shadow at the seam edge.
- * This reinforces the physical corner between two walls without any smearing.
- */
-function addCornerShadow(ctx, edge, cw, ch) {
-  const sw = Math.min(SHADOW_PX,
-    Math.round((edge === 'left' || edge === 'right' ? cw : ch) * 0.08))
-
-  let gx0, gy0, gx1, gy1, rx, ry, rw, rh
-  switch (edge) {
-    case 'right':  gx0=cw-sw; gy0=0;    gx1=cw;   gy1=0;   rx=cw-sw; ry=0;    rw=sw; rh=ch; break
-    case 'left':   gx0=sw;    gy0=0;    gx1=0;    gy1=0;   rx=0;     ry=0;    rw=sw; rh=ch; break
-    case 'bottom': gx0=0;     gy0=ch-sw;gx1=0;    gy1=ch;  rx=0;     ry=ch-sw;rw=cw; rh=sw; break
-    case 'top':    gx0=0;     gy0=sw;   gx1=0;    gy1=0;   rx=0;     ry=0;    rw=cw; rh=sw; break
-    default: return
-  }
-
-  const grad = ctx.createLinearGradient(gx0, gy0, gx1, gy1)
-  grad.addColorStop(0,   'rgba(0,0,0,0)')
-  grad.addColorStop(0.45, `rgba(0,0,0,${(SHADOW_ALPHA * 0.4).toFixed(3)})`)
-  grad.addColorStop(1,   `rgba(0,0,0,${SHADOW_ALPHA.toFixed(3)})`)
-  ctx.fillStyle = grad
-  ctx.fillRect(rx, ry, rw, rh)
+  ctx.putImageData(iData, x, y)
 }
 
 // ── Main per-pair blend ───────────────────────────────────────────────────────
@@ -371,12 +352,8 @@ async function blendPair(cv, dataUrlA, edgeA, dataUrlB, edgeB) {
   const ctxB = cB.getContext('2d', { willReadFrequently: true })
 
   const isVert = edgeA === 'left' || edgeA === 'right'
-  const perpA  = isVert ? cA.width : cA.height
-  const perpB  = isVert ? cB.width : cB.height
   const blendW = Math.max(4, Math.min(MAX_BLEND_PX,
-    Math.round(perpA * BLEND_FRACTION),
-    Math.round(perpB * BLEND_FRACTION),
-  ))
+    Math.round((isVert ? Math.min(cA.width, cB.width) : Math.min(cA.height, cB.height)) * BLEND_FRACTION)))
   console.log(`[seamBlendWorker] blendPair: blendW=${blendW} cv=${cv ? 'ready' : 'null'}`)
 
   // ── Pass 1: ORB geometric / panoramic alignment ────────────────────────────
@@ -389,35 +366,30 @@ async function blendPair(cv, dataUrlA, edgeA, dataUrlB, edgeB) {
       const H   = computeHomography(cv, idA, idB)
       if (H) {
         try {
-          const origB   = ctxB.getImageData(rB.x, rB.y, rB.w, rB.h)
-          const warpedB = warpStrip(cv, H, origB)
-          applyWarpedStrip(ctxB, edgeB, cB.width, cB.height, blendW, origB, warpedB)
-          console.log('[seamBlendWorker] ORB warp applied to B')
+          applyGeometricWarp(cv, ctxB, edgeB, cB.width, cB.height, blendW, H)
+          console.log('[seamBlendWorker] geometric warp applied to B')
         } finally {
           try { H.delete() } catch (_) {}
         }
       }
     } catch (err) {
-      console.warn('[seamBlendWorker] ORB pass failed, continuing with colour-only:', err.message)
+      console.warn('[seamBlendWorker] ORB pass failed, continuing with feather-only:', err.message)
     }
   }
 
-  // ── Pass 2: Per-scanline colour/tone correction ────────────────────────────
+  // ── Pass 2: Narrow pixel feather ───────────────────────────────────────────
+  // Re-read edge pixels AFTER the geometric warp so the feather targets post-warp colours
   const seamLenA = isVert ? cA.height : cA.width
   const seamLenB = isVert ? cB.height : cB.width
-  const avgA     = getSeamAvg(ctxA, edgeA, cA.width, cA.height)
-  const avgB     = getSeamAvg(ctxB, edgeB, cB.width, cB.height)
-  const rAvgB    = resampleSeam(avgB, seamLenB, seamLenA)
-  const targetA  = new Float32Array(seamLenA * 3)
-  for (let i = 0; i < seamLenA * 3; i++) targetA[i] = (avgA[i] + rAvgB[i]) / 2
-  const targetB  = resampleSeam(targetA, seamLenA, seamLenB)
 
-  applyColorCorrection(ctxA, edgeA, cA.width, cA.height, blendW, avgA, targetA)
-  applyColorCorrection(ctxB, edgeB, cB.width, cB.height, blendW, avgB, targetB)
+  const edgePixA = getSeamEdgePixels(ctxA, edgeA, cA.width, cA.height)
+  const edgePixB = getSeamEdgePixels(ctxB, edgeB, cB.width, cB.height)
 
-  // ── Pass 3: Corner-crease shadow ───────────────────────────────────────────
-  addCornerShadow(ctxA, edgeA, cA.width, cA.height)
-  addCornerShadow(ctxB, edgeB, cB.width, cB.height)
+  // A feathers toward B's post-warp edge; B feathers toward A's edge
+  applyNarrowSeamFeather(ctxA, edgeA, cA.width, cA.height,
+    resampleSeam(edgePixB, seamLenB, seamLenA), seamLenA)
+  applyNarrowSeamFeather(ctxB, edgeB, cB.width, cB.height,
+    resampleSeam(edgePixA, seamLenA, seamLenB), seamLenB)
 
   return {
     dataUrlA: await canvasToDataUrl(cA),
@@ -439,7 +411,7 @@ self.onmessage = async ({ data }) => {
     type: 'progress', pct: 12,
     status: cv
       ? `Stitching ${pairs.length} seam${pairs.length !== 1 ? 's' : ''}…`
-      : `Blending ${pairs.length} seam${pairs.length !== 1 ? 's' : ''} (colour mode)…`,
+      : `Feathering ${pairs.length} seam${pairs.length !== 1 ? 's' : ''} (no OpenCV)…`,
   })
 
   const resultMap = {}
@@ -465,4 +437,3 @@ self.onmessage = async ({ data }) => {
   console.log('[seamBlendWorker] done')
   self.postMessage({ type: 'done', results: Object.entries(resultMap) })
 }
-
