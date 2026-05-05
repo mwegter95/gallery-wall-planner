@@ -24,12 +24,65 @@ function edgeWorldMid(mesh, edge, wM, hM) {
 }
 function dims(s) { return { wM: s.widthIn * IN_TO_M, hM: s.heightIn * IN_TO_M } }
 
+/**
+ * Draw piece overlays on top of a base texture and return a composite data URL.
+ * Base URL → offscreen canvas → draw each piece (image or solid colour) → JPEG.
+ */
+async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
+  return new Promise((resolve, reject) => {
+    const base = new Image()
+    base.onload = async () => {
+      const canvas = document.createElement('canvas')
+      canvas.width  = base.naturalWidth
+      canvas.height = base.naturalHeight
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(base, 0, 0)
+
+      const cW = canvas.width
+      const cH = canvas.height
+
+      for (const piece of pieces) {
+        const px = (piece.x      / surface.widthIn)  * cW
+        const py = (piece.y      / surface.heightIn) * cH
+        const pw = (piece.width  / surface.widthIn)  * cW
+        const ph = (piece.height / surface.heightIn) * cH
+
+        if (piece.image) {
+          await new Promise(res => {
+            const img = new Image()
+            img.crossOrigin = 'anonymous'
+            img.onload  = () => { ctx.drawImage(img, px, py, pw, ph); res() }
+            img.onerror = res  // skip on error
+            img.src = piece.image
+          })
+        } else {
+          // Solid colour fill
+          ctx.fillStyle = piece.color || '#888888'
+          ctx.fillRect(px, py, pw, ph)
+          // Piece name label
+          const fontSize = Math.max(10, Math.min(ph * 0.18, 22))
+          ctx.font      = `bold ${fontSize}px sans-serif`
+          ctx.fillStyle = '#ffffff'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(piece.name || '', px + pw / 2, py + ph / 2, pw)
+        }
+      }
+
+      resolve(canvas.toDataURL('image/jpeg', 0.92))
+    }
+    base.onerror = reject
+    base.src = baseDataUrl
+  })
+}
+
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection,
 }) {
   const mountRef = useRef(null)
-  const threeRef = useRef(null)
-  const stateRef = useRef({})
+  const threeRef  = useRef(null)
+  const stateRef  = useRef({})
+  const compTexCacheRef = useRef(new Map()) // Map<surfaceId, { key: string, dataUrl: string }>
   const [snapHint,      setSnapHint]      = useState(null)
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection }
@@ -65,8 +118,11 @@ export default function SpaceBuilderCanvas({
     const texLoader = new THREE.TextureLoader()
     const meshMap = {}   // { [surfaceId]: { mesh, wM, hM } }
 
-    // Returns the best available texture URL for a surface
+    // Returns the best available texture URL for a surface.
+    // Composited (pieces overlaid) URLs take priority over plain warpedDataUrl.
     function getTexUrl(surface) {
+      const cached = compTexCacheRef.current.get(surface.id)
+      if (cached) return cached.dataUrl
       if (surface.warpedDataUrl) return surface.warpedDataUrl
       return stateRef.current.space.photos.find(p => p.id === surface.photoId)?.dataUrl || null
     }
@@ -341,6 +397,54 @@ export default function SpaceBuilderCanvas({
 
   useEffect(() => { threeRef.current?.syncMeshes(space.surfaces) }, [space.surfaces])
   useEffect(() => { threeRef.current?.applySelection(activeSurfaceId) }, [activeSurfaceId])
+
+  // ── Composite piece overlays onto surface textures ───────────────────────
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+
+    // Collect surfaces that need (re-)compositing
+    const toProcess = []
+    for (const surface of space.surfaces) {
+      const layoutName = surface.activeLayout
+      if (!layoutName) {
+        // No active layout — clear any cached composite so we revert to base texture
+        if (compTexCacheRef.current.has(surface.id)) {
+          compTexCacheRef.current.delete(surface.id)
+          // Force syncMeshes to pick up the now-uncached base texture
+        }
+        continue
+      }
+      const pieces = surface.layouts?.[layoutName]?.pieces || []
+      const baseUrl = surface.warpedDataUrl
+        || space.photos.find(p => p.id === surface.photoId)?.dataUrl
+        || null
+      if (!baseUrl) continue
+
+      const key = baseUrl + '|' + JSON.stringify(pieces)
+      const cached = compTexCacheRef.current.get(surface.id)
+      if (cached?.key === key) continue  // already up-to-date
+
+      toProcess.push({ surface, baseUrl, pieces, key })
+    }
+
+    if (toProcess.length === 0) return
+
+    // Composite async, then re-sync meshes once all done
+    ;(async () => {
+      let changed = false
+      for (const { surface, baseUrl, pieces, key } of toProcess) {
+        try {
+          const dataUrl = await compositePiecesOntoTexture(surface, baseUrl, pieces)
+          compTexCacheRef.current.set(surface.id, { key, dataUrl })
+          changed = true
+        } catch (err) {
+          console.error('[SpaceBuilderCanvas] composite failed for', surface.id, err)
+        }
+      }
+      if (changed) t.syncMeshes(stateRef.current.space.surfaces)
+    })()
+  }, [space]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard: rotate selected surface
   useEffect(() => {

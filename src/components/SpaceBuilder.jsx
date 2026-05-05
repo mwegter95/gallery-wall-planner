@@ -10,14 +10,14 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import * as THREE from 'three'
 import SpaceBuilderCanvas from './SpaceBuilderCanvas'
 import {
-  createSpace, createPhoto, createSurfaceDef,
-  assembleSurfaces, warpSurface, SURFACE_COLORS,
+  createSpace, createPhoto, createSurfaceDef, genId,
+  assembleSurfaces, warpSurface, createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
 } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
-export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
+export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {} }) {
   const [space, setSpace]                 = useState(() => existingSpace
     ? JSON.parse(JSON.stringify(existingSpace))
     : createSpace()
@@ -29,7 +29,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
   const [warpProgress,    setWarpProgress]    = useState(0)
   const [isSaving,        setIsSaving]        = useState(false)
   const [isDragOver,      setIsDragOver]      = useState(false)
-  const fileInputRef = useRef(null)
+  // Layout management state (scoped to active surface)
+  const [layoutNameInput, setLayoutNameInput] = useState('')
+  const [showLibPicker,   setShowLibPicker]   = useState(false)
+  const fileInputRef  = useRef(null)
+  const warpQueueRef  = useRef(new Set())
 
   const activeSurface = space.surfaces.find(s => s.id === activeSurfaceId)
 
@@ -48,6 +52,25 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
     }))
   }, [])
 
+  // Auto-warp any surface that has a photo but no warped image yet
+  useEffect(() => {
+    const toWarp = space.surfaces.filter(
+      s => !s.warpedDataUrl && s.photoId && !warpQueueRef.current.has(s.id)
+    )
+    for (const surface of toWarp) {
+      const photo = space.photos.find(p => p.id === surface.photoId)
+      if (!photo) continue
+      warpQueueRef.current.add(surface.id)
+      warpSurface(surface, photo.dataUrl, photo.displayW, photo.displayH, warpPerspectiveAsync)
+        .then(url => updateSurface(surface.id, { warpedDataUrl: url }))
+        .catch(err => {
+          warpQueueRef.current.delete(surface.id)
+          console.error('[SpaceBuilder] Auto-warp failed:', err)
+        })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [space.surfaces, space.photos])
+
   const addPhotoFromFile = useCallback((file) => {
     if (!file) return
     const reader = new FileReader()
@@ -57,30 +80,25 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
       img.onload = () => {
         const displayW = Math.min(680, img.naturalWidth)
         const displayH = Math.round(displayW * img.naturalHeight / img.naturalWidth)
-        // Capture the newly created surface so we can auto-warp outside the updater
-        let autoSurface = null
+        // Generate stable IDs outside the updater so React Strict Mode double-runs
+        // don't cause mismatched surface IDs between the warp callback and state
+        const photoId   = genId()
+        const surfaceId = genId()
         setSpace(prev => {
           const photo   = createPhoto({ dataUrl, displayW, displayH, index: prev.photos.length })
           const surface = createSurfaceDef({ photoId: photo.id, index: prev.surfaces.length })
-          autoSurface = surface
-          setActiveSurfaceId(surface.id)
           return {
             ...prev,
-            photos:   [...prev.photos,   photo],
-            surfaces: [...prev.surfaces, surface],
+            photos:   [...prev.photos,   { ...photo,   id: photoId }],
+            surfaces: [...prev.surfaces, { ...surface, id: surfaceId, photoId }],
           }
         })
-        // Auto-warp with default corners immediately after adding to state
-        if (autoSurface) {
-          warpSurface(autoSurface, dataUrl, displayW, displayH, warpPerspectiveAsync)
-            .then(url => updateSurface(autoSurface.id, { warpedDataUrl: url }))
-            .catch(() => {})
-        }
+        setActiveSurfaceId(surfaceId)
       }
       img.src = dataUrl
     }
     reader.readAsDataURL(file)
-  }, [updateSurface])
+  }, [])
 
   const handleAddPhotoClick = () => fileInputRef.current?.click()
 
@@ -146,6 +164,59 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
   const setConnection = useCallback((surfaceId, edge, value) => {
     updateSurface(surfaceId, {
       connections: { ...space.surfaces.find(s => s.id === surfaceId)?.connections, [edge]: value },
+    })
+  }, [space.surfaces, updateSurface])
+
+  // ── Layout management (per surface) ──────────────────────────────────────
+  const saveSurfaceLayout = useCallback((surfaceId, name) => {
+    const surface = space.surfaces.find(s => s.id === surfaceId)
+    if (!surface || !name.trim()) return
+    // Preserve existing pieces if the layout already exists, otherwise start empty
+    const existing = surface.layouts?.[name] || createSurfaceLayout(name)
+    updateSurface(surfaceId, {
+      layouts:      { ...surface.layouts, [name]: existing },
+      activeLayout: name,
+    })
+    setLayoutNameInput('')
+  }, [space.surfaces, updateSurface])
+
+  const loadSurfaceLayout = useCallback((surfaceId, name) => {
+    updateSurface(surfaceId, { activeLayout: name })
+  }, [updateSurface])
+
+  const deleteSurfaceLayout = useCallback((surfaceId, name) => {
+    const surface = space.surfaces.find(s => s.id === surfaceId)
+    if (!surface) return
+    const next = { ...surface.layouts }
+    delete next[name]
+    updateSurface(surfaceId, {
+      layouts:      next,
+      activeLayout: surface.activeLayout === name ? '' : surface.activeLayout,
+    })
+  }, [space.surfaces, updateSurface])
+
+  const addPieceToLayout = useCallback((surfaceId, libItem) => {
+    const surface = space.surfaces.find(s => s.id === surfaceId)
+    if (!surface) return
+    const layoutName = surface.activeLayout || 'Default'
+    const existing   = surface.layouts?.[layoutName] || { pieces: [], paintLayerIds: [] }
+    const newPiece   = createSurfacePiece(libItem, surface)
+    updateSurface(surfaceId, {
+      layouts:      { ...surface.layouts, [layoutName]: { ...existing, pieces: [...existing.pieces, newPiece] } },
+      activeLayout: layoutName,
+    })
+  }, [space.surfaces, updateSurface])
+
+  const removePieceFromLayout = useCallback((surfaceId, pieceId) => {
+    const surface = space.surfaces.find(s => s.id === surfaceId)
+    if (!surface?.activeLayout) return
+    const existing = surface.layouts?.[surface.activeLayout]
+    if (!existing) return
+    updateSurface(surfaceId, {
+      layouts: {
+        ...surface.layouts,
+        [surface.activeLayout]: { ...existing, pieces: existing.pieces.filter(p => p.id !== pieceId) },
+      },
     })
   }, [space.surfaces, updateSurface])
 
@@ -347,6 +418,117 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose }) {
         >
           {activeSurface.warpedDataUrl ? '↺ Re-crop on next preview' : 'Not yet warped'}
         </button>
+
+        {/* ── Layouts ─────────────────────────────────────────────── */}
+        <div className="sb-se-section-title">Layouts</div>
+
+        {/* Save / create layout */}
+        <div className="sb-layout-save-row">
+          <input
+            className="sb-layout-name-input"
+            placeholder="Layout name…"
+            value={layoutNameInput}
+            onChange={e => setLayoutNameInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && saveSurfaceLayout(activeSurface.id, layoutNameInput)}
+          />
+          <button
+            className="btn btn-sm btn-primary"
+            disabled={!layoutNameInput.trim()}
+            onClick={() => saveSurfaceLayout(activeSurface.id, layoutNameInput)}
+          >Save</button>
+        </div>
+
+        {/* Saved layouts list */}
+        {Object.keys(activeSurface.layouts || {}).length > 0 && (
+          <div className="sb-layout-list">
+            {Object.keys(activeSurface.layouts).map(name => {
+              const isActive = name === activeSurface.activeLayout
+              const count    = activeSurface.layouts[name]?.pieces?.length || 0
+              return (
+                <div key={name} className={`sb-layout-row${isActive ? ' sb-layout-row--active' : ''}`}>
+                  <span className="sb-layout-row-name">{name}</span>
+                  <span className="sb-layout-row-count">{count} piece{count !== 1 ? 's' : ''}</span>
+                  <div className="sb-layout-row-actions">
+                    {!isActive && (
+                      <button
+                        className="btn btn-ghost btn-xs"
+                        onClick={() => loadSurfaceLayout(activeSurface.id, name)}
+                      >Load</button>
+                    )}
+                    <button
+                      className="btn btn-ghost btn-xs sb-layout-del-btn"
+                      onClick={() => deleteSurfaceLayout(activeSurface.id, name)}
+                    >✕</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {/* Art pieces in active layout */}
+        {activeSurface.activeLayout && activeSurface.layouts?.[activeSurface.activeLayout] && (
+          <div className="sb-pieces-section">
+            <div className="sb-pieces-header">
+              <span>Art in "{activeSurface.activeLayout}"</span>
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={() => setShowLibPicker(v => !v)}
+              >+ Add piece</button>
+            </div>
+
+            {/* Library picker */}
+            {showLibPicker && (
+              <div className="sb-lib-picker">
+                {Object.keys(library).length === 0 && (
+                  <p className="sb-lib-empty">No library pieces yet. Add art from the main wall first.</p>
+                )}
+                <div className="sb-lib-grid">
+                  {Object.values(library).map(item => (
+                    <button
+                      key={item.id}
+                      className="sb-lib-item"
+                      title={`${item.name} — ${item.width}″ × ${item.height}″`}
+                      onClick={() => { addPieceToLayout(activeSurface.id, item); setShowLibPicker(false) }}
+                    >
+                      {item.image
+                        ? <img src={item.image} alt={item.name} className="sb-lib-item-img" />
+                        : <div className="sb-lib-item-color" style={{ background: item.color || '#555' }} />
+                      }
+                      <span className="sb-lib-item-name">{item.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Placed pieces */}
+            {(activeSurface.layouts[activeSurface.activeLayout].pieces || []).length === 0 && !showLibPicker && (
+              <p className="sb-pieces-empty">No pieces yet. Click "+ Add piece" to place art.</p>
+            )}
+            <div className="sb-pieces-list">
+              {(activeSurface.layouts[activeSurface.activeLayout].pieces || []).map(piece => (
+                <div key={piece.id} className="sb-piece-row">
+                  <div className="sb-piece-thumb">
+                    {piece.image
+                      ? <img src={piece.image} alt="" className="sb-piece-thumb-img" />
+                      : <div className="sb-piece-thumb-color" style={{ background: piece.color || '#555' }} />
+                    }
+                  </div>
+                  <div className="sb-piece-info">
+                    <span className="sb-piece-name">{piece.name}</span>
+                    <span className="sb-piece-dims">{piece.width}″ × {piece.height}″</span>
+                  </div>
+                  <button
+                    className="sb-piece-del-btn"
+                    title="Remove from layout"
+                    onClick={() => removePieceFromLayout(activeSurface.id, piece.id)}
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     )
   }

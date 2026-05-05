@@ -5478,6 +5478,144 @@ kbd {
 .sb-se-rewarp-btn:hover:not(:disabled) { background: rgba(74,158,255,0.06); color: #6aacda; border-color: #2a4a6a; }
 .sb-se-rewarp-btn:disabled { opacity: 0.4; cursor: default; }
 
+/* ── Surface panel: Layouts section ─────────────────────────────────────────── */
+.sb-se-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #4a9eff;
+  margin: 14px 0 6px;
+}
+.sb-layout-save-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.sb-layout-name-input {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid #1e3050;
+  border-radius: 5px;
+  color: #c8d8e8;
+  font-size: 12px;
+  padding: 4px 7px;
+  outline: none;
+}
+.sb-layout-name-input:focus { border-color: #3a6fa0; }
+.sb-layout-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+}
+.sb-layout-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+.sb-layout-row--active {
+  background: rgba(74,158,255,0.1);
+  border-color: rgba(74,158,255,0.3);
+}
+.sb-layout-row-name  { flex: 1; color: #c8d8e8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-layout-row-count { font-size: 10px; color: #5a7a9a; min-width: 44px; text-align: right; }
+.sb-layout-row-actions { display: flex; gap: 4px; }
+.sb-layout-del-btn { color: #c87070 !important; }
+
+/* ── Surface panel: Pieces section ─────────────────────────────────────────── */
+.sb-pieces-section { margin-top: 8px; }
+.sb-pieces-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #8aaccc;
+  margin-bottom: 6px;
+}
+.sb-pieces-empty { font-size: 11px; color: #3a5a7a; font-style: italic; padding: 4px 0; }
+.sb-pieces-list { display: flex; flex-direction: column; gap: 4px; }
+.sb-piece-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid #151f2e;
+  border-radius: 5px;
+}
+.sb-piece-thumb { width: 28px; height: 28px; border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+.sb-piece-thumb-img { width: 100%; height: 100%; object-fit: cover; }
+.sb-piece-thumb-color { width: 100%; height: 100%; }
+.sb-piece-info { flex: 1; min-width: 0; }
+.sb-piece-name { display: block; font-size: 11px; color: #b8c8d8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-piece-dims { font-size: 10px; color: #4a6a8a; }
+.sb-piece-del-btn {
+  background: none;
+  border: none;
+  color: #5a7a9a;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.sb-piece-del-btn:hover { color: #c87070; }
+
+/* ── Library picker ─────────────────────────────────────────────────────────── */
+.sb-lib-picker {
+  border: 1px solid #1e3050;
+  border-radius: 7px;
+  background: rgba(4,10,20,0.7);
+  padding: 8px;
+  margin-bottom: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.sb-lib-empty { font-size: 11px; color: #3a5a7a; font-style: italic; }
+.sb-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+  gap: 5px;
+}
+.sb-lib-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid #1a2a3a;
+  border-radius: 5px;
+  padding: 5px 4px 4px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.sb-lib-item:hover { border-color: #4a9eff; background: rgba(74,158,255,0.08); }
+.sb-lib-item-img {
+  width: 44px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 3px;
+}
+.sb-lib-item-color {
+  width: 44px;
+  height: 36px;
+  border-radius: 3px;
+}
+.sb-lib-item-name {
+  font-size: 9px;
+  color: #7a9ab8;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 56px;
+}
+
 /* ── Surface panel: Wall Angle row ─────────────────────────────────────────── */
 .sb-se-rot-row {
   gap: 6px;

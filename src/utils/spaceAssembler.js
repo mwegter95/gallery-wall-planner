@@ -83,6 +83,43 @@ export function createSurfaceDef({ photoId = null, index = 0 } = {}) {
       left:   null,
       right:  null,
     },
+    // Layouts: named art arrangements on this surface (same shape as gallery_layouts)
+    // { [name]: { pieces: PieceDef[], paintLayerIds: string[] } }
+    layouts:      {},
+    activeLayout: '',   // name of the currently shown layout
+  }
+}
+
+/**
+ * Create a named layout entry for a surface.
+ * @param {string} name
+ * @returns {{ pieces: [], paintLayerIds: [] }}
+ */
+export function createSurfaceLayout(name = 'Default') {
+  return { name, pieces: [], paintLayerIds: [] }
+}
+
+/**
+ * Create a piece positioned at the centre of a surface.
+ * @param {object} libItem  – library piece { id, name, width, height, color, image, transparent }
+ * @param {object} surface  – SurfaceDef (needs widthIn / heightIn)
+ * @returns {object}        – PieceDef with x, y centred on the surface
+ */
+export function createSurfacePiece(libItem, surface) {
+  const w = Math.min(libItem.width  || 24, surface.widthIn)
+  const h = Math.min(libItem.height || 18, surface.heightIn)
+  return {
+    id:          genId(),
+    libId:       libItem.id,
+    name:        libItem.name  || 'Piece',
+    width:       w,
+    height:      h,
+    x:           (surface.widthIn  - w) / 2,
+    y:           (surface.heightIn - h) / 2,
+    color:       libItem.color       || '#888888',
+    image:       libItem.image       || null,
+    transparent: libItem.transparent || false,
+    locked:      false,
   }
 }
 

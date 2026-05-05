@@ -9,6 +9,7 @@ import Room3DViewer from './components/Room3DViewer'
 import RoomSetupWizard from './components/RoomSetupWizard'
 import RoomManager from './components/RoomManager'
 import SpaceBuilder from './components/SpaceBuilder'
+import SpacesManager from './components/SpacesManager'
 import AuthModal, { UserBadge } from './components/AuthModal'
 import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP } from './components/Tutorial'
 import * as api from './utils/api'
@@ -113,6 +114,7 @@ export default function App() {
   const [newRoomName,     setNewRoomName]     = useState('')
   /* ── Space Builder state ───────────────────────── */
   const [showSpaceBuilder, setShowSpaceBuilder] = useState(false)
+  const [showSpaceMgr,     setShowSpaceMgr]     = useState(false)
   const [editingSpaceId,   setEditingSpaceId]   = useState(null)
   const saveFlashTimer   = useRef(null)
   const saveMenuRef    = useRef(null)
@@ -464,7 +466,13 @@ export default function App() {
     await api.putRoom(space)
     setRooms(prev => ({ ...prev, [space.id]: space }))
     setShowSpaceBuilder(false)
+    setShowSpaceMgr(false)
     setEditingSpaceId(null)
+  }, [])
+
+  const handleDeleteSpace = useCallback(async (spaceId) => {
+    await api.deleteRoom(spaceId).catch(console.error)
+    setRooms(prev => { const next = { ...prev }; delete next[spaceId]; return next })
   }, [])
 
   /* ── Wall calibration ─────────────────────────────── */
@@ -1128,7 +1136,15 @@ export default function App() {
           </button>
           <button
             className="space-builder-btn"
-            onClick={() => { setEditingSpaceId(null); setShowSpaceBuilder(true) }}
+            onClick={() => {
+              const savedSpaces = Object.values(rooms).filter(r => r.roomType === 'space')
+              if (savedSpaces.length > 0) {
+                setShowSpaceMgr(true)
+              } else {
+                setEditingSpaceId(null)
+                setShowSpaceBuilder(true)
+              }
+            }}
             title="Interactive Space Builder"
           >
             <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
@@ -1430,10 +1446,29 @@ export default function App() {
         </div>
       )}
 
+      {showSpaceMgr && (
+        <SpacesManager
+          spaces={rooms}
+          onEdit={(id) => {
+            setEditingSpaceId(id)
+            setShowSpaceBuilder(true)
+            setShowSpaceMgr(false)
+          }}
+          onDelete={handleDeleteSpace}
+          onNew={() => {
+            setEditingSpaceId(null)
+            setShowSpaceBuilder(true)
+            setShowSpaceMgr(false)
+          }}
+          onClose={() => setShowSpaceMgr(false)}
+        />
+      )}
+
       {showSpaceBuilder && (
         <SpaceBuilder
           key={editingSpaceId || 'new-space'}
           existingSpace={editingSpaceId ? rooms[editingSpaceId] : null}
+          library={library}
           onSave={handleSaveSpace}
           onClose={() => { setShowSpaceBuilder(false); setEditingSpaceId(null) }}
         />
