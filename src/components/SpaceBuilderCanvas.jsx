@@ -788,9 +788,10 @@ export default function SpaceBuilderCanvas({
 // ── 2D crop-corner editor (overlay on top of 3D canvas) ──────────────────────
 // Each corner's handle is offset diagonally outward so the finger/cursor
 // never obscures the exact point being controlled.
-const HANDLE_OFFSET = 45   // SVG-viewBox units (offset from actual corner)
-const HANDLE_PAD    = HANDLE_OFFSET + 15  // viewBox padding on all sides so handles never leave SVG bounds
-const HANDLE_DIR = { tl: [-1,-1], tr: [1,-1], br: [1,1], bl: [-1,1] }
+const HANDLE_OFFSET = 28   // SVG-viewBox units (offset from actual corner)
+const HANDLE_PAD    = HANDLE_OFFSET + 15  // = 43 — padding on all sides of viewBox so handles never leave SVG bounds
+const HANDLE_DIR    = { tl: [-1,-1], tr: [1,-1], br: [1,1], bl: [-1,1] }
+const HANDLE_COLORS = { tl:'#f97316', tr:'#22d3ee', br:'#a78bfa', bl:'#34d399' }
 
 function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
   const surface = space.surfaces.find(s => s.id === surfaceId)
@@ -897,7 +898,8 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
           <image href={photo.dataUrl} x="0" y="0" width={W} height={H}
             preserveAspectRatio="xMidYMid meet" clipPath={`url(#${clipId})`}/>
           <polygon points={polyStr}
-            fill="rgba(74,158,255,0.12)" stroke="#4a9eff" strokeWidth="1.5"
+            fill="rgba(255,255,255,0.07)" stroke="rgba(255,255,255,0.8)" strokeWidth="1.5"
+            strokeDasharray="7 4"
             clipPath={`url(#${clipId})`} style={{ pointerEvents:'none' }}/>
 
           {/* Corner handles — offset diagonally outward from each corner */}
@@ -906,31 +908,36 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
             const [dx, dy] = HANDLE_DIR[k]
             const hpx = hx + dx * HANDLE_OFFSET   // handle centre X
             const hpy = hy + dy * HANDLE_OFFSET   // handle centre Y
-            const CX = 7                           // crosshair arm length
+            const CX = 6                           // crosshair arm length
+            const color = HANDLE_COLORS[k]
 
             return (
               <g key={k}>
-                {/* Dashed connector: actual corner → handle */}
+                {/* Black backing stroke for dashed connector */}
                 <line x1={hx} y1={hy} x2={hpx} y2={hpy}
-                  stroke="#4a9eff" strokeWidth="1" strokeDasharray="4 3" opacity="0.6"
+                  stroke="rgba(0,0,0,0.55)" strokeWidth="3"
+                  style={{ pointerEvents:'none' }}/>
+
+                {/* Colored dashed connector: actual corner → handle */}
+                <line x1={hx} y1={hy} x2={hpx} y2={hpy}
+                  stroke={color} strokeWidth="1.5" strokeDasharray="4 3"
                   style={{ pointerEvents:'none' }}/>
 
                 {/* Crosshair at the exact corner point */}
                 <line x1={hx-CX} y1={hy} x2={hx+CX} y2={hy}
-                  stroke="#4a9eff" strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                  stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
                 <line x1={hx} y1={hy-CX} x2={hx} y2={hy+CX}
-                  stroke="#4a9eff" strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                  stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
 
                 {/* Draggable hollow ring handle */}
                 <g onPointerDown={e => startDrag(k, e)}
                    style={{ cursor:'grab', touchAction:'none' }}>
-                  <circle cx={hpx} cy={hpy} r={24} fill="transparent"/>
+                  <circle cx={hpx} cy={hpy} r={26} fill="transparent"/>
                   <circle cx={hpx} cy={hpy} r={12}
-                    fill="none" stroke="#4a9eff" strokeWidth="2"/>
-                  <circle cx={hpx} cy={hpy} r={2.5} fill="#4a9eff"/>
-                  <text x={hpx + dx*18} y={hpy + dy*18}
+                    fill="rgba(0,0,0,0.35)" stroke={color} strokeWidth="2"/>
+                  <text x={hpx} y={hpy}
                     textAnchor="middle" dominantBaseline="central"
-                    fontSize="9" fill="#4a9eff" fontWeight="700" opacity="0.85"
+                    fontSize="8" fill={color} fontWeight="800" opacity="0.9"
                     style={{ pointerEvents:'none', userSelect:'none' }}>
                     {k.toUpperCase()}
                   </text>

@@ -3,8 +3,8 @@ import { warpPerspectiveAsync } from '../utils/homography'
 
 /* ── Corner colours: TL · TR · BR · BL (matches WallSetup) ─ */
 const PCROP_COLORS = ['#f97316', '#22d3ee', '#a78bfa', '#34d399']
-const PCROP_OFFSET = 35   // px — diagonal offset of handle from actual corner
-const PCROP_PAD    = PCROP_OFFSET + 20  // 55px — SVG viewBox padding each side
+const PCROP_OFFSET = 18   // px — diagonal offset of handle from actual corner (keeps handles within image bounds)
+const PCROP_PAD    = PCROP_OFFSET + 15  // 33px — SVG viewBox padding each side
 const PCROP_DIR    = [[-1,-1],[1,-1],[1,1],[-1,1]]  // tl,tr,br,bl outward directions
 
 /* ── Magic-select: sensitivity mapping ───────────────────── */
@@ -68,7 +68,7 @@ function computeFloodMask(imageData, tolerance) {
 /* ══════════════════════════════════════════════════════════
    PERSPECTIVE CROP  (4-corner homography warp, like WallSetup)
    ══════════════════════════════════════════════════════════ */
-const DEFAULT_CORNERS = [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]]
+const DEFAULT_CORNERS = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
 
 function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
   const imgRef     = useRef(null)
@@ -131,23 +131,26 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
     return () => { img?.removeEventListener('load', measure); ro.disconnect() }
   }, [])
 
-  /* ── Shared corner-move logic ───────────────────────── */
-  const movePcCorner = useCallback((clientX, clientY, idx) => {
-    if (!imgRef.current) return
-    const rect = imgRef.current.getBoundingClientRect()
-    const nx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    const ny = Math.max(0, Math.min(1, (clientY - rect.top)  / rect.height))
-    setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
-  }, [])
-
   /* ── Drag a corner — pointer capture so handle stays grabbable anywhere ── */
   const startDrag = useCallback((idx, e) => {
     e.stopPropagation()
     e.preventDefault()
     const captureEl = e.currentTarget
     captureEl.setPointerCapture(e.pointerId)
-    const onMove = (ev) => movePcCorner(ev.clientX, ev.clientY, idx)
-    const onUp   = () => {
+    // Capture pointer→corner offset at drag start so the corner tracks the
+    // pointer delta (not teleporting to directly under the finger on first touch).
+    const rect = imgRef.current.getBoundingClientRect()
+    const [nx0, ny0] = cornersRef.current[idx]
+    const startCX = e.clientX - (rect.left + nx0 * rect.width)
+    const startCY = e.clientY - (rect.top  + ny0 * rect.height)
+    const onMove = (ev) => {
+      if (!imgRef.current) return
+      const r = imgRef.current.getBoundingClientRect()
+      const nx = Math.max(0, Math.min(1, (ev.clientX - startCX - r.left) / r.width))
+      const ny = Math.max(0, Math.min(1, (ev.clientY - startCY - r.top)  / r.height))
+      setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
+    }
+    const onUp = () => {
       captureEl.removeEventListener('pointermove',   onMove)
       captureEl.removeEventListener('pointerup',     onUp)
       captureEl.removeEventListener('pointercancel', onUp)
@@ -155,7 +158,7 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
     captureEl.addEventListener('pointermove',   onMove)
     captureEl.addEventListener('pointerup',     onUp)
     captureEl.addEventListener('pointercancel', onUp)
-  }, [movePcCorner])
+  }, [])
 
   /* ── Apply perspective warp ──────────────────────────── */
   const handleApply = useCallback(async () => {
@@ -203,17 +206,18 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
           {pts && !warping && (() => {
             const PAD = PCROP_PAD
             const W2 = size.w + 2*PAD, H2 = size.h + 2*PAD
-            const CX = 7  // crosshair arm length
+            const CX = 6  // crosshair arm length
+            const LABELS = ['TL','TR','BR','BL']
             return (
               <svg
                 viewBox={`0 0 ${W2} ${H2}`}
-                style={{ position:'absolute', top:-PAD, left:-PAD, width:W2, height:H2, touchAction:'none', cursor:'crosshair', overflow:'visible' }}
+                style={{ position:'absolute', top:-PAD, left:-PAD, width:W2, height:H2, touchAction:'none', overflow:'visible', pointerEvents:'none' }}
               >
                 {/* Selection polygon — coords offset by PAD */}
                 <polygon
                   points={corners.map(([nx,ny]) => `${nx*size.w+PAD},${ny*size.h+PAD}`).join(' ')}
-                  fill="rgba(124,111,247,0.10)"
-                  stroke="rgba(255,255,255,0.75)"
+                  fill="rgba(255,255,255,0.07)"
+                  stroke="rgba(255,255,255,0.8)"
                   strokeWidth={1.5}
                   strokeDasharray="7 4"
                   style={{ pointerEvents:'none' }}
@@ -227,9 +231,13 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
                   const color = PCROP_COLORS[idx]
                   return (
                     <g key={idx}>
-                      {/* Dashed connector: corner → handle */}
+                      {/* Black backing stroke for dashed connector */}
                       <line x1={cx} y1={cy} x2={hx} y2={hy}
-                        stroke={color} strokeWidth="1" strokeDasharray="4 3" opacity="0.6"
+                        stroke="rgba(0,0,0,0.55)" strokeWidth="3"
+                        style={{ pointerEvents:'none' }}/>
+                      {/* Colored dashed connector: corner → handle */}
+                      <line x1={cx} y1={cy} x2={hx} y2={hy}
+                        stroke={color} strokeWidth="1.5" strokeDasharray="4 3"
                         style={{ pointerEvents:'none' }}/>
                       {/* Crosshair at exact corner */}
                       <line x1={cx-CX} y1={cy} x2={cx+CX} y2={cy}
@@ -237,11 +245,16 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
                       <line x1={cx} y1={cy-CX} x2={cx} y2={cy+CX}
                         stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
                       {/* Draggable hollow ring offset from corner */}
-                      <g onPointerDown={e => startDrag(idx, e)} style={{ cursor:'grab', touchAction:'none' }}>
-                        <circle cx={hx} cy={hy} r={24} fill="transparent"/>
-                        <circle cx={hx} cy={hy} r={11}
-                          fill="none" stroke={color} strokeWidth="2"/>
-                        <circle cx={hx} cy={hy} r={2.5} fill={color}/>
+                      <g onPointerDown={e => startDrag(idx, e)} style={{ cursor:'grab', touchAction:'none', pointerEvents:'all' }}>
+                        <circle cx={hx} cy={hy} r={26} fill="transparent"/>
+                        <circle cx={hx} cy={hy} r={12}
+                          fill="rgba(0,0,0,0.35)" stroke={color} strokeWidth="2"/>
+                        <text x={hx} y={hy}
+                          textAnchor="middle" dominantBaseline="central"
+                          fontSize="8" fill={color} fontWeight="800"
+                          style={{ pointerEvents:'none', userSelect:'none' }}>
+                          {LABELS[idx]}
+                        </text>
                       </g>
                     </g>
                   )
@@ -684,15 +697,6 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
     return () => { img?.removeEventListener('load', measure); ro.disconnect() }
   }, [phase, warpCutoutUrl])
 
-  /* ── Shared warp corner move ──────────────────────────── */
-  const moveWarpCorner = useCallback((clientX, clientY, idx) => {
-    if (!warpImgRef.current) return
-    const rect = warpImgRef.current.getBoundingClientRect()
-    const nx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    const ny = Math.max(0, Math.min(1, (clientY - rect.top)  / rect.height))
-    setWarpCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
-  }, [])
-
   /* ── Drag a warp corner — pointer capture ────────────────────── */
   const startWarpDrag = useCallback((idx, e) => {
     if (e.button != null && e.button !== 0) return
@@ -700,8 +704,19 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
     e.preventDefault()
     const captureEl = e.currentTarget
     captureEl.setPointerCapture(e.pointerId)
-    const onMove = (ev) => moveWarpCorner(ev.clientX, ev.clientY, idx)
-    const onUp   = () => {
+    // Capture pointer→corner offset at drag start (same pattern as startDrag)
+    const rect = warpImgRef.current.getBoundingClientRect()
+    const [nx0, ny0] = warpCornersRef.current[idx]
+    const startCX = e.clientX - (rect.left + nx0 * rect.width)
+    const startCY = e.clientY - (rect.top  + ny0 * rect.height)
+    const onMove = (ev) => {
+      if (!warpImgRef.current) return
+      const r = warpImgRef.current.getBoundingClientRect()
+      const nx = Math.max(0, Math.min(1, (ev.clientX - startCX - r.left) / r.width))
+      const ny = Math.max(0, Math.min(1, (ev.clientY - startCY - r.top)  / r.height))
+      setWarpCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
+    }
+    const onUp = () => {
       captureEl.removeEventListener('pointermove',   onMove)
       captureEl.removeEventListener('pointerup',     onUp)
       captureEl.removeEventListener('pointercancel', onUp)
@@ -709,7 +724,7 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
     captureEl.addEventListener('pointermove',   onMove)
     captureEl.addEventListener('pointerup',     onUp)
     captureEl.addEventListener('pointercancel', onUp)
-  }, [moveWarpCorner])
+  }, [])
 
   /* ── Apply perspective warp to the cutout ──────────────── */
   const applyWarp = useCallback(async () => {
@@ -885,16 +900,17 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
               {warpPts && !warpWarping && (() => {
                 const PAD = PCROP_PAD
                 const W2 = warpSize.w + 2*PAD, H2 = warpSize.h + 2*PAD
-                const CX = 7
+                const CX = 6
+                const LABELS = ['TL','TR','BR','BL']
                 return (
                   <svg
                     viewBox={`0 0 ${W2} ${H2}`}
-                    style={{ position:'absolute', top:-PAD, left:-PAD, width:W2, height:H2, touchAction:'none', cursor:'crosshair', overflow:'visible' }}
+                    style={{ position:'absolute', top:-PAD, left:-PAD, width:W2, height:H2, touchAction:'none', overflow:'visible', pointerEvents:'none' }}
                   >
                     <polygon
                       points={warpCorners.map(([nx,ny]) => `${nx*warpSize.w+PAD},${ny*warpSize.h+PAD}`).join(' ')}
-                      fill="rgba(124,111,247,0.10)"
-                      stroke="rgba(255,255,255,0.75)"
+                      fill="rgba(255,255,255,0.07)"
+                      stroke="rgba(255,255,255,0.8)"
                       strokeWidth={1.5}
                       strokeDasharray="7 4"
                       style={{ pointerEvents:'none' }}
@@ -908,18 +924,28 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
                       const color = PCROP_COLORS[idx]
                       return (
                         <g key={idx}>
+                          {/* Black backing stroke */}
                           <line x1={cx} y1={cy} x2={hx} y2={hy}
-                            stroke={color} strokeWidth="1" strokeDasharray="4 3" opacity="0.6"
+                            stroke="rgba(0,0,0,0.55)" strokeWidth="3"
+                            style={{ pointerEvents:'none' }}/>
+                          {/* Colored dashed connector */}
+                          <line x1={cx} y1={cy} x2={hx} y2={hy}
+                            stroke={color} strokeWidth="1.5" strokeDasharray="4 3"
                             style={{ pointerEvents:'none' }}/>
                           <line x1={cx-CX} y1={cy} x2={cx+CX} y2={cy}
                             stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
                           <line x1={cx} y1={cy-CX} x2={cx} y2={cy+CX}
                             stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
-                          <g onPointerDown={e => startWarpDrag(idx, e)} style={{ cursor:'grab', touchAction:'none' }}>
-                            <circle cx={hx} cy={hy} r={24} fill="transparent"/>
-                            <circle cx={hx} cy={hy} r={11}
-                              fill="none" stroke={color} strokeWidth="2"/>
-                            <circle cx={hx} cy={hy} r={2.5} fill={color}/>
+                          <g onPointerDown={e => startWarpDrag(idx, e)} style={{ cursor:'grab', touchAction:'none', pointerEvents:'all' }}>
+                            <circle cx={hx} cy={hy} r={26} fill="transparent"/>
+                            <circle cx={hx} cy={hy} r={12}
+                              fill="rgba(0,0,0,0.35)" stroke={color} strokeWidth="2"/>
+                            <text x={hx} y={hy}
+                              textAnchor="middle" dominantBaseline="central"
+                              fontSize="8" fill={color} fontWeight="800"
+                              style={{ pointerEvents:'none', userSelect:'none' }}>
+                              {LABELS[idx]}
+                            </text>
                           </g>
                         </g>
                       )
