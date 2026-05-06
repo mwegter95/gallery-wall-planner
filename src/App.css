@@ -1636,7 +1636,9 @@ kbd {
   display: flex;
   flex-direction: column;
   box-shadow: 0 32px 80px rgba(0,0,0,0.9);
-  overflow: hidden;
+  /* overflow:visible so diagonally-offset crop handles can extend past the
+     image edge without being clipped. Layout is controlled by explicit height. */
+  overflow: visible;
 }
 
 .crop-header {
@@ -1684,7 +1686,7 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: auto;
+  overflow: visible;   /* allow offset handles to extend past the image edge */
   padding: 16px;
 }
 
@@ -7096,6 +7098,12 @@ kbd {
     flex-wrap: wrap;
     gap: 4px;
     width: 100%;
+  }
+  /* Save popover: button is on the left side of the wrapped row, so anchor
+     the menu to the left edge of the button rather than the right */
+  .sb-save-menu {
+    right: auto;
+    left: 0;
   }
 
   /* Show hamburger */

@@ -3,6 +3,9 @@ import { warpPerspectiveAsync } from '../utils/homography'
 
 /* ── Corner colours: TL · TR · BR · BL (matches WallSetup) ─ */
 const PCROP_COLORS = ['#f97316', '#22d3ee', '#a78bfa', '#34d399']
+const PCROP_OFFSET = 35   // px — diagonal offset of handle from actual corner
+const PCROP_PAD    = PCROP_OFFSET + 20  // 55px — SVG viewBox padding each side
+const PCROP_DIR    = [[-1,-1],[1,-1],[1,1],[-1,1]]  // tl,tr,br,bl outward directions
 
 /* ── Magic-select: sensitivity mapping ───────────────────── */
 const SENS_DEFAULT   = 6
@@ -137,24 +140,21 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
     setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
   }, [])
 
-  /* ── Drag a corner (mouse) ───────────────────────────── */
-  const handleDrag = useCallback((e, idx) => {
-    if (e.button !== 0) return
-    e.stopPropagation(); e.preventDefault()
-    const move = (ev) => movePcCorner(ev.clientX, ev.clientY, idx)
-    const up   = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup',   up)
-  }, [movePcCorner])
-
-  /* ── Drag a corner (touch) ───────────────────────────── */
-  const handleTouchDrag = useCallback((e, idx) => {
-    if (e.touches.length !== 1) return
-    e.stopPropagation(); e.preventDefault()
-    const move = (ev) => { ev.preventDefault(); if (ev.touches[0]) movePcCorner(ev.touches[0].clientX, ev.touches[0].clientY, idx) }
-    const up   = () => { window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up) }
-    window.addEventListener('touchmove', move, { passive: false })
-    window.addEventListener('touchend',  up,   { passive: true })
+  /* ── Drag a corner — pointer capture so handle stays grabbable anywhere ── */
+  const startDrag = useCallback((idx, e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    const captureEl = e.currentTarget
+    captureEl.setPointerCapture(e.pointerId)
+    const onMove = (ev) => movePcCorner(ev.clientX, ev.clientY, idx)
+    const onUp   = () => {
+      captureEl.removeEventListener('pointermove',   onMove)
+      captureEl.removeEventListener('pointerup',     onUp)
+      captureEl.removeEventListener('pointercancel', onUp)
+    }
+    captureEl.addEventListener('pointermove',   onMove)
+    captureEl.addEventListener('pointerup',     onUp)
+    captureEl.addEventListener('pointercancel', onUp)
   }, [movePcCorner])
 
   /* ── Apply perspective warp ──────────────────────────── */
@@ -200,36 +200,55 @@ function PerspectiveCrop({ imageUrl, onApply, onSkip }) {
             </div>
           )}
 
-          {pts && !warping && (
-            <>
-              <svg className="ws-svg" width={size.w} height={size.h}>
+          {pts && !warping && (() => {
+            const PAD = PCROP_PAD
+            const W2 = size.w + 2*PAD, H2 = size.h + 2*PAD
+            const CX = 7  // crosshair arm length
+            return (
+              <svg
+                viewBox={`0 0 ${W2} ${H2}`}
+                style={{ position:'absolute', top:-PAD, left:-PAD, width:W2, height:H2, touchAction:'none', cursor:'crosshair', overflow:'visible' }}
+              >
+                {/* Selection polygon — coords offset by PAD */}
                 <polygon
-                  points={pts.map(p => p.join(',')).join(' ')}
+                  points={corners.map(([nx,ny]) => `${nx*size.w+PAD},${ny*size.h+PAD}`).join(' ')}
                   fill="rgba(124,111,247,0.10)"
                   stroke="rgba(255,255,255,0.75)"
                   strokeWidth={1.5}
                   strokeDasharray="7 4"
+                  style={{ pointerEvents:'none' }}
                 />
+                {corners.map(([nx, ny], idx) => {
+                  const cx = nx * size.w + PAD
+                  const cy = ny * size.h + PAD
+                  const [dx, dy] = PCROP_DIR[idx]
+                  const hx = cx + dx * PCROP_OFFSET
+                  const hy = cy + dy * PCROP_OFFSET
+                  const color = PCROP_COLORS[idx]
+                  return (
+                    <g key={idx}>
+                      {/* Dashed connector: corner → handle */}
+                      <line x1={cx} y1={cy} x2={hx} y2={hy}
+                        stroke={color} strokeWidth="1" strokeDasharray="4 3" opacity="0.6"
+                        style={{ pointerEvents:'none' }}/>
+                      {/* Crosshair at exact corner */}
+                      <line x1={cx-CX} y1={cy} x2={cx+CX} y2={cy}
+                        stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                      <line x1={cx} y1={cy-CX} x2={cx} y2={cy+CX}
+                        stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                      {/* Draggable hollow ring offset from corner */}
+                      <g onPointerDown={e => startDrag(idx, e)} style={{ cursor:'grab', touchAction:'none' }}>
+                        <circle cx={hx} cy={hy} r={24} fill="transparent"/>
+                        <circle cx={hx} cy={hy} r={11}
+                          fill="none" stroke={color} strokeWidth="2"/>
+                        <circle cx={hx} cy={hy} r={2.5} fill={color}/>
+                      </g>
+                    </g>
+                  )
+                })}
               </svg>
-              {corners.map(([nx, ny], idx) => (
-                <div
-                  key={idx}
-                  className="ws-handle"
-                  style={{
-                    left: nx * size.w,
-                    top:  ny * size.h,
-                    borderColor:     PCROP_COLORS[idx],
-                    backgroundColor: PCROP_COLORS[idx] + '55',
-                    touchAction:     'none',
-                  }}
-                  data-label={['TL', 'TR', 'BR', 'BL'][idx]}
-                  onMouseDown={(e) => handleDrag(e, idx)}
-                  onTouchStart={(e) => handleTouchDrag(e, idx)}
-                  onContextMenu={(e) => e.preventDefault()}
-                />
-              ))}
-            </>
-          )}
+            )
+          })()}
 
           {warping && (
             <div className="ws-progress-overlay" style={{ borderRadius: 4 }}>
@@ -674,27 +693,22 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
     setWarpCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
   }, [])
 
-  /* ── Drag a warp corner (mouse) ────────────────────────── */
-  const handleWarpDrag = useCallback((e, idx) => {
-    if (e.button !== 0) return
-    e.stopPropagation(); e.preventDefault()
-    const move = (ev) => {
-      if (!warpImgRef.current) return
-      moveWarpCorner(ev.clientX, ev.clientY, idx)
+  /* ── Drag a warp corner — pointer capture ────────────────────── */
+  const startWarpDrag = useCallback((idx, e) => {
+    if (e.button != null && e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    const captureEl = e.currentTarget
+    captureEl.setPointerCapture(e.pointerId)
+    const onMove = (ev) => moveWarpCorner(ev.clientX, ev.clientY, idx)
+    const onUp   = () => {
+      captureEl.removeEventListener('pointermove',   onMove)
+      captureEl.removeEventListener('pointerup',     onUp)
+      captureEl.removeEventListener('pointercancel', onUp)
     }
-    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
-  }, [moveWarpCorner])
-
-  /* ── Drag a warp corner (touch) ────────────────────────── */
-  const handleWarpTouchDrag = useCallback((e, idx) => {
-    if (e.touches.length !== 1) return
-    e.stopPropagation(); e.preventDefault()
-    const move = (ev) => { ev.preventDefault(); if (ev.touches[0]) moveWarpCorner(ev.touches[0].clientX, ev.touches[0].clientY, idx) }
-    const up   = () => { window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up) }
-    window.addEventListener('touchmove', move, { passive: false })
-    window.addEventListener('touchend',  up,   { passive: true })
+    captureEl.addEventListener('pointermove',   onMove)
+    captureEl.addEventListener('pointerup',     onUp)
+    captureEl.addEventListener('pointercancel', onUp)
   }, [moveWarpCorner])
 
   /* ── Apply perspective warp to the cutout ──────────────── */
@@ -868,33 +882,51 @@ function MagicSelect({ imageUrl, onApply, onSkip }) {
                 draggable={false}
                 style={{ background: 'transparent' }}
               />
-              {warpPts && !warpWarping && (
-                <>
-                  <svg className="ws-svg" width={warpSize.w} height={warpSize.h}>
+              {warpPts && !warpWarping && (() => {
+                const PAD = PCROP_PAD
+                const W2 = warpSize.w + 2*PAD, H2 = warpSize.h + 2*PAD
+                const CX = 7
+                return (
+                  <svg
+                    viewBox={`0 0 ${W2} ${H2}`}
+                    style={{ position:'absolute', top:-PAD, left:-PAD, width:W2, height:H2, touchAction:'none', cursor:'crosshair', overflow:'visible' }}
+                  >
                     <polygon
-                      points={warpPts.map(p => p.join(',')).join(' ')}
+                      points={warpCorners.map(([nx,ny]) => `${nx*warpSize.w+PAD},${ny*warpSize.h+PAD}`).join(' ')}
                       fill="rgba(124,111,247,0.10)"
                       stroke="rgba(255,255,255,0.75)"
                       strokeWidth={1.5}
                       strokeDasharray="7 4"
+                      style={{ pointerEvents:'none' }}
                     />
+                    {warpCorners.map(([nx, ny], idx) => {
+                      const cx = nx * warpSize.w + PAD
+                      const cy = ny * warpSize.h + PAD
+                      const [dx, dy] = PCROP_DIR[idx]
+                      const hx = cx + dx * PCROP_OFFSET
+                      const hy = cy + dy * PCROP_OFFSET
+                      const color = PCROP_COLORS[idx]
+                      return (
+                        <g key={idx}>
+                          <line x1={cx} y1={cy} x2={hx} y2={hy}
+                            stroke={color} strokeWidth="1" strokeDasharray="4 3" opacity="0.6"
+                            style={{ pointerEvents:'none' }}/>
+                          <line x1={cx-CX} y1={cy} x2={cx+CX} y2={cy}
+                            stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                          <line x1={cx} y1={cy-CX} x2={cx} y2={cy+CX}
+                            stroke={color} strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                          <g onPointerDown={e => startWarpDrag(idx, e)} style={{ cursor:'grab', touchAction:'none' }}>
+                            <circle cx={hx} cy={hy} r={24} fill="transparent"/>
+                            <circle cx={hx} cy={hy} r={11}
+                              fill="none" stroke={color} strokeWidth="2"/>
+                            <circle cx={hx} cy={hy} r={2.5} fill={color}/>
+                          </g>
+                        </g>
+                      )
+                    })}
                   </svg>
-                  {warpCorners.map(([nx, ny], idx) => (
-                    <div key={idx} className="ws-handle"
-                      style={{
-                        left: nx * warpSize.w, top: ny * warpSize.h,
-                        borderColor: PCROP_COLORS[idx],
-                        backgroundColor: PCROP_COLORS[idx] + '55',
-                        touchAction: 'none',
-                      }}
-                      data-label={['TL','TR','BR','BL'][idx]}
-                      onMouseDown={e => handleWarpDrag(e, idx)}
-                      onTouchStart={e => handleWarpTouchDrag(e, idx)}
-                      onContextMenu={e => e.preventDefault()}
-                    />
-                  ))}
-                </>
-              )}
+                )
+              })()}
               {warpWarping && (
                 <div className="ws-progress-overlay" style={{ borderRadius: 4 }}>
                   <div className="ws-progress-bar">
