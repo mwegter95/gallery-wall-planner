@@ -50,6 +50,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [showEraseModal,  setShowEraseModal]  = useState(false)
   // Mobile panel overlay
   const [showMobilePanel, setShowMobilePanel] = useState(false)
+  const [cropRequestId,   setCropRequestId]   = useState(null)
   // Undo / redo
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
@@ -487,14 +488,21 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           </select>
         </div>
 
-        {/* Re-crop button */}
+        {/* Perspective Warp button */}
         <button
           className="sb-se-rewarp-btn"
-          onClick={() => updateSurface(activeSurface.id, { warpedDataUrl: null })}
-          disabled={!activeSurface.warpedDataUrl}
-          title="Clear cached warp — will be re-computed on next preview"
+          onClick={() => {
+            setCropRequestId(activeSurface.id + '_' + Date.now()) // new value each click
+            setShowMobilePanel(false) // close panel so overlay is visible
+          }}
+          disabled={!activeSurface?.photoId}
+          title="Open the perspective warp corner editor for this surface"
         >
-          {activeSurface.warpedDataUrl ? '↺ Re-crop on next preview' : 'Not yet warped'}
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+            <path d="M2 4L5 2h6v7l-2 2H3L1 9V4l1-1" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+            <path d="M4 5l1-1M9 5l-1-1M4 8l1 1M9 8l-1 1" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+          </svg>
+          Perspective Warp
         </button>
 
         {/* ── Load Layout from Wall ────────────────────────────── */}
@@ -927,6 +935,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onUpdateSurface={updateSurface}
               onSetConnection={setConnection}
               onSurfaceTap={() => setShowMobilePanel(true)}
+              requestCropId={cropRequestId}
             />
           </div>
 

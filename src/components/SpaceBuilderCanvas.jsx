@@ -88,7 +88,7 @@ const JOY_SPEED  = 0.028
 const PAN_SPEED  = 0.04  // orbit.center translation per frame per unit joystick deflection
 
 export default function SpaceBuilderCanvas({
-  space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap,
+  space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
 }) {
   const mountRef = useRef(null)
   const threeRef  = useRef(null)
@@ -105,6 +105,11 @@ export default function SpaceBuilderCanvas({
   const [joyPos,        setJoyPos]        = useState({ x: 0, y: 0 }) // orbit thumb CSS offset
   const [panJoyPos,     setPanJoyPos]     = useState({ x: 0, y: 0 }) // pan thumb CSS offset
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap }
+
+  // Open crop overlay when parent requests it (e.g. mobile "Perspective Warp" button)
+  useEffect(() => {
+    if (requestCropId) setCropSurfaceId(requestCropId)
+  }, [requestCropId])
 
   // ── Scene init (runs once) ───────────────────────────────────────────────
   useEffect(() => {
