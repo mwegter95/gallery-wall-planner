@@ -830,12 +830,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               title="Erase an object from the active surface using content-aware fill"
             >
               <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                {/* Eraser body (angled block) */}
-                <path d="M4 11L9.5 4 12 6.5 6.5 11H4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                {/* Ferrule band */}
-                <line x1="6.5" y1="8" x2="9" y2="5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
-                {/* Erased mark at bottom */}
-                <path d="M1 11h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                {/* Eraser block body — wide parallelogram like the rubber end of a pencil */}
+                <path d="M1.5 9.5 L3 3.5 L11.5 3.5 L10 9.5 Z"
+                  stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"
+                  fill="currentColor" fillOpacity="0.18"/>
+                {/* Ferrule band — divides metal crimp (~30% from right) from rubber body */}
+                <line x1="8.5" y1="3.5" x2="7" y2="9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+                {/* Erased surface mark — horizontal line below the eraser block */}
+                <line x1="0.5" y1="11" x2="5" y2="11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
               </svg>
               Erase
             </button>

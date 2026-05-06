@@ -1334,10 +1334,15 @@ export default function App() {
               title="Erase an object from the wall photo using content-aware fill"
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="btn-icon">
-                <path d="M10.5 3.5L3.5 10.5M3.5 10.5l3-.5 4-3.5M3.5 10.5l.5-3L7.5 3.5"
-                  stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M2.5 12h3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/>
-                {activeWallEraseHistory.length > 0 && <circle cx="12" cy="12" r="1.5" fill="currentColor"/>}
+                {/* Eraser block body — wide parallelogram like the rubber end of a pencil */}
+                <path d="M1.5 10.5 L3 3.5 L12.5 3.5 L11 10.5 Z"
+                  stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round"
+                  fill="currentColor" fillOpacity="0.18"/>
+                {/* Ferrule band — divides metal crimp (~30% from right) from rubber body */}
+                <line x1="9" y1="3.5" x2="7.5" y2="10.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+                {/* Erased surface mark — horizontal line below the eraser block */}
+                <line x1="0.5" y1="12" x2="5" y2="12" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/>
+                {activeWallEraseHistory.length > 0 && <circle cx="12.5" cy="12.5" r="1.5" fill="currentColor"/>}
               </svg>
               <span className="btn-label"> Erase Object</span>
             </button>
