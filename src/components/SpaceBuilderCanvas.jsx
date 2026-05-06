@@ -789,6 +789,7 @@ export default function SpaceBuilderCanvas({
 // Each corner's handle is offset diagonally outward so the finger/cursor
 // never obscures the exact point being controlled.
 const HANDLE_OFFSET = 45   // SVG-viewBox units (offset from actual corner)
+const HANDLE_PAD    = HANDLE_OFFSET + 15  // viewBox padding on all sides so handles never leave SVG bounds
 const HANDLE_DIR = { tl: [-1,-1], tr: [1,-1], br: [1,1], bl: [-1,1] }
 
 function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
@@ -874,18 +875,17 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
           <button className="sbc-crop-close" onClick={onClose}>✕</button>
         </div>
 
-        {/* overflow:visible lets handles extend past the photo edge.
-            A <clipPath> inside the SVG keeps the photo and selection polygon
-            clipped to the viewBox while handles render outside freely.
-            On mobile the svg-wrap shrinks the SVG width so the ~30-unit
-            diagonal handle offset doesn't clip off-screen. */}
+        {/* The viewBox is padded on all sides by HANDLE_PAD so the diagonal
+            offset handles always stay within the SVG element's own bounding
+            box. This means browser hit-testing always finds the handle <g>,
+            regardless of where the handle was last released. No overflow:visible
+            tricks needed — handles are simply inside the SVG, always. */}
         <div className="sbc-crop-svg-wrap">
         <svg
           ref={svgRef}
-          viewBox={`0 0 ${W} ${H}`}
-          overflow="visible"
+          viewBox={`${-HANDLE_PAD} ${-HANDLE_PAD} ${W + 2*HANDLE_PAD} ${H + 2*HANDLE_PAD}`}
           className="sbc-crop-svg"
-          style={{ display:'block', cursor:'crosshair', touchAction:'none', aspectRatio:`${W}/${H}` }}
+          style={{ display:'block', cursor:'crosshair', touchAction:'none', aspectRatio:`${W + 2*HANDLE_PAD}/${H + 2*HANDLE_PAD}` }}
         >
           <defs>
             <clipPath id={clipId}>

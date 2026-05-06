@@ -3243,17 +3243,18 @@ kbd {
     overflow-y: auto;
   }
 
-  /* Narrow the SVG on mobile so the diagonal handles (HANDLE_OFFSET ≈ 30 SVG units)
-     have room on both sides without going off-screen. The wrap gives 40px per side. */
+  /* Narrow the SVG on mobile so the diagonal handles (HANDLE_OFFSET ≈ 45 SVG units)
+     have room on both sides without going off-screen. The viewBox now includes the
+     handle padding, so no extra shrink is needed — fill the full modal width. */
   .sbc-crop-svg-wrap {
-    width: calc(100% - 80px);
-    margin: 0 auto;
+    width: 100%;
+    margin: 0;
   }
 
   /* Cap the SVG so the header + footer always stay on screen.
-     aspect-ratio (set inline) keeps proportions correct even at this max-height. */
+     aspect-ratio is now inline on the SVG (viewBox includes handle padding). */
   .sbc-crop-svg {
-    max-height: calc(100svh - 140px);
+    max-height: calc(100svh - 110px);
     width: 100%;
     max-width: 100%;
   }
