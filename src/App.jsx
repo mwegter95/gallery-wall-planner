@@ -484,25 +484,48 @@ export default function App() {
     const existingWalls = {}
     setWalls(prev => { Object.assign(existingWalls, prev); return prev })
 
-    // Upload every surface that has a warpedDataUrl, await them all in parallel
-    const imageUrls = {}
+    // Upload warped images and new inpaint results in parallel, then build wall objects
+    const imageUrls   = {}
+    const inpaintUrls = {}
     await Promise.all(
       space.surfaces.map(async surface => {
-        if (!surface.warpedDataUrl) return
-        try {
-          const { url } = await api.uploadWallImage(surface.id, surface.warpedDataUrl)
-          imageUrls[surface.id] = url
-        } catch (err) {
-          console.error('[handleSaveSpace] image upload failed for', surface.id, err)
+        // Warped base image
+        if (surface.warpedDataUrl) {
+          try {
+            const { url } = await api.uploadWallImage(surface.id, surface.warpedDataUrl)
+            imageUrls[surface.id] = url
+          } catch (err) {
+            console.error('[handleSaveSpace] image upload failed for', surface.id, err)
+          }
+        }
+        // Inpaint/erase result — only upload if it differs from the last recorded entry
+        if (surface.inpaintDataUrl) {
+          const existing   = existingWalls[surface.id]
+          const lastEraseUrl = existing?.eraseHistory?.at(-1)?.dataUrl ?? existing?.inpaintDataUrl
+          if (surface.inpaintDataUrl !== lastEraseUrl) {
+            try {
+              const { url } = await api.uploadWallInpaint(surface.id, surface.inpaintDataUrl)
+              inpaintUrls[surface.id] = url
+            } catch {
+              inpaintUrls[surface.id] = surface.inpaintDataUrl  // keep data URL on failure
+            }
+          }
         }
       })
     )
 
-    // Now build wall objects — all imageUrls are resolved
+    // Now build wall objects — all URLs are resolved
     const wallUpdates = {}
     for (const surface of space.surfaces) {
       const wallId   = surface.id
       const existing = existingWalls[wallId]
+
+      // Carry forward existing erase history; append new entry if inpaint changed
+      let eraseHistory = existing?.eraseHistory || []
+      if (inpaintUrls[wallId]) {
+        eraseHistory = [...eraseHistory, { id: genId(), createdAt: Date.now(), dataUrl: inpaintUrls[wallId] }]
+      }
+
       const wall = {
         id:        wallId,
         name:      surface.name,
@@ -511,6 +534,7 @@ export default function App() {
         roomId:    space.id,
         createdAt: existing?.createdAt || Date.now(),
         imageUrl:  imageUrls[wallId] ?? existing?.imageUrl ?? null,
+        ...(eraseHistory.length ? { eraseHistory } : {}),
       }
       wallUpdates[wallId] = wall
       api.putWall(wall).catch(console.error)

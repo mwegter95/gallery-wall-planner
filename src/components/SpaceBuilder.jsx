@@ -45,8 +45,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
-  // Wall-layout picker: which wall is expanded in the "Load from wall" section
-  const [pickerWallId,    setPickerWallId]    = useState('')
   const [showEraseModal,  setShowEraseModal]  = useState(false)
   // Mobile panel overlay
   const [showMobilePanel, setShowMobilePanel] = useState(false)
@@ -507,56 +505,31 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
 
         {/* ── Load Layout from Wall ────────────────────────────── */}
         {(() => {
-          // Collect all walls that have at least one saved layout
-          const wallsWithLayouts = Object.entries(allLayouts).filter(([, wl]) => Object.keys(wl).length > 0)
-          if (wallsWithLayouts.length === 0) return null
-
-          const pickerLayouts = pickerWallId ? (allLayouts[pickerWallId] || {}) : {}
+          // Only show layouts saved against this specific surface/wall
+          const surfaceLayouts = allLayouts[activeSurface.id] || {}
+          if (Object.keys(surfaceLayouts).length === 0) return null
 
           return (
             <div className="sb-wall-layouts">
               <div className="sb-se-section-title">Load Layout from Wall</div>
-              {/* Step 1: pick a wall */}
-              <select
-                className="sb-se-select"
-                value={pickerWallId}
-                onChange={e => setPickerWallId(e.target.value)}
-              >
-                <option value="">— pick a wall —</option>
-                {wallsWithLayouts.map(([wallId, wl]) => {
-                  const wallName = walls[wallId]?.name || `Wall ${wallId.slice(0, 6)}`
+              <div className="sb-layout-list">
+                {Object.entries(surfaceLayouts).map(([name, data]) => {
+                  const pieces = Array.isArray(data) ? data : (data?.pieces || [])
+                  const isActive = name === activeSurface.activeLayout
                   return (
-                    <option key={wallId} value={wallId}>
-                      {wallName} ({Object.keys(wl).length} layout{Object.keys(wl).length !== 1 ? 's' : ''})
-                    </option>
+                    <div key={name} className={`sb-layout-row${isActive ? ' sb-layout-row--active' : ''}`}>
+                      <span className="sb-layout-row-name">{name}</span>
+                      <span className="sb-layout-row-count">{pieces.length}p</span>
+                      <div className="sb-layout-row-actions">
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          onClick={() => loadWallLayout(activeSurface.id, name, data)}
+                        >{isActive ? '✓ Active' : 'Load'}</button>
+                      </div>
+                    </div>
                   )
                 })}
-              </select>
-
-              {/* Step 2: pick a layout from that wall */}
-              {pickerWallId && Object.keys(pickerLayouts).length > 0 && (
-                <div className="sb-layout-list" style={{ marginTop: 6 }}>
-                  {Object.entries(pickerLayouts).map(([name, data]) => {
-                    const pieces = Array.isArray(data) ? data : (data?.pieces || [])
-                    const isActive = name === activeSurface.activeLayout
-                    return (
-                      <div key={name} className={`sb-layout-row${isActive ? ' sb-layout-row--active' : ''}`}>
-                        <span className="sb-layout-row-name">{name}</span>
-                        <span className="sb-layout-row-count">{pieces.length}p</span>
-                        <div className="sb-layout-row-actions">
-                          <button
-                            className="btn btn-ghost btn-xs"
-                            onClick={() => {
-                              loadWallLayout(activeSurface.id, name, data)
-                              setPickerWallId('')
-                            }}
-                          >{isActive ? '✓ Active' : 'Load'}</button>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+              </div>
             </div>
           )
         })()}
