@@ -74,6 +74,16 @@ export default function LidarScanner({ onComplete, onCancel }) {
       `UA: ${ua}`,
     ].filter(Boolean).join('\n')
 
+    // ── iOS: WebXR AR is not available via any browser in 2026 ───────────────
+    // Apple has never shipped WebXR in Safari. Mozilla WebXR Viewer v2 was
+    // archived July 2024 and is broken on iOS 18+/iPhone 17 hardware —
+    // navigator.xr is never injected despite the polyfill claim.
+    // The only viable path on iPhone is a native ARKit app.
+    if (isIOS) {
+      setStatus('ios-unavailable')
+      return
+    }
+
     // ── Not HTTPS / not secure context ───────────────────────────────────────
     if (!isSecure) {
       setStatus('unsupported')
@@ -81,83 +91,57 @@ export default function LidarScanner({ onComplete, onCancel }) {
       const directAppUrl = alreadyHttps
         ? window.location.href
         : window.location.href.replace(/^http:\/\//, 'https://')
-
-      let ctxMsg
-      if (inIframe && alreadyHttps) {
-        // URL is already HTTPS but WebXR Viewer won't grant AR to cross-origin iframes.
-        // Tell the user to open the app directly, not through the portfolio wrapper.
-        ctxMsg = `❌ WebXR Viewer cannot access AR inside an embedded iframe — even over HTTPS.\n\nOpen the app directly in WebXR Viewer (tap the link below):`
-      } else if (inIframe) {
-        ctxMsg = `❌ Not a secure context — this iframe isn't served over HTTPS.\n\nOpen the app directly in WebXR Viewer (tap the link below):`
-      } else {
-        ctxMsg = `❌ Not a secure context — the page loaded over HTTP.\n\nOpen in WebXR Viewer via HTTPS (tap the link below):`
-      }
-
       setDirectUrl(directAppUrl)
-      setErrorMsg(buildDiag(ctxMsg))
+      setErrorMsg(buildDiag(
+        inIframe && alreadyHttps
+          ? `WebXR cannot access AR inside an embedded iframe — open the app directly.`
+          : `The page loaded over HTTP — switch to HTTPS.`
+      ))
       return
     }
 
-    // ── Poll for navigator.xr ─────────────────────────────────────────────
-    // WebXR Viewer injects navigator.xr asynchronously via WKWebView userScript.
-    // On newer iOS versions the injection can be slow — poll for up to 30 s.
+    // ── Poll for navigator.xr (Android / Chrome / non-iOS) ───────────────────
     let attempts = 0
-    const POLL_MS    = 500
-    const MAX_SECS   = 30
-    const MAX_ATTEMPTS = (MAX_SECS * 1000) / POLL_MS   // 60 attempts × 500 ms
+    const POLL_MS      = 500
+    const MAX_SECS     = 10
+    const MAX_ATTEMPTS = (MAX_SECS * 1000) / POLL_MS
 
     const checkXR = () => {
       attempts++
       const hasXR = !!navigator.xr
 
-      // Show live "still checking" counter so the user knows we're trying
       if (!hasXR && attempts < MAX_ATTEMPTS) {
         const elapsed = Math.round((attempts * POLL_MS) / 1000)
-        setErrorMsg(`Waiting for WebXR to initialise… (${elapsed}s / ${MAX_SECS}s)\n\nUA: ${ua}`)
+        setErrorMsg(`Waiting for WebXR… (${elapsed}s)\n\nUA: ${ua}`)
       }
 
       if (hasXR) {
-        // ── navigator.xr found → check session support ─────────────────
         navigator.xr.isSessionSupported('immersive-ar').then(supported => {
           if (supported) {
             setStatus('ready')
           } else {
-            const reason = isIOS && (isSafari && !isWebXRViewer)
-              ? `immersive-ar → false.\n⚠️ Stock iOS Safari does not support WebXR AR. Use Mozilla WebXR Viewer app.`
-              : inIframe
-                ? `immersive-ar → false inside iframe.\nOpen the app directly in WebXR Viewer — iframes can't access AR even over HTTPS.`
-                : `immersive-ar → false. Your device/browser does not support AR sessions.`
             setStatus('unsupported')
-            setErrorMsg(buildDiag(reason))
+            setErrorMsg(buildDiag(`immersive-ar not supported. Use Chrome on Android.`))
           }
         }).catch(err => {
           setStatus('unsupported')
           setErrorMsg(buildDiag(`isSessionSupported() threw: ${err.name}: ${err.message}`))
         })
-        return   // don't schedule next poll
-      }
-
-      if (attempts >= MAX_ATTEMPTS) {
-        // ── Timed out waiting for navigator.xr ─────────────────────────
-        const reason = isWebXRViewer
-          ? `navigator.xr not found after ${MAX_SECS}s in WebXR Viewer.\n\nPossible causes:\n• Camera permission not granted (Settings → WebXR Viewer → Camera)\n• WebXR Viewer v2 may not support iOS 18 / iPhone 17 hardware\n• Try force-quitting WebXR Viewer and reopening this URL`
-          : isIOS && isSafari
-            ? `navigator.xr not found.\n⚠️ Stock iOS Safari does not support WebXR AR — no flag enables it.\nInstall Mozilla WebXR Viewer from the App Store and open this page there.`
-            : inIframe
-              ? `navigator.xr not found in iframe.\nWebXR is blocked inside embedded frames. Open the page in its own tab.`
-              : `navigator.xr not found. Use Chrome on Android or Mozilla WebXR Viewer on iPhone.`
-        setStatus('unsupported')
-        setErrorMsg(buildDiag(reason))
         return
       }
 
-      // Schedule next check
+      if (attempts >= MAX_ATTEMPTS) {
+        setStatus('unsupported')
+        setErrorMsg(buildDiag(`navigator.xr not found after ${MAX_SECS}s.\nUse Chrome on Android for WebXR AR.`))
+        return
+      }
+
       pollTimer = setTimeout(checkXR, POLL_MS)
     }
 
     let pollTimer = setTimeout(checkXR, POLL_MS)
     return () => clearTimeout(pollTimer)
-  }, [retryCount])  // re-run whenever user taps Retry
+  }, [retryCount])
 
   /* ── Start the AR session ─────────────────────────────────────────────── */
   const startScan = useCallback(async () => {
@@ -353,6 +337,37 @@ export default function LidarScanner({ onComplete, onCancel }) {
           ) : (
             <p className="lidar-hint">Waiting for WebXR to initialise…</p>
           )}
+        </div>
+      </div>
+    )
+  }
+
+  // ── iOS: honest dead-end screen ─────────────────────────────────────────────
+  if (status === 'ios-unavailable') {
+    return (
+      <div className="lidar-overlay">
+        <div className="lidar-card">
+          {/* iPhone icon with strikethrough */}
+          <svg className="lidar-warn-icon" viewBox="0 0 48 48" fill="none">
+            <rect x="13" y="4" width="22" height="40" rx="4" stroke="#f97316" strokeWidth="2"/>
+            <circle cx="24" cy="38" r="2" fill="#f97316" opacity="0.5"/>
+            <line x1="8" y1="8" x2="40" y2="40" stroke="#f97316" strokeWidth="2.5" strokeLinecap="round"/>
+          </svg>
+          <h2 className="lidar-title">LiDAR Not Available on iOS</h2>
+          <p className="lidar-desc">
+            Apple has not shipped WebXR in Safari, and the only third-party iOS WebXR
+            app (Mozilla WebXR Viewer) was abandoned in 2024 and no longer works on
+            iOS 18 / iPhone 17 hardware.
+          </p>
+          <p className="lidar-desc" style={{ marginTop: 0, opacity: 0.7, fontSize: '13px' }}>
+            LiDAR room scanning via web browser is not currently possible on iPhone.
+            A native iOS app (using ARKit) would be required to access depth data.
+          </p>
+          <div className="lidar-ios-divider" />
+          <p className="lidar-desc" style={{ fontSize: '12px', opacity: 0.55 }}>
+            On Android, Chrome supports WebXR AR natively — LiDAR scanning works there.
+          </p>
+          <button className="lidar-btn lidar-btn--ghost" onClick={onCancel}>Close</button>
         </div>
       </div>
     )

@@ -7261,6 +7261,13 @@ kbd {
   margin-top: 4px;
 }
 
+.lidar-ios-divider {
+  width: 100%;
+  height: 1px;
+  background: rgba(255,255,255,0.08);
+  margin: 8px 0;
+}
+
 .lidar-direct-url {
   display: block;
   width: 100%;
