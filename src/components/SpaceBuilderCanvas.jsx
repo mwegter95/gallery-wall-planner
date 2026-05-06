@@ -84,9 +84,9 @@ const FOV_PRESETS = [
 ]
 const JOY_RADIUS = 36   // outer pad radius px
 const JOY_THUMB  = 13   // thumb radius px
-const JOY_SPEED    = 0.028
+const JOY_SPEED    = 0.014  // halved from 0.028 — was too sensitive
 const PAN_SPEED    = 0.04   // orbit.center translation per frame per unit joystick deflection
-const DOLLY_SPEED  = 0.04   // orbit.center translation per frame along camera-forward XZ axis
+const DOLLY_SPEED  = 0.04   // radius change per frame (same units as PAN_SPEED)
 
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
@@ -328,8 +328,17 @@ export default function SpaceBuilderCanvas({
         while (obj && !obj.userData.surfaceId) obj = obj.parent
         const id = obj?.userData.surfaceId
         if (id) {
-          drag.active = true; drag.type = 'surface'; drag.surfaceId = id
+          // Always select the surface (works from front and back face)
           stateRef.current.onSelectSurface(id)
+          // Only start a surface DRAG on front-face hits — back-face clicks
+          // should orbit so the user doesn't accidentally drag invisible walls
+          const worldNormal = hit.face.normal.clone().applyQuaternion(hit.object.quaternion)
+          const isFront = worldNormal.dot(raycaster.ray.direction) < 0
+          if (isFront) {
+            drag.active = true; drag.type = 'surface'; drag.surfaceId = id
+          } else {
+            drag.active = true; drag.type = 'orbit'
+          }
         } else {
           drag.active = true; drag.type = 'orbit'
         }
@@ -473,12 +482,15 @@ export default function SpaceBuilderCanvas({
         needsUpdate = true
       }
 
-      // Forward/Back (dolly) joystick — moves orbit center along camera-forward XZ
-      // Forward direction (XZ projected): (-sin θ, -cos θ). ny < 0 = joystick up = move forward.
+      // Forward/Back (dolly) joystick — changes orbit.radius so the camera physically
+      // moves toward/away from the scene center WITHOUT moving orbit.center.
+      // Keeping orbit.center fixed means orbit always rotates around the same point.
+      // ny < 0 (joystick up) = forward = closer = decrease radius.
       const fwd = fwdJoystickRef.current
       if (fwd.active && fwd.ny !== 0) {
-        orbit.center.x += fwd.ny * DOLLY_SPEED * Math.sin(orbit.theta)
-        orbit.center.z += fwd.ny * DOLLY_SPEED * Math.cos(orbit.theta)
+        const newR = Math.max(0.1, Math.min(80, orbit.radius + fwd.ny * DOLLY_SPEED))
+        orbit.radius = newR
+        setZoomRef.current(newR)
         needsUpdate = true
       }
 
