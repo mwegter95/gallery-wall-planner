@@ -50,12 +50,48 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const glRef         = useRef(null)  // WebGL context
   const refSpaceRef   = useRef(null)
 
-  /* ── Check WebXR availability ─────────────────────────────────────────── */
+  /* ── Check availability (native bridge OR WebXR) ─────────────────────── */
   useEffect(() => {
-    // Reset state on each attempt
     setStatus('checking')
     setErrorMsg('')
     setDirectUrl('')
+
+    // ── Native StageAR wrapper detected ──────────────────────────────────────
+    // The Swift app injects window.__stageARNative = true at document start.
+    // When present we skip WebXR entirely and use the ARKit bridge instead.
+    if (window.__stageARNative) {
+      // Set up the global callback the Swift side will call.
+      window.onStageARResult = (result) => {
+        if (result.error) {
+          setStatus('error')
+          setErrorMsg(result.error)
+          return
+        }
+        if (result.status === 'scanning') {
+          setStatus('scanning')
+          return
+        }
+        if (result.status === 'progress') {
+          setPointCount(result.pointCount)
+          setProgress(Math.min(99, Math.round((result.pointCount / 100_000) * 100)))
+          return
+        }
+        if (result.status === 'done') {
+          setStatus('processing')
+          // Convert native flat-float array to the pointCloud format the app expects.
+          // points: [x0,y0,z0,r0,g0,b0, x1,y1,z1,...] (Float32-precision)
+          const pointCloud = {
+            source: 'native-arkit',
+            pointCount: result.pointCount,
+            points: result.points,   // raw flat array from Swift
+          }
+          onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
+        }
+      }
+      setStatus('ready')
+      return () => { window.onStageARResult = null }
+    }
+
     const inIframe     = window.self !== window.top
     const isSecure     = window.isSecureContext
     const ua           = navigator.userAgent
@@ -147,6 +183,12 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const startScan = useCallback(async () => {
     setStatus('starting')
     setErrorMsg('')
+
+    // ── Native ARKit bridge ───────────────────────────────────────────────────
+    if (window.__stageARNative) {
+      window.webkit.messageHandlers.stageAR.postMessage({ action: 'startScan' })
+      return
+    }
 
     // Canvas for the WebGL session
     const canvas = document.createElement('canvas')
@@ -275,6 +317,14 @@ export default function LidarScanner({ onComplete, onCancel }) {
   /* ── Done scanning → stop session, package data ─────────────────────── */
   const finishScan = useCallback(async () => {
     setStatus('processing')
+
+    // ── Native ARKit bridge ───────────────────────────────────────────────────
+    if (window.__stageARNative) {
+      // Swift side packages the data and calls window.onStageARResult({ status:'done', … })
+      window.webkit.messageHandlers.stageAR.postMessage({ action: 'stopScan' })
+      return
+    }
+
     // Stop the RAF loop
     if (rafRef.current && sessionRef.current) {
       try { sessionRef.current.cancelAnimationFrame(rafRef.current) } catch { }
