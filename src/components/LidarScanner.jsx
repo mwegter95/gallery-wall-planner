@@ -50,15 +50,23 @@ export default function LidarScanner({ onComplete, onCancel }) {
 
   /* ── Check WebXR availability ─────────────────────────────────────────── */
   useEffect(() => {
+    const inIframe = window.self !== window.top
+
     if (!navigator.xr) {
+      const msg = inIframe
+        ? 'WebXR is blocked inside an embedded frame. Tap the ↗ button above to open this app in a new tab, then try scanning again.'
+        : 'WebXR is not available. Open this page in Safari on a LiDAR iPhone (iPhone 12 Pro or later).'
       setStatus('unsupported')
-      setErrorMsg('WebXR is not available. Open this page in Safari on an iPhone with LiDAR (iPhone 12 Pro or later).')
+      setErrorMsg(msg)
       return
     }
     navigator.xr.isSessionSupported('immersive-ar').then(supported => {
       if (!supported) {
+        const msg = inIframe
+          ? 'AR is not permitted inside an embedded frame. Tap ↗ to open in a new tab and try again.'
+          : 'Immersive AR is not supported on this device or browser. Use Safari on a LiDAR iPhone.'
         setStatus('unsupported')
-        setErrorMsg('Immersive AR is not supported on this device or browser. Use Safari on a LiDAR iPhone.')
+        setErrorMsg(msg)
       } else {
         setStatus('ready')
       }
