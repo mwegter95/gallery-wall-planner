@@ -811,13 +811,19 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
     } finally { setIsWarping(false); onClose() }
   }
 
-  // Convert a CSS-pixel pointer position (relative to the rendered SVG element)
-  // to SVG-viewBox coordinates, accounting for the scale applied by viewBox.
+  // Use the SVG's own coordinate transform matrix to convert screen pixels →
+  // viewBox coordinates.  This is 100% accurate regardless of any CSS sizing,
+  // viewBox scaling, preserveAspectRatio letterboxing, or device pixel ratio.
   function clientToSVG(clientX, clientY) {
-    const rect = svgRef.current.getBoundingClientRect()
-    const sx = (clientX - rect.left)  / rect.width  * W
-    const sy = (clientY - rect.top)   / rect.height * H
-    return [Math.max(0, Math.min(W, sx)), Math.max(0, Math.min(H, sy))]
+    const svg = svgRef.current
+    const pt  = svg.createSVGPoint()
+    pt.x = clientX
+    pt.y = clientY
+    const svgPt = pt.matrixTransform(svg.getScreenCTM().inverse())
+    return [
+      Math.max(0, Math.min(W, svgPt.x)),
+      Math.max(0, Math.min(H, svgPt.y)),
+    ]
   }
 
   return (
@@ -827,14 +833,22 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
           <span>Crop corners — {surface.name}</span>
           <button className="sbc-crop-close" onClick={onClose}>✕</button>
         </div>
-        {/* viewBox makes the coordinate system fixed at W×H regardless of
-            rendered CSS size, so the modal can be any width and handles
-            always land on the correct pixel. */}
+        {/*
+          The photo is rendered as an <image> INSIDE the SVG so it lives in
+          the same viewBox coordinate space as the handles.  Previously it was
+          a CSS background-image on the SVG element, which fills the CSS box
+          (not the viewBox) — so when flex stretched the element taller the
+          photo stretched while handles stayed in the letterboxed viewBox area,
+          producing a distorted display and wrong corner coordinates.
+
+          aspect-ratio inline keeps the CSS box proportional, preventing
+          flex from ever stretching the element beyond its natural ratio.
+        */}
         <svg
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
           className="sbc-crop-svg"
-          style={{ display:'block', backgroundImage:`url(${photo.dataUrl})`, backgroundSize:'100% 100%', cursor:'crosshair', touchAction:'none' }}
+          style={{ display:'block', cursor:'crosshair', touchAction:'none', aspectRatio:`${W}/${H}` }}
           onMouseMove={e => {
             if (!dragRef.current) return
             const [sx, sy] = clientToSVG(e.clientX, e.clientY)
@@ -851,10 +865,12 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
           }}
           onTouchEnd={() => { dragRef.current = null }}
         >
+          {/* Photo lives in the viewBox coordinate system — same space as handles */}
+          <image href={photo.dataUrl} x="0" y="0" width={W} height={H} preserveAspectRatio="xMidYMid meet"/>
           <polygon points={polyStr} fill="rgba(74,158,255,0.15)" stroke="#4a9eff" strokeWidth="1.5"/>
           {['tl','tr','br','bl'].map(k => {
             const [hx, hy] = toSVG(corners[k])
-            // Touch hit area is larger (r=22) so fingers can easily grab handles
+            // Large transparent hit circle (r=22) so fingers can grab handles easily
             return (
               <g key={k}
                 onMouseDown={e => { e.stopPropagation(); dragRef.current = k }}

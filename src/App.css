@@ -3238,15 +3238,17 @@ kbd {
   .sbc-crop-modal {
     width: 100%;
     max-width: 100%;
-    height: 100svh;
     max-height: 100svh;
     border-radius: 0;
+    overflow-y: auto;
   }
 
+  /* Cap the SVG so the header + footer always stay on screen.
+     aspect-ratio (set inline) keeps proportions correct even at this max-height. */
   .sbc-crop-svg {
-    flex: 1;
-    min-height: 0;
-    height: 0;  /* flex child grows via flex:1, not by content */
+    max-height: calc(100svh - 90px);
+    width: auto;
+    max-width: 100%;
   }
 
   /* Wall Manager */
@@ -6290,13 +6292,13 @@ kbd {
   width: min(560px, 92vw);
 }
 
-/* SVG scales to fill modal width; viewBox preserves coordinate system */
+/* SVG scales to fill modal width; inline aspect-ratio keeps it proportional.
+   The photo is an <image> inside the viewBox so it never distorts. */
 .sbc-crop-svg {
   width: 100%;
   height: auto;
-  flex: 1;
-  min-height: 0;
   display: block;
+  flex-shrink: 0;
 }
 .sbc-crop-header {
   display: flex;
