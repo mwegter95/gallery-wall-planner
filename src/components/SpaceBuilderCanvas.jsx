@@ -786,16 +786,23 @@ export default function SpaceBuilderCanvas({
 }
 
 // ── 2D crop-corner editor (overlay on top of 3D canvas) ──────────────────────
+// Each corner's handle is offset diagonally outward so the finger/cursor
+// never obscures the exact point being controlled.
+const HANDLE_OFFSET = 30   // SVG-viewBox units
+const HANDLE_DIR = { tl: [-1,-1], tr: [1,-1], br: [1,1], bl: [-1,1] }
+
 function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
   const surface = space.surfaces.find(s => s.id === surfaceId)
   const photo   = surface && space.photos.find(p => p.id === surface.photoId)
   const [corners,   setCorners]   = useState(surface?.corners ? JSON.parse(JSON.stringify(surface.corners)) : null)
   const [isWarping, setIsWarping] = useState(false)
-  const svgRef  = useRef(null)
-  const dragRef = useRef(null)
+  const svgRef     = useRef(null)
+  const cleanupRef = useRef(null)   // stores window-listener teardown for active drag
+
   const W = 540
   const H = photo ? Math.round(W * photo.displayH / photo.displayW) : 360
   if (!surface || !photo || !corners) return null
+
   const toSVG   = ([fx, fy]) => [fx * W, fy * H]
   const fromSVG = (sx, sy)   => [sx / W, sy / H]
   const polyStr = ['tl','tr','br','bl'].map(k => toSVG(corners[k]).join(',')).join(' ')
@@ -811,20 +818,59 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
     } finally { setIsWarping(false); onClose() }
   }
 
-  // Use the SVG's own coordinate transform matrix to convert screen pixels →
-  // viewBox coordinates.  This is 100% accurate regardless of any CSS sizing,
-  // viewBox scaling, preserveAspectRatio letterboxing, or device pixel ratio.
+  // svg.getScreenCTM().inverse() gives the exact screen→viewBox transform,
+  // accounting for viewBox, preserveAspectRatio, zoom, and device pixel ratio.
+  // No clamping here — handles intentionally live outside the viewBox bounds.
   function clientToSVG(clientX, clientY) {
     const svg = svgRef.current
     const pt  = svg.createSVGPoint()
     pt.x = clientX
     pt.y = clientY
-    const svgPt = pt.matrixTransform(svg.getScreenCTM().inverse())
-    return [
-      Math.max(0, Math.min(W, svgPt.x)),
-      Math.max(0, Math.min(H, svgPt.y)),
-    ]
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse())
+    return [p.x, p.y]
   }
+
+  // Attach window-level drag listeners so the drag keeps working even when
+  // the pointer moves outside the SVG element (including over the offset handles).
+  function startDrag(k, e) {
+    e.stopPropagation()
+    if (e.type === 'touchstart') e.preventDefault()
+    if (cleanupRef.current) cleanupRef.current()
+
+    const [dx, dy] = HANDLE_DIR[k]
+    const ox = dx * HANDLE_OFFSET
+    const oy = dy * HANDLE_OFFSET
+
+    const onMove = (ev) => {
+      if (ev.cancelable) ev.preventDefault()
+      const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX
+      const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY
+      if (!svgRef.current) return
+      const [sx, sy] = clientToSVG(clientX, clientY)
+      // Subtract the visual offset to get the actual corner position, then
+      // clamp the corner (not the handle) to the image bounds.
+      setCorners(prev => ({ ...prev, [k]: fromSVG(
+        Math.max(0, Math.min(W, sx - ox)),
+        Math.max(0, Math.min(H, sy - oy))
+      )}))
+    }
+
+    const onUp = () => { if (cleanupRef.current) { cleanupRef.current(); cleanupRef.current = null } }
+
+    const cleanup = () => {
+      window.removeEventListener('mousemove',  onMove)
+      window.removeEventListener('touchmove',  onMove)
+      window.removeEventListener('mouseup',    onUp)
+      window.removeEventListener('touchend',   onUp)
+    }
+    cleanupRef.current = cleanup
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('touchmove', onMove, { passive: false })
+    window.addEventListener('mouseup',   onUp)
+    window.addEventListener('touchend',  onUp)
+  }
+
+  const clipId = `photo-clip-${surfaceId}`
 
   return (
     <div className="sbc-crop-overlay">
@@ -833,58 +879,75 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
           <span>Crop corners — {surface.name}</span>
           <button className="sbc-crop-close" onClick={onClose}>✕</button>
         </div>
-        {/*
-          The photo is rendered as an <image> INSIDE the SVG so it lives in
-          the same viewBox coordinate space as the handles.  Previously it was
-          a CSS background-image on the SVG element, which fills the CSS box
-          (not the viewBox) — so when flex stretched the element taller the
-          photo stretched while handles stayed in the letterboxed viewBox area,
-          producing a distorted display and wrong corner coordinates.
 
-          aspect-ratio inline keeps the CSS box proportional, preventing
-          flex from ever stretching the element beyond its natural ratio.
-        */}
+        {/* overflow:visible lets handles extend past the photo edge.
+            A <clipPath> inside the SVG keeps the photo and selection polygon
+            clipped to the viewBox while handles render outside freely.
+            On mobile the svg-wrap shrinks the SVG width so the ~30-unit
+            diagonal handle offset doesn't clip off-screen. */}
+        <div className="sbc-crop-svg-wrap">
         <svg
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
+          overflow="visible"
           className="sbc-crop-svg"
           style={{ display:'block', cursor:'crosshair', touchAction:'none', aspectRatio:`${W}/${H}` }}
-          onMouseMove={e => {
-            if (!dragRef.current) return
-            const [sx, sy] = clientToSVG(e.clientX, e.clientY)
-            setCorners(prev => ({ ...prev, [dragRef.current]: fromSVG(sx, sy) }))
-          }}
-          onMouseUp={() => { dragRef.current = null }}
-          onMouseLeave={() => { dragRef.current = null }}
-          onTouchMove={e => {
-            if (!dragRef.current) return
-            e.preventDefault()
-            const t = e.touches[0]
-            const [sx, sy] = clientToSVG(t.clientX, t.clientY)
-            setCorners(prev => ({ ...prev, [dragRef.current]: fromSVG(sx, sy) }))
-          }}
-          onTouchEnd={() => { dragRef.current = null }}
         >
-          {/* Photo lives in the viewBox coordinate system — same space as handles */}
-          <image href={photo.dataUrl} x="0" y="0" width={W} height={H} preserveAspectRatio="xMidYMid meet"/>
-          <polygon points={polyStr} fill="rgba(74,158,255,0.15)" stroke="#4a9eff" strokeWidth="1.5"/>
+          <defs>
+            <clipPath id={clipId}>
+              <rect x="0" y="0" width={W} height={H}/>
+            </clipPath>
+          </defs>
+
+          {/* Photo + selection polygon clipped to image bounds */}
+          <image href={photo.dataUrl} x="0" y="0" width={W} height={H}
+            preserveAspectRatio="xMidYMid meet" clipPath={`url(#${clipId})`}/>
+          <polygon points={polyStr}
+            fill="rgba(74,158,255,0.12)" stroke="#4a9eff" strokeWidth="1.5"
+            clipPath={`url(#${clipId})`} style={{ pointerEvents:'none' }}/>
+
+          {/* Corner handles — offset diagonally outward from each corner */}
           {['tl','tr','br','bl'].map(k => {
             const [hx, hy] = toSVG(corners[k])
-            // Large transparent hit circle (r=22) so fingers can grab handles easily
+            const [dx, dy] = HANDLE_DIR[k]
+            const hpx = hx + dx * HANDLE_OFFSET   // handle centre X
+            const hpy = hy + dy * HANDLE_OFFSET   // handle centre Y
+            const CX = 7                           // crosshair arm length
+
             return (
-              <g key={k}
-                onMouseDown={e => { e.stopPropagation(); dragRef.current = k }}
-                onTouchStart={e => { e.stopPropagation(); e.preventDefault(); dragRef.current = k }}
-                style={{ cursor:'grab' }}
-              >
-                <circle cx={hx} cy={hy} r={22} fill="transparent"/>
-                <circle cx={hx} cy={hy} r={8}  fill="#4a9eff" stroke="#fff" strokeWidth="2"/>
-                <text x={hx} y={hy+4} textAnchor="middle" fontSize="8" fill="#fff" fontWeight="700"
-                  style={{ pointerEvents:'none', userSelect:'none' }}>{k.toUpperCase()}</text>
+              <g key={k}>
+                {/* Dashed connector: actual corner → handle */}
+                <line x1={hx} y1={hy} x2={hpx} y2={hpy}
+                  stroke="#4a9eff" strokeWidth="1" strokeDasharray="4 3" opacity="0.6"
+                  style={{ pointerEvents:'none' }}/>
+
+                {/* Crosshair at the exact corner point */}
+                <line x1={hx-CX} y1={hy} x2={hx+CX} y2={hy}
+                  stroke="#4a9eff" strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+                <line x1={hx} y1={hy-CX} x2={hx} y2={hy+CX}
+                  stroke="#4a9eff" strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
+
+                {/* Draggable hollow ring handle */}
+                <g onMouseDown={e => startDrag(k, e)}
+                   onTouchStart={e => startDrag(k, e)}
+                   style={{ cursor:'grab' }}>
+                  <circle cx={hpx} cy={hpy} r={24} fill="transparent"/>
+                  <circle cx={hpx} cy={hpy} r={12}
+                    fill="none" stroke="#4a9eff" strokeWidth="2"/>
+                  <circle cx={hpx} cy={hpy} r={2.5} fill="#4a9eff"/>
+                  <text x={hpx + dx*18} y={hpy + dy*18}
+                    textAnchor="middle" dominantBaseline="central"
+                    fontSize="9" fill="#4a9eff" fontWeight="700" opacity="0.85"
+                    style={{ pointerEvents:'none', userSelect:'none' }}>
+                    {k.toUpperCase()}
+                  </text>
+                </g>
               </g>
             )
           })}
         </svg>
+        </div>{/* .sbc-crop-svg-wrap */}
+
         <div className="sbc-crop-footer">
           <button className="sb-btn sb-btn--ghost" onClick={onClose}>Cancel</button>
           <button

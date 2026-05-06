@@ -3243,11 +3243,18 @@ kbd {
     overflow-y: auto;
   }
 
+  /* Narrow the SVG on mobile so the diagonal handles (HANDLE_OFFSET ≈ 30 SVG units)
+     have room on both sides without going off-screen. The wrap gives 40px per side. */
+  .sbc-crop-svg-wrap {
+    width: calc(100% - 80px);
+    margin: 0 auto;
+  }
+
   /* Cap the SVG so the header + footer always stay on screen.
      aspect-ratio (set inline) keeps proportions correct even at this max-height. */
   .sbc-crop-svg {
-    max-height: calc(100svh - 90px);
-    width: auto;
+    max-height: calc(100svh - 140px);
+    width: 100%;
     max-width: 100%;
   }
 
@@ -6272,33 +6279,54 @@ kbd {
 
 /* ── Crop Corner Overlay ──────────────────────────────────────────────────── */
 .sbc-crop-overlay {
-  position: absolute;
+  position: fixed;           /* break out of overflow:hidden ancestor chain */
   inset: 0;
   background: rgba(5,10,18,0.85);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 500;              /* above sb-backdrop (z-index:400) */
   backdrop-filter: blur(4px);
 }
 .sbc-crop-modal {
   background: #0d1520;
   border: 1px solid #1e3050;
   border-radius: 12px;
-  overflow: hidden;
+  /* overflow:visible so diagonally-offset handles can poke outside the photo
+     area.  The header/footer backgrounds stay clipped by the border-radius
+     because they are opaque block children, not the SVG overflow. */
+  overflow: visible;
   display: flex;
   flex-direction: column;
   max-height: 90vh;
   width: min(560px, 92vw);
 }
 
+/* Give the header and footer their own clipping so the rounded corners
+   still look correct even though the parent is overflow:visible */
+.sbc-crop-header {
+  border-radius: 12px 12px 0 0;
+  overflow: hidden;
+}
+.sbc-crop-footer {
+  border-radius: 0 0 12px 12px;
+  overflow: hidden;
+}
+
 /* SVG scales to fill modal width; inline aspect-ratio keeps it proportional.
-   The photo is an <image> inside the viewBox so it never distorts. */
+   overflow:visible is set as an SVG attribute so handles render outside the
+   viewBox without being clipped by the CSS box. */
 .sbc-crop-svg {
   width: 100%;
   height: auto;
   display: block;
   flex-shrink: 0;
+}
+/* Wrapper provides lateral breathing room on mobile so the ~30-unit diagonal
+   handle offset doesn't go off-screen on narrow viewports. */
+.sbc-crop-svg-wrap {
+  overflow: visible;
+  width: 100%;
 }
 .sbc-crop-header {
   display: flex;
