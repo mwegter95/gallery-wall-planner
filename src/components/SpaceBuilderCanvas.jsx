@@ -84,8 +84,9 @@ const FOV_PRESETS = [
 ]
 const JOY_RADIUS = 36   // outer pad radius px
 const JOY_THUMB  = 13   // thumb radius px
-const JOY_SPEED  = 0.028
-const PAN_SPEED  = 0.04  // orbit.center translation per frame per unit joystick deflection
+const JOY_SPEED    = 0.028
+const PAN_SPEED    = 0.04   // orbit.center translation per frame per unit joystick deflection
+const DOLLY_SPEED  = 0.04   // orbit.center translation per frame along camera-forward XZ axis
 
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
@@ -94,8 +95,9 @@ export default function SpaceBuilderCanvas({
   const threeRef  = useRef(null)
   const stateRef  = useRef({})
   const compTexCacheRef = useRef(new Map()) // Map<surfaceId, { key: string, dataUrl: string }>
-  const joystickRef    = useRef({ active: false, nx: 0, ny: 0 })  // orbit — read in RAF loop
-  const panJoystickRef = useRef({ active: false, nx: 0, ny: 0 })  // pan   — read in RAF loop
+  const joystickRef    = useRef({ active: false, nx: 0, ny: 0 })  // orbit  — read in RAF loop
+  const panJoystickRef = useRef({ active: false, nx: 0, ny: 0 })  // pan    — read in RAF loop
+  const fwdJoystickRef = useRef({ active: false, nx: 0, ny: 0 })  // dolly  — read in RAF loop
   const [snapHint,      setSnapHint]      = useState(null)
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   const [fov,           setFov]           = useState(55)
@@ -104,6 +106,7 @@ export default function SpaceBuilderCanvas({
   setZoomRef.current = setZoomRadius
   const [joyPos,        setJoyPos]        = useState({ x: 0, y: 0 }) // orbit thumb CSS offset
   const [panJoyPos,     setPanJoyPos]     = useState({ x: 0, y: 0 }) // pan thumb CSS offset
+  const [fwdJoyPos,     setFwdJoyPos]     = useState({ x: 0, y: 0 }) // fwd/back thumb CSS offset
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap }
 
   const prevCropReqRef = useRef(null)
@@ -274,8 +277,9 @@ export default function SpaceBuilderCanvas({
       const validHits = hits.filter(hit => {
         if (!hit.face) return false
         const worldNormal = hit.face.normal.clone().applyQuaternion(hit.object.quaternion)
-        // Negative dot = ray opposes normal = front face. Threshold 0.15 ≈ 81° max incidence.
-        return worldNormal.dot(raycaster.ray.direction) < -0.15
+        // Accept front OR back face hits; only reject nearly edge-on surfaces.
+        // |dot| > 0.15 means the ray is within ≈81° of either face normal.
+        return Math.abs(worldNormal.dot(raycaster.ray.direction)) > 0.15
       })
       return validHits[0] ?? null
     }
@@ -469,6 +473,15 @@ export default function SpaceBuilderCanvas({
         needsUpdate = true
       }
 
+      // Forward/Back (dolly) joystick — moves orbit center along camera-forward XZ
+      // Forward direction (XZ projected): (-sin θ, -cos θ). ny < 0 = joystick up = move forward.
+      const fwd = fwdJoystickRef.current
+      if (fwd.active && fwd.ny !== 0) {
+        orbit.center.x += fwd.ny * DOLLY_SPEED * Math.sin(orbit.theta)
+        orbit.center.z += fwd.ny * DOLLY_SPEED * Math.cos(orbit.theta)
+        needsUpdate = true
+      }
+
       if (needsUpdate) applyOrbit()
       renderer.render(scene, camera)
     }
@@ -617,7 +630,7 @@ export default function SpaceBuilderCanvas({
     }
   }
 
-  // Orbit joystick (right)
+  // Orbit joystick
   const orbitJoy = makeJoyHandlers(joystickRef, setJoyPos)
   const handleJoyDown = orbitJoy.onDown
   const handleJoyMove = orbitJoy.onMove
@@ -628,6 +641,12 @@ export default function SpaceBuilderCanvas({
   const handlePanJoyDown = panJoy.onDown
   const handlePanJoyMove = panJoy.onMove
   const handlePanJoyUp   = panJoy.onUp
+
+  // Forward/Back joystick (only Y axis used in RAF loop)
+  const fwdJoy = makeJoyHandlers(fwdJoystickRef, setFwdJoyPos)
+  const handleFwdJoyDown = fwdJoy.onDown
+  const handleFwdJoyMove = fwdJoy.onMove
+  const handleFwdJoyUp   = fwdJoy.onUp
 
   // Zoom slider — logarithmic so drag feels linear in perceptual space
   // slider value 0–100 maps to orbit.radius 0.1–80 via log scale
@@ -752,6 +771,40 @@ export default function SpaceBuilderCanvas({
             />
           </div>
           <div className="sbc-joystick-label">Orbit</div>
+        </div>
+
+        {/* Forward/Back (dolly) joystick */}
+        <div className="sbc-joystick-wrapper">
+          <div
+            className="sbc-joystick sbc-joystick--fwd"
+            style={{ '--jr': `${JOY_RADIUS}px` }}
+            onPointerDown={handleFwdJoyDown}
+            onPointerMove={handleFwdJoyMove}
+            onPointerUp={handleFwdJoyUp}
+            onPointerLeave={handleFwdJoyUp}
+            title="Drag up/down to move forward/back into the scene"
+          >
+            {/* Perspective double-arrow: small arrowhead at top (far/into screen),
+                large arrowhead at bottom (near/out of screen), tapering body. */}
+            <svg className="sbc-joystick-depth" viewBox="0 0 72 72" fill="none">
+              {/* Perspective body (trapezoid, narrow at top, wide at bottom) */}
+              <path d="M31 25 L41 25 L45 47 L27 47 Z" fill="currentColor" opacity=".15"/>
+              {/* Far arrowhead (top, small) */}
+              <path d="M36 12 L31 25 L41 25 Z" fill="currentColor" opacity=".6"/>
+              {/* Near arrowhead (bottom, large) */}
+              <path d="M36 60 L27 47 L45 47 Z" fill="currentColor" opacity=".6"/>
+              {/* Center spine */}
+              <line x1="36" y1="25" x2="36" y2="47" stroke="currentColor" strokeWidth="1" opacity=".3"/>
+            </svg>
+            <div
+              className="sbc-joystick-thumb"
+              style={{
+                '--jt': `${JOY_THUMB}px`,
+                transform: `translate(calc(-50% + ${fwdJoyPos.x}px), calc(-50% + ${fwdJoyPos.y}px))`,
+              }}
+            />
+          </div>
+          <div className="sbc-joystick-label">Forward / Back</div>
         </div>
       </div>
 
