@@ -7179,3 +7179,235 @@ kbd {
   .sb-panel-editor { padding: 10px 12px; }
   .sb-se-input { font-size: 13px; padding: 5px 8px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LiDAR Scanner overlay
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.lidar-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.lidar-card {
+  background: rgba(18, 22, 28, 0.96);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  border-radius: 16px;
+  padding: 32px 28px;
+  max-width: 400px;
+  width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  box-shadow: 0 16px 64px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.lidar-scan-icon {
+  width: 80px;
+  height: 80px;
+  color: #34d399;
+}
+
+.lidar-warn-icon {
+  width: 48px;
+  height: 48px;
+}
+
+.lidar-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #e8eaf0;
+  margin: 0;
+}
+
+.lidar-desc {
+  font-size: 13.5px;
+  color: rgba(232, 234, 240, 0.7);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.lidar-tips {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  width: 100%;
+}
+
+.lidar-tips li {
+  font-size: 13px;
+  color: rgba(232, 234, 240, 0.65);
+  padding: 6px 10px;
+  background: rgba(52, 211, 153, 0.05);
+  border-radius: 7px;
+  border: 1px solid rgba(52, 211, 153, 0.1);
+}
+
+.lidar-btn-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.lidar-btn {
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.lidar-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.lidar-btn--primary {
+  background: #34d399;
+  color: #0a1510;
+}
+
+.lidar-btn--primary:not(:disabled):hover {
+  background: #6ee7b7;
+}
+
+.lidar-btn--ghost {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(232, 234, 240, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.lidar-btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.lidar-btn--sm {
+  padding: 7px 13px;
+  font-size: 12.5px;
+}
+
+.lidar-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(52, 211, 153, 0.2);
+  border-top-color: #34d399;
+  border-radius: 50%;
+  animation: lidar-spin 0.9s linear infinite;
+}
+
+@keyframes lidar-spin {
+  to { transform: rotate(360deg); }
+}
+
+.lidar-status-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e8eaf0;
+  margin: 0;
+}
+
+.lidar-hint {
+  font-size: 12px;
+  color: rgba(232, 234, 240, 0.45);
+  margin: 0;
+}
+
+/* ── Scanning HUD (overlaid on the AR camera view) ── */
+.lidar-hud {
+  position: fixed;
+  inset: 0;
+  z-index: 9200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 16px 48px;
+  pointer-events: none;
+}
+
+.lidar-hud > * {
+  pointer-events: auto;
+}
+
+.lidar-hud-stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 12px;
+  padding: 10px 18px;
+  border: 1px solid rgba(52, 211, 153, 0.2);
+}
+
+.lidar-ring {
+  width: 60px;
+  height: 60px;
+  flex-shrink: 0;
+  transition: stroke-dashoffset 0.5s ease;
+}
+
+.lidar-hud-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.lidar-pts {
+  font-size: 22px;
+  font-weight: 700;
+  color: #34d399;
+  line-height: 1.1;
+}
+
+.lidar-pts-unit {
+  font-size: 11px;
+  color: rgba(232, 234, 240, 0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.lidar-hud-tip {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 8px;
+  padding: 7px 14px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.lidar-hud-btns {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  max-width: 320px;
+  justify-content: center;
+}
+
+/* Scan Room button in sb-header */
+.sb-btn--scan {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.25);
+}
+
+.sb-btn--scan:hover {
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.5);
+}

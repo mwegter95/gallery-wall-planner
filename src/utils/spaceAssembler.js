@@ -31,6 +31,7 @@ export function createSpace({ id, name } = {}) {
     roomType: 'space',
     photos:   [],  // [PhotoDef]
     surfaces: [],  // [SurfaceDef]
+    roomScan: null, // LiDAR point cloud data (null until scanned)
   }
 }
 

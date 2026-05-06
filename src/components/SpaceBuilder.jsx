@@ -9,6 +9,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import SpaceBuilderCanvas from './SpaceBuilderCanvas'
 import EraseModal from './EraseModal'
+import LidarScanner from './LidarScanner'
 import {
   createSpace, createPhoto, createSurfaceDef, genId,
   warpSurface, createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
@@ -46,6 +47,8 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
   const [showEraseModal,  setShowEraseModal]  = useState(false)
+  // LiDAR room scan
+  const [showLidarScanner, setShowLidarScanner] = useState(false)
   // Mobile panel overlay
   const [showMobilePanel, setShowMobilePanel] = useState(false)
   const [cropRequestId,   setCropRequestId]   = useState(null)
@@ -55,6 +58,19 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const historyRef   = useRef({ stack: [], index: -1, timer: null })
   const fileInputRef  = useRef(null)
   const warpQueueRef  = useRef(new Set())
+
+  /* ── LiDAR scan complete ───────────────────────────────────────────────── */
+  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt }) => {
+    setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt } }))
+    setShowLidarScanner(false)
+  }, [])
+
+  const handleRescan = useCallback(() => {
+    const confirmed = window.confirm(
+      'This will replace the current room scan. Surface positions are kept but the 3D point cloud will be overwritten. Continue?'
+    )
+    if (confirmed) setShowLidarScanner(true)
+  }, [])
 
   // Detect unsaved changes by comparing current surfaces to saved snapshot
   const hasUnsavedChanges = JSON.stringify(space.surfaces) !== savedSnapshot
@@ -658,6 +674,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           onClose={() => setShowEraseModal(false)}
         />
       )}
+      {showLidarScanner && (
+        <LidarScanner
+          onComplete={handleScanComplete}
+          onCancel={() => setShowLidarScanner(false)}
+        />
+      )}
       <div
         className={`sb-modal${isDragOver ? ' sb-modal--drag-over' : ''}`}
         onDragOver={handleDragOver}
@@ -776,6 +798,31 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               </svg>
               Add
             </button>
+
+            {/* LiDAR scan button */}
+            {space.roomScan ? (
+              <button className="sb-btn sb-btn--ghost sb-btn--scan" onClick={handleRescan} title="Re-scan room with LiDAR">
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                  <rect x="0.65" y="0.65" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <rect x="8.15" y="0.65" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <rect x="0.65" y="8.15" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <rect x="8.15" y="8.15" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <circle cx="6.5" cy="6.5" r="1.5" fill="#34d399"/>
+                </svg>
+                Re-scan
+              </button>
+            ) : (
+              <button className="sb-btn sb-btn--ghost sb-btn--scan" onClick={() => setShowLidarScanner(true)} title="Scan room with LiDAR">
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                  <rect x="0.65" y="0.65" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <rect x="8.15" y="0.65" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <rect x="0.65" y="8.15" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <rect x="8.15" y="8.15" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                  <circle cx="6.5" cy="6.5" r="1.5" stroke="currentColor" strokeWidth="1.2" fill="none"/>
+                </svg>
+                Scan Room
+              </button>
+            )}
 
             <button
               className={`sb-btn sb-btn--stitch${isStitching ? ' sb-btn--loading' : ''}`}
@@ -913,6 +960,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onSetConnection={setConnection}
               onSurfaceTap={() => setShowMobilePanel(true)}
               requestCropId={cropRequestId}
+              roomScan={space.roomScan ?? null}
             />
           </div>
 

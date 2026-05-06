@@ -8,6 +8,7 @@ import { useRef, useState, useEffect } from 'react'
 import * as THREE from 'three'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
+import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -90,6 +91,7 @@ const DOLLY_SPEED  = 0.04   // radius change per frame (same units as PAN_SPEED)
 
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
+  roomScan = null,
 }) {
   const mountRef = useRef(null)
   const threeRef  = useRef(null)
@@ -499,7 +501,7 @@ export default function SpaceBuilderCanvas({
     }
     animate()
 
-    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera }
+    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera, scene }
 
     return () => {
       cancelAnimationFrame(raf)
@@ -525,6 +527,119 @@ export default function SpaceBuilderCanvas({
 
   useEffect(() => { threeRef.current?.syncMeshes(space.surfaces) }, [space.surfaces])
   useEffect(() => { threeRef.current?.applySelection(activeSurfaceId) }, [activeSurfaceId])
+
+  // ── Point cloud / room scan rendering ────────────────────────────────────
+  const pointCloudMeshRef = useRef(null)
+  const planeMeshesRef    = useRef([])
+
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+
+    // Remove old point cloud + plane meshes
+    if (pointCloudMeshRef.current) {
+      t.scene.remove(pointCloudMeshRef.current)
+      pointCloudMeshRef.current.geometry.dispose()
+      pointCloudMeshRef.current.material.dispose()
+      pointCloudMeshRef.current = null
+    }
+    for (const m of planeMeshesRef.current) {
+      t.scene.remove(m)
+      m.geometry.dispose(); m.material.dispose()
+    }
+    planeMeshesRef.current = []
+
+    if (!roomScan) return
+
+    // ── Build colored point cloud ─────────────────────────────────
+    try {
+      const buf = PointCloudBuffer.fromJSON(roomScan.pointCloud)
+      const data = buf.toFloat32Array()  // [x,y,z,r,g,b, ...]
+      const n = buf.pointCount
+
+      const positions = new Float32Array(n * 3)
+      const colors    = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        const base = i * 6
+        positions[i*3]   = data[base]
+        positions[i*3+1] = data[base+1]
+        positions[i*3+2] = data[base+2]
+        colors[i*3]      = data[base+3]
+        colors[i*3+1]    = data[base+4]
+        colors[i*3+2]    = data[base+5]
+      }
+
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+      geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
+
+      const mat = new THREE.PointsMaterial({
+        size: 0.022,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.82,
+      })
+
+      const points = new THREE.Points(geo, mat)
+      t.scene.add(points)
+      pointCloudMeshRef.current = points
+    } catch (err) {
+      console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
+    }
+
+    // ── Build ghost plane meshes from detected planes ─────────────────
+    try {
+      if (roomScan.planes?.length) {
+        const planes = planesFromJSON(roomScan.planes)
+        for (const plane of planes) {
+          const verts = plane.vertices  // Float32Array of [x,y,z, x,y,z, ...]
+          const count = verts.length / 3
+          if (count < 3) continue
+
+          // Build a simple polygon mesh by fan-triangulation from centroid
+          const cx = verts.reduce((s, v, i) => i % 3 === 0 ? s + v : s, 0) / count
+          const cy = verts.reduce((s, v, i) => i % 3 === 1 ? s + v : s, 0) / count
+          const cz = verts.reduce((s, v, i) => i % 3 === 2 ? s + v : s, 0) / count
+
+          const positions = [cx, cy, cz]
+          for (let i = 0; i < count; i++) {
+            positions.push(verts[i*3], verts[i*3+1], verts[i*3+2])
+          }
+          const indices = []
+          for (let i = 1; i <= count; i++) {
+            indices.push(0, i, (i % count) + 1)
+          }
+
+          const geo = new THREE.BufferGeometry()
+          geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+          geo.setIndex(indices)
+          geo.computeVertexNormals()
+
+          const color = plane.orientation === 'horizontal' ? 0x34d399 : 0x4a9eff
+          const mat = new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.08,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          })
+
+          // Wireframe outline
+          const wireMat = new THREE.LineBasicMaterial({ color, opacity: 0.35, transparent: true })
+          const wireGeo = new THREE.EdgesGeometry(geo)
+          const wire    = new THREE.LineSegments(wireGeo, wireMat)
+
+          const mesh = new THREE.Mesh(geo, mat)
+          mesh.add(wire)
+          t.scene.add(mesh)
+          planeMeshesRef.current.push(mesh)
+        }
+      }
+    } catch (err) {
+      console.warn('[SpaceBuilderCanvas] Could not render planes:', err)
+    }
+  }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Composite piece overlays onto surface textures ───────────────────────
   useEffect(() => {
