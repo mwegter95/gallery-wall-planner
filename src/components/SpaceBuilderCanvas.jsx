@@ -811,6 +811,15 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
     } finally { setIsWarping(false); onClose() }
   }
 
+  // Convert a CSS-pixel pointer position (relative to the rendered SVG element)
+  // to SVG-viewBox coordinates, accounting for the scale applied by viewBox.
+  function clientToSVG(clientX, clientY) {
+    const rect = svgRef.current.getBoundingClientRect()
+    const sx = (clientX - rect.left)  / rect.width  * W
+    const sy = (clientY - rect.top)   / rect.height * H
+    return [Math.max(0, Math.min(W, sx)), Math.max(0, Math.min(H, sy))]
+  }
+
   return (
     <div className="sbc-crop-overlay">
       <div className="sbc-crop-modal">
@@ -818,26 +827,41 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
           <span>Crop corners — {surface.name}</span>
           <button className="sbc-crop-close" onClick={onClose}>✕</button>
         </div>
+        {/* viewBox makes the coordinate system fixed at W×H regardless of
+            rendered CSS size, so the modal can be any width and handles
+            always land on the correct pixel. */}
         <svg
-          ref={svgRef} width={W} height={H}
-          style={{ display:'block', backgroundImage:`url(${photo.dataUrl})`, backgroundSize:'100% 100%', cursor:'crosshair' }}
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H}`}
+          className="sbc-crop-svg"
+          style={{ display:'block', backgroundImage:`url(${photo.dataUrl})`, backgroundSize:'100% 100%', cursor:'crosshair', touchAction:'none' }}
           onMouseMove={e => {
             if (!dragRef.current) return
-            const rect = svgRef.current.getBoundingClientRect()
-            setCorners(prev => ({ ...prev, [dragRef.current]: fromSVG(
-              Math.max(0, Math.min(W, e.clientX - rect.left)),
-              Math.max(0, Math.min(H, e.clientY - rect.top))
-            )}))
+            const [sx, sy] = clientToSVG(e.clientX, e.clientY)
+            setCorners(prev => ({ ...prev, [dragRef.current]: fromSVG(sx, sy) }))
           }}
           onMouseUp={() => { dragRef.current = null }}
           onMouseLeave={() => { dragRef.current = null }}
+          onTouchMove={e => {
+            if (!dragRef.current) return
+            e.preventDefault()
+            const t = e.touches[0]
+            const [sx, sy] = clientToSVG(t.clientX, t.clientY)
+            setCorners(prev => ({ ...prev, [dragRef.current]: fromSVG(sx, sy) }))
+          }}
+          onTouchEnd={() => { dragRef.current = null }}
         >
           <polygon points={polyStr} fill="rgba(74,158,255,0.15)" stroke="#4a9eff" strokeWidth="1.5"/>
           {['tl','tr','br','bl'].map(k => {
             const [hx, hy] = toSVG(corners[k])
+            // Touch hit area is larger (r=22) so fingers can easily grab handles
             return (
-              <g key={k} onMouseDown={e => { e.stopPropagation(); dragRef.current = k }} style={{ cursor:'grab' }}>
-                <circle cx={hx} cy={hy} r={14} fill="transparent"/>
+              <g key={k}
+                onMouseDown={e => { e.stopPropagation(); dragRef.current = k }}
+                onTouchStart={e => { e.stopPropagation(); e.preventDefault(); dragRef.current = k }}
+                style={{ cursor:'grab' }}
+              >
+                <circle cx={hx} cy={hy} r={22} fill="transparent"/>
                 <circle cx={hx} cy={hy} r={8}  fill="#4a9eff" stroke="#fff" strokeWidth="2"/>
                 <text x={hx} y={hy+4} textAnchor="middle" fontSize="8" fill="#fff" fontWeight="700"
                   style={{ pointerEvents:'none', userSelect:'none' }}>{k.toUpperCase()}</text>

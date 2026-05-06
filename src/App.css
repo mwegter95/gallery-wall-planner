@@ -3229,6 +3229,26 @@ kbd {
     max-height: calc(100svh - 160px);
   }
 
+  /* SpaceBuilder crop-corners modal — full-screen on mobile */
+  .sbc-crop-overlay {
+    align-items: flex-start;
+    padding: 0;
+  }
+
+  .sbc-crop-modal {
+    width: 100%;
+    max-width: 100%;
+    height: 100svh;
+    max-height: 100svh;
+    border-radius: 0;
+  }
+
+  .sbc-crop-svg {
+    flex: 1;
+    min-height: 0;
+    height: 0;  /* flex child grows via flex:1, not by content */
+  }
+
   /* Wall Manager */
   .wm-backdrop {
     padding: 0;
@@ -6267,6 +6287,16 @@ kbd {
   display: flex;
   flex-direction: column;
   max-height: 90vh;
+  width: min(560px, 92vw);
+}
+
+/* SVG scales to fill modal width; viewBox preserves coordinate system */
+.sbc-crop-svg {
+  width: 100%;
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  display: block;
 }
 .sbc-crop-header {
   display: flex;

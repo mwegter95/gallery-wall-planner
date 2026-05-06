@@ -1334,13 +1334,17 @@ export default function App() {
               title="Erase an object from the wall photo using content-aware fill"
             >
               <svg width="14" height="14" viewBox="32 7 33 33" xmlns="http://www.w3.org/2000/svg" className="btn-icon">
-                <polyline fill="#f4aa41" stroke="none" points="18.0381,41.8761 36.8684,23.0457 48.1813,34.3586 29.5108,53.0291"/>
-                <polyline fill="#EA5A47" stroke="none" points="42.9209,16.9933 50.4228,9.4913 61.7357,20.8042 54.2975,28.2424"/>
-                <polyline fill="#9b9b9a" stroke="none" points="35.6498,24.2643 43.3318,16.5823 54.6447,27.8952 47.0278,35.512"/>
-                <polygon fill="none" stroke="#000" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2" points="18.6304,56.8203 27.8278,53.2939 53.8207,27.301 43.9212,17.4015 17.9281,43.3946 14.3904,52.6032"/>
-                <polyline fill="none" stroke="#000" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2" points="47.3354,13.9873 50.8388,10.4839 60.7383,20.3834 57.2645,23.8572"/>
-                <line x1="36.9099" x2="46.4225" y1="25.0073" y2="34.5199" stroke="#000" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2"/>
-                {activeWallEraseHistory.length > 0 && <circle cx="65" cy="7" r="3.5" fill="#EA5A47"/>}
+                {/* Tiny corner of pencil body — lightest fill */}
+                <polyline fill="currentColor" fillOpacity="0.2" stroke="none" points="18.0381,41.8761 36.8684,23.0457 48.1813,34.3586 29.5108,53.0291"/>
+                {/* Eraser cap — most prominent */}
+                <polyline fill="currentColor" fillOpacity="0.55" stroke="none" points="42.9209,16.9933 50.4228,9.4913 61.7357,20.8042 54.2975,28.2424"/>
+                {/* Ferrule band — mid opacity */}
+                <polyline fill="currentColor" fillOpacity="0.35" stroke="none" points="35.6498,24.2643 43.3318,16.5823 54.6447,27.8952 47.0278,35.512"/>
+                {/* Outline */}
+                <polygon fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2" points="18.6304,56.8203 27.8278,53.2939 53.8207,27.301 43.9212,17.4015 17.9281,43.3946 14.3904,52.6032"/>
+                <polyline fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2" points="47.3354,13.9873 50.8388,10.4839 60.7383,20.3834 57.2645,23.8572"/>
+                <line x1="36.9099" x2="46.4225" y1="25.0073" y2="34.5199" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2"/>
+                {activeWallEraseHistory.length > 0 && <circle cx="65" cy="7" r="3.5" fill="currentColor"/>}
               </svg>
               <span className="btn-label"> Erase Object</span>
             </button>
