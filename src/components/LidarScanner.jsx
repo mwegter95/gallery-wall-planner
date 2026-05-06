@@ -50,29 +50,46 @@ export default function LidarScanner({ onComplete, onCancel }) {
 
   /* ── Check WebXR availability ─────────────────────────────────────────── */
   useEffect(() => {
-    const inIframe = window.self !== window.top
+    const inIframe     = window.self !== window.top
+    const isSecure     = window.isSecureContext
+    const hasXR        = !!navigator.xr
+    const ua           = navigator.userAgent
 
-    if (!navigator.xr) {
-      const msg = inIframe
-        ? 'WebXR is blocked inside an embedded frame. Tap the ↗ button above to open this app in a new tab, then try scanning again.'
-        : 'WebXR is not available. Open this page in Safari on a LiDAR iPhone (iPhone 12 Pro or later).'
+    // Build a debug line always visible below the main message
+    const diag = [
+      isSecure  ? '✅ HTTPS'      : '❌ NOT HTTPS',
+      hasXR     ? '✅ navigator.xr' : '❌ no navigator.xr',
+      inIframe  ? '⚠️ in iframe'   : '🟢 top frame',
+    ].join('  •  ')
+
+    if (!isSecure) {
       setStatus('unsupported')
-      setErrorMsg(msg)
+      setErrorMsg(`WebXR requires HTTPS. This page is not in a secure context.\n\n${diag}`)
       return
     }
+
+    if (!hasXR) {
+      const base = inIframe
+        ? 'WebXR is blocked inside the embedded frame. Try opening the app in its own tab (↗ button).'
+        : 'navigator.xr not found. Enable WebXR AR in Safari Settings › Advanced › Experimental Features, or check you are on iOS 16+ Safari.'
+      setStatus('unsupported')
+      setErrorMsg(`${base}\n\n${diag}\nUA: ${ua.slice(0, 80)}`)
+      return
+    }
+
     navigator.xr.isSessionSupported('immersive-ar').then(supported => {
       if (!supported) {
-        const msg = inIframe
-          ? 'AR is not permitted inside an embedded frame. Tap ↗ to open in a new tab and try again.'
-          : 'Immersive AR is not supported on this device or browser. Use Safari on a LiDAR iPhone.'
+        const base = inIframe
+          ? 'immersive-ar not supported inside embedded frame. Open in new tab (↗) and try again.'
+          : 'immersive-ar returned false. Check Safari › Settings › Advanced › Experimental Features › WebXR Augmented Reality is ON.'
         setStatus('unsupported')
-        setErrorMsg(msg)
+        setErrorMsg(`${base}\n\n${diag}`)
       } else {
         setStatus('ready')
       }
     }).catch(err => {
       setStatus('unsupported')
-      setErrorMsg(`AR check failed: ${err.message}`)
+      setErrorMsg(`isSessionSupported threw: ${err.message}\n\n${diag}`)
     })
   }, [])
 
@@ -280,7 +297,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
             <circle cx="24" cy="33" r="1.5" fill="#f97316"/>
           </svg>
           <h2 className="lidar-title">LiDAR Not Available</h2>
-          <p className="lidar-desc">{errorMsg}</p>
+          <p className="lidar-desc lidar-desc--diag">{errorMsg}</p>
           <button className="lidar-btn lidar-btn--ghost" onClick={onCancel}>Close</button>
         </div>
       </div>
@@ -410,7 +427,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
             <circle cx="24" cy="33" r="1.5" fill="#f97316"/>
           </svg>
           <h2 className="lidar-title">Scan Failed</h2>
-          <p className="lidar-desc">{errorMsg}</p>
+          <p className="lidar-desc lidar-desc--diag">{errorMsg}</p>
           <div className="lidar-btn-row">
             <button className="lidar-btn lidar-btn--ghost" onClick={onCancel}>Close</button>
             <button className="lidar-btn lidar-btn--primary" onClick={() => setStatus('ready')}>

@@ -7236,6 +7236,20 @@ kbd {
   margin: 0;
 }
 
+/* Diagnostic variant — used on error/unsupported cards */
+.lidar-desc--diag {
+  white-space: pre-wrap;
+  font-size: 12px;
+  font-family: ui-monospace, 'SF Mono', monospace;
+  color: rgba(232, 234, 240, 0.6);
+  background: rgba(0,0,0,0.3);
+  border-radius: 6px;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+  word-break: break-word;
+}
+
 .lidar-tips {
   list-style: none;
   padding: 0;
