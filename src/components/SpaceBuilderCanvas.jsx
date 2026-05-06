@@ -788,7 +788,7 @@ export default function SpaceBuilderCanvas({
 // ── 2D crop-corner editor (overlay on top of 3D canvas) ──────────────────────
 // Each corner's handle is offset diagonally outward so the finger/cursor
 // never obscures the exact point being controlled.
-const HANDLE_OFFSET = 30   // SVG-viewBox units
+const HANDLE_OFFSET = 45   // SVG-viewBox units (offset from actual corner)
 const HANDLE_DIR = { tl: [-1,-1], tr: [1,-1], br: [1,1], bl: [-1,1] }
 
 function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
@@ -796,8 +796,7 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
   const photo   = surface && space.photos.find(p => p.id === surface.photoId)
   const [corners,   setCorners]   = useState(surface?.corners ? JSON.parse(JSON.stringify(surface.corners)) : null)
   const [isWarping, setIsWarping] = useState(false)
-  const svgRef     = useRef(null)
-  const cleanupRef = useRef(null)   // stores window-listener teardown for active drag
+  const svgRef = useRef(null)
 
   const W = 540
   const H = photo ? Math.round(W * photo.displayH / photo.displayW) : 360
@@ -830,23 +829,22 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
     return [p.x, p.y]
   }
 
-  // Attach window-level drag listeners so the drag keeps working even when
-  // the pointer moves outside the SVG element (including over the offset handles).
+  // Use pointer capture so the drag stays locked to this element even when
+  // the pointer leaves the SVG or the modal entirely — handles remain
+  // grabbable no matter where they end up on screen.
   function startDrag(k, e) {
     e.stopPropagation()
-    if (e.type === 'touchstart') e.preventDefault()
-    if (cleanupRef.current) cleanupRef.current()
+    e.preventDefault()
+    const captureEl = e.currentTarget
+    captureEl.setPointerCapture(e.pointerId)
 
     const [dx, dy] = HANDLE_DIR[k]
     const ox = dx * HANDLE_OFFSET
     const oy = dy * HANDLE_OFFSET
 
     const onMove = (ev) => {
-      if (ev.cancelable) ev.preventDefault()
-      const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX
-      const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY
       if (!svgRef.current) return
-      const [sx, sy] = clientToSVG(clientX, clientY)
+      const [sx, sy] = clientToSVG(ev.clientX, ev.clientY)
       // Subtract the visual offset to get the actual corner position, then
       // clamp the corner (not the handle) to the image bounds.
       setCorners(prev => ({ ...prev, [k]: fromSVG(
@@ -855,19 +853,15 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
       )}))
     }
 
-    const onUp = () => { if (cleanupRef.current) { cleanupRef.current(); cleanupRef.current = null } }
-
-    const cleanup = () => {
-      window.removeEventListener('mousemove',  onMove)
-      window.removeEventListener('touchmove',  onMove)
-      window.removeEventListener('mouseup',    onUp)
-      window.removeEventListener('touchend',   onUp)
+    const onUp = () => {
+      captureEl.removeEventListener('pointermove',  onMove)
+      captureEl.removeEventListener('pointerup',    onUp)
+      captureEl.removeEventListener('pointercancel', onUp)
     }
-    cleanupRef.current = cleanup
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('touchmove', onMove, { passive: false })
-    window.addEventListener('mouseup',   onUp)
-    window.addEventListener('touchend',  onUp)
+
+    captureEl.addEventListener('pointermove',   onMove)
+    captureEl.addEventListener('pointerup',     onUp)
+    captureEl.addEventListener('pointercancel', onUp)
   }
 
   const clipId = `photo-clip-${surfaceId}`
@@ -928,9 +922,8 @@ function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
                   stroke="#4a9eff" strokeWidth="1.5" style={{ pointerEvents:'none' }}/>
 
                 {/* Draggable hollow ring handle */}
-                <g onMouseDown={e => startDrag(k, e)}
-                   onTouchStart={e => startDrag(k, e)}
-                   style={{ cursor:'grab' }}>
+                <g onPointerDown={e => startDrag(k, e)}
+                   style={{ cursor:'grab', touchAction:'none' }}>
                   <circle cx={hpx} cy={hpy} r={24} fill="transparent"/>
                   <circle cx={hpx} cy={hpy} r={12}
                     fill="none" stroke="#4a9eff" strokeWidth="2"/>
