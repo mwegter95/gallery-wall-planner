@@ -7239,15 +7239,41 @@ kbd {
 /* Diagnostic variant — used on error/unsupported cards */
 .lidar-desc--diag {
   white-space: pre-wrap;
-  font-size: 12px;
+  font-size: 11px;
   font-family: ui-monospace, 'SF Mono', monospace;
-  color: rgba(232, 234, 240, 0.6);
-  background: rgba(0,0,0,0.3);
+  color: rgba(232, 234, 240, 0.75);
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.08);
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   text-align: left;
   width: 100%;
-  word-break: break-word;
+  word-break: break-all;
+  overflow-y: auto;
+  max-height: 280px;
+  line-height: 1.6;
+}
+
+.lidar-direct-url {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(74, 158, 255, 0.12);
+  border: 1px solid rgba(74, 158, 255, 0.35);
+  border-radius: 8px;
+  color: #4a9eff;
+  font-size: 12px;
+  font-family: ui-monospace, 'SF Mono', monospace;
+  word-break: break-all;
+  text-align: center;
+  text-decoration: none;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+.lidar-direct-url:hover,
+.lidar-direct-url:active {
+  background: rgba(74, 158, 255, 0.22);
+  color: #6bb3ff;
 }
 
 .lidar-tips {

@@ -38,6 +38,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const [progress,  setProgress]  = useState(0)   // 0-100 while scanning
   const [pointCount, setPointCount] = useState(0)
   const [errorMsg,  setErrorMsg]  = useState('')
+  const [directUrl, setDirectUrl] = useState('')   // tappable "open here" URL
   const [isReady,   setIsReady]   = useState(false) // user tapped Start
 
   const sessionRef    = useRef(null)
@@ -52,45 +53,97 @@ export default function LidarScanner({ onComplete, onCancel }) {
   useEffect(() => {
     const inIframe     = window.self !== window.top
     const isSecure     = window.isSecureContext
-    const hasXR        = !!navigator.xr
     const ua           = navigator.userAgent
 
-    // Build a debug line always visible below the main message
-    const diag = [
-      isSecure  ? '✅ HTTPS'      : '❌ NOT HTTPS',
-      hasXR     ? '✅ navigator.xr' : '❌ no navigator.xr',
-      inIframe  ? '⚠️ in iframe'   : '🟢 top frame',
-    ].join('  •  ')
+    const isIOS        = /iP(hone|ad|od)/.test(ua)
+    const isSafari     = /Safari/.test(ua) && !/Chrome|CriOS|FxiOS|EdgA/.test(ua)
+    const isWebXRViewer = /WebXRViewer|webxrviewer/i.test(ua)
+    const iosVer       = ua.match(/OS (\d+)_(\d+)/)?.[1]
 
+    const buildDiag = (extra = '') => [
+      `HTTPS:        ${isSecure       ? '✅ yes'     : '❌ NO — needs https://'}`,
+      `navigator.xr: ${navigator.xr   ? '✅ present' : '❌ missing'}`,
+      `Frame:        ${inIframe        ? '⚠️ iframe'  : '🟢 top-level'}`,
+      `Browser:      ${isWebXRViewer   ? '✅ WebXR Viewer' : isSafari ? 'Safari' : 'other'} / ${isIOS ? `iOS ${iosVer ?? '?'}` : 'non-iOS'}`,
+      extra,
+      `UA: ${ua}`,
+    ].filter(Boolean).join('\n')
+
+    // ── Not HTTPS / not secure context ───────────────────────────────────────
     if (!isSecure) {
       setStatus('unsupported')
-      setErrorMsg(`WebXR requires HTTPS. This page is not in a secure context.\n\n${diag}`)
-      return
-    }
+      const alreadyHttps = window.location.href.startsWith('https://')
+      const directAppUrl = alreadyHttps
+        ? window.location.href
+        : window.location.href.replace(/^http:\/\//, 'https://')
 
-    if (!hasXR) {
-      const base = inIframe
-        ? 'WebXR is blocked inside the embedded frame. Try opening the app in its own tab (↗ button).'
-        : 'navigator.xr not found. Enable WebXR AR in Safari Settings › Advanced › Experimental Features, or check you are on iOS 16+ Safari.'
-      setStatus('unsupported')
-      setErrorMsg(`${base}\n\n${diag}\nUA: ${ua.slice(0, 80)}`)
-      return
-    }
-
-    navigator.xr.isSessionSupported('immersive-ar').then(supported => {
-      if (!supported) {
-        const base = inIframe
-          ? 'immersive-ar not supported inside embedded frame. Open in new tab (↗) and try again.'
-          : 'immersive-ar returned false. Check Safari › Settings › Advanced › Experimental Features › WebXR Augmented Reality is ON.'
-        setStatus('unsupported')
-        setErrorMsg(`${base}\n\n${diag}`)
+      let ctxMsg
+      if (inIframe && alreadyHttps) {
+        // URL is already HTTPS but WebXR Viewer won't grant AR to cross-origin iframes.
+        // Tell the user to open the app directly, not through the portfolio wrapper.
+        ctxMsg = `❌ WebXR Viewer cannot access AR inside an embedded iframe — even over HTTPS.\n\nOpen the app directly in WebXR Viewer (tap the link below):`
+      } else if (inIframe) {
+        ctxMsg = `❌ Not a secure context — this iframe isn't served over HTTPS.\n\nOpen the app directly in WebXR Viewer (tap the link below):`
       } else {
-        setStatus('ready')
+        ctxMsg = `❌ Not a secure context — the page loaded over HTTP.\n\nOpen in WebXR Viewer via HTTPS (tap the link below):`
       }
-    }).catch(err => {
-      setStatus('unsupported')
-      setErrorMsg(`isSessionSupported threw: ${err.message}\n\n${diag}`)
-    })
+
+      setDirectUrl(directAppUrl)
+      setErrorMsg(buildDiag(ctxMsg))
+      return
+    }
+
+    // ── Poll for navigator.xr ─────────────────────────────────────────────
+    // WebXR Viewer (and some other apps) inject navigator.xr asynchronously
+    // after the page loads, so we poll up to 3 seconds before giving up.
+    let attempts = 0
+    const MAX_ATTEMPTS = 15   // 15 × 200 ms = 3 s
+
+    const checkXR = () => {
+      attempts++
+      const hasXR = !!navigator.xr
+
+      if (hasXR) {
+        // ── navigator.xr found → check session support ─────────────────
+        navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+          if (supported) {
+            setStatus('ready')
+          } else {
+            const reason = isIOS && (isSafari && !isWebXRViewer)
+              ? `immersive-ar → false.\n⚠️ Stock iOS Safari does not support WebXR AR. Use Mozilla WebXR Viewer app.`
+              : inIframe
+                ? `immersive-ar → false inside iframe.\nOpen the app directly in WebXR Viewer — iframes can't access AR even over HTTPS.`
+                : `immersive-ar → false. Your device/browser does not support AR sessions.`
+            setStatus('unsupported')
+            setErrorMsg(buildDiag(reason))
+          }
+        }).catch(err => {
+          setStatus('unsupported')
+          setErrorMsg(buildDiag(`isSessionSupported() threw: ${err.name}: ${err.message}`))
+        })
+        return   // don't schedule next poll
+      }
+
+      if (attempts >= MAX_ATTEMPTS) {
+        // ── Timed out waiting for navigator.xr ─────────────────────────
+        const reason = isWebXRViewer
+          ? `navigator.xr not found after 3 s in WebXR Viewer.\nMake sure you opened this URL directly in WebXR Viewer (not via Safari), and that camera permission is granted.`
+          : isIOS && isSafari
+            ? `navigator.xr not found.\n⚠️ Stock iOS Safari does not support WebXR AR — no flag enables it.\nInstall Mozilla WebXR Viewer from the App Store and open this page there.`
+            : inIframe
+              ? `navigator.xr not found in iframe.\nWebXR is blocked inside embedded frames. Open the page in its own tab.`
+              : `navigator.xr not found. Use Chrome on Android or Mozilla WebXR Viewer on iPhone.`
+        setStatus('unsupported')
+        setErrorMsg(buildDiag(reason))
+        return
+      }
+
+      // Schedule next check
+      pollTimer = setTimeout(checkXR, 200)
+    }
+
+    let pollTimer = setTimeout(checkXR, 200)
+    return () => clearTimeout(pollTimer)
   }, [])
 
   /* ── Start the AR session ─────────────────────────────────────────────── */
@@ -298,6 +351,16 @@ export default function LidarScanner({ onComplete, onCancel }) {
           </svg>
           <h2 className="lidar-title">LiDAR Not Available</h2>
           <p className="lidar-desc lidar-desc--diag">{errorMsg}</p>
+          {directUrl && (
+            <a
+              className="lidar-direct-url"
+              href={directUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {directUrl}
+            </a>
+          )}
           <button className="lidar-btn lidar-btn--ghost" onClick={onCancel}>Close</button>
         </div>
       </div>
