@@ -106,9 +106,14 @@ export default function SpaceBuilderCanvas({
   const [panJoyPos,     setPanJoyPos]     = useState({ x: 0, y: 0 }) // pan thumb CSS offset
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap }
 
-  // Open crop overlay when parent requests it (e.g. mobile "Perspective Warp" button)
+  const prevCropReqRef = useRef(null)
   useEffect(() => {
-    if (requestCropId) setCropSurfaceId(requestCropId)
+    if (requestCropId && requestCropId !== prevCropReqRef.current) {
+      prevCropReqRef.current = requestCropId
+      // requestCropId is "surfaceId_timestamp" — strip the nonce suffix
+      const realId = requestCropId.replace(/_\d+$/, '')
+      setCropSurfaceId(realId)
+    }
   }, [requestCropId])
 
   // ── Scene init (runs once) ───────────────────────────────────────────────
