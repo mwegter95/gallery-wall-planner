@@ -5176,7 +5176,7 @@ kbd {
   flex-shrink: 0;
   gap: 6px 12px;
 }
-.sb-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sb-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
 .sb-name-input {
   background: transparent;
   border: none;
@@ -7009,6 +7009,7 @@ kbd {
   .sb-header-actions {
     flex-wrap: wrap;
     gap: 4px;
+    width: 100%;
   }
 
   /* Show hamburger */
