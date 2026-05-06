@@ -3288,11 +3288,17 @@ kbd {
     overflow-y: auto;
   }
 
-  /* Header save popover — full width on mobile */
+  /* Header save popover — on mobile the save button can be anywhere in the
+     wrapped header row. Fixed position anchored to viewport edges so the
+     popup is always fully on screen no matter which side the button landed on.
+     top: 120px covers a 2-row wrapped header (58px × 2 + some padding). */
   .header-save-menu {
-    right: 0;
-    left: auto;
-    min-width: 260px;
+    position: fixed;
+    top: 120px;
+    left: 8px;
+    right: 8px;
+    min-width: 0;
+    width: auto;
   }
 
   /* Resize handles — bigger for touch */
