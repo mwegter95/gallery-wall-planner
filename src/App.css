@@ -3182,35 +3182,32 @@ kbd {
     border-radius: 0;
   }
 
-  /* iOS flex scroll-clipping fix: justify-content:center on a scrollable
-     flex container makes overflowed content unreachable (iOS can't scroll
-     to the clipped leading edge).  Switch to flex-start + auto margins so
-     the image still centres when it fits but scrolls normally when it
-     overflows. */
+  /* Force the body to not overflow horizontally.  align-items:flex-start
+     prevents iOS's justify-content:center scroll-clipping bug. */
   .ws-body {
     padding: 10px 12px;
     align-items: flex-start;
     justify-content: flex-start;
-    overflow: auto;
-    overflow-x: hidden;
+    overflow: hidden;
   }
 
-  /* Keep display:inline-flex (wrap stays exactly as wide as the image so
-     absolutely-positioned handles align correctly), but use auto margins
-     to centre it and max-width: 100% to prevent horizontal overflow. */
+  /* Explicit width:100% breaks the circular inline-flex sizing where the
+     wrap's width is derived from the image's intrinsic size, making
+     max-width:100% on the image reference the raw natural px instead of
+     the viewport.  With a concrete 100% width set here, the image's
+     max-width:100% correctly resolves to the viewport width.
+     The image is left-aligned at x:0 so absolute handles still land right. */
   .ws-photo-wrap {
-    display: inline-flex;
+    width: 100%;
     max-width: 100%;
-    margin: 0 auto;
   }
 
-  /* Both max-width and max-height constrain the image — whichever is more
-     restrictive wins.  max-width: 100% catches wide landscape photos that
-     previously overflowed the viewport and pushed corner handles off-screen. */
+  /* Both axes constrained — whichever is more restrictive wins.
+     width:auto + max-width:100% + max-height preserves aspect ratio. */
   .ws-photo {
-    max-width: 100%;
     width: auto;
     height: auto;
+    max-width: 100%;
     max-height: calc(100svh - 260px);
   }
 

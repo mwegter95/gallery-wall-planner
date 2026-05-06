@@ -779,7 +779,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               title="Undo (Ctrl+Z)"
             >
               <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                <path d="M2 5.5C2 3.57 3.57 2 5.5 2c1.2 0 2.27.6 2.92 1.52L9.5 5H7v1.5h4V2.5H9.5v1.8L8.42 3.08A4.5 4.5 0 1 0 10 8.5H8.38A3 3 0 1 1 5.5 3.5c.97 0 1.83.46 2.38 1.17"
+                <path d="M11 5.5C11 3.57 9.43 2 7.5 2c-1.2 0-2.27.6-2.92 1.52L3.5 5H6v1.5H2V2.5h1.5v1.8l1.08-1.22A4.5 4.5 0 1 1 3 8.5h1.62A3 3 0 1 0 7.5 3.5c-.97 0-1.83.46-2.38 1.17"
                   stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
               </svg>
             </button>
@@ -790,7 +790,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               title="Redo (Ctrl+Y)"
             >
               <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                <path d="M11 5.5C11 3.57 9.43 2 7.5 2c-1.2 0-2.27.6-2.92 1.52L3.5 5H6v1.5H2V2.5h1.5v1.8l1.08-1.22A4.5 4.5 0 1 1 3 8.5h1.62A3 3 0 1 0 7.5 3.5c-.97 0-1.83.46-2.38 1.17"
+                <path d="M2 5.5C2 3.57 3.57 2 5.5 2c1.2 0 2.27.6 2.92 1.52L9.5 5H7v1.5h4V2.5H9.5v1.8L8.42 3.08A4.5 4.5 0 1 0 10 8.5H8.38A3 3 0 1 1 5.5 3.5c.97 0 1.83.46 2.38 1.17"
                   stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
               </svg>
             </button>
@@ -829,15 +829,13 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               disabled={!activeSurface || !(activeSurface.stitchedDataUrl || activeSurface.warpedDataUrl)}
               title="Erase an object from the active surface using content-aware fill"
             >
-              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                {/* Eraser block body — wide parallelogram like the rubber end of a pencil */}
-                <path d="M1.5 9.5 L3 3.5 L11.5 3.5 L10 9.5 Z"
-                  stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"
-                  fill="currentColor" fillOpacity="0.18"/>
-                {/* Ferrule band — divides metal crimp (~30% from right) from rubber body */}
-                <line x1="8.5" y1="3.5" x2="7" y2="9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
-                {/* Erased surface mark — horizontal line below the eraser block */}
-                <line x1="0.5" y1="11" x2="5" y2="11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              <svg width="13" height="13" viewBox="32 7 33 33" xmlns="http://www.w3.org/2000/svg">
+                <polyline fill="#f4aa41" stroke="none" points="18.0381,41.8761 36.8684,23.0457 48.1813,34.3586 29.5108,53.0291"/>
+                <polyline fill="#EA5A47" stroke="none" points="42.9209,16.9933 50.4228,9.4913 61.7357,20.8042 54.2975,28.2424"/>
+                <polyline fill="#9b9b9a" stroke="none" points="35.6498,24.2643 43.3318,16.5823 54.6447,27.8952 47.0278,35.512"/>
+                <polygon fill="none" stroke="#000" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2" points="18.6304,56.8203 27.8278,53.2939 53.8207,27.301 43.9212,17.4015 17.9281,43.3946 14.3904,52.6032"/>
+                <polyline fill="none" stroke="#000" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2" points="47.3354,13.9873 50.8388,10.4839 60.7383,20.3834 57.2645,23.8572"/>
+                <line x1="36.9099" x2="46.4225" y1="25.0073" y2="34.5199" stroke="#000" strokeLinecap="round" strokeLinejoin="round" strokeMiterlimit="10" strokeWidth="2"/>
               </svg>
               Erase
             </button>
