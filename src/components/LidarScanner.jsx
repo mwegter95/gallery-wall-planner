@@ -40,6 +40,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const [errorMsg,  setErrorMsg]  = useState('')
   const [directUrl, setDirectUrl] = useState('')   // tappable "open here" URL
   const [isReady,   setIsReady]   = useState(false) // user tapped Start
+  const [retryCount, setRetryCount] = useState(0)  // bump to re-run XR check
 
   const sessionRef    = useRef(null)
   const rafRef        = useRef(null)
@@ -51,6 +52,10 @@ export default function LidarScanner({ onComplete, onCancel }) {
 
   /* ── Check WebXR availability ─────────────────────────────────────────── */
   useEffect(() => {
+    // Reset state on each attempt
+    setStatus('checking')
+    setErrorMsg('')
+    setDirectUrl('')
     const inIframe     = window.self !== window.top
     const isSecure     = window.isSecureContext
     const ua           = navigator.userAgent
@@ -94,14 +99,22 @@ export default function LidarScanner({ onComplete, onCancel }) {
     }
 
     // ── Poll for navigator.xr ─────────────────────────────────────────────
-    // WebXR Viewer (and some other apps) inject navigator.xr asynchronously
-    // after the page loads, so we poll up to 3 seconds before giving up.
+    // WebXR Viewer injects navigator.xr asynchronously via WKWebView userScript.
+    // On newer iOS versions the injection can be slow — poll for up to 30 s.
     let attempts = 0
-    const MAX_ATTEMPTS = 15   // 15 × 200 ms = 3 s
+    const POLL_MS    = 500
+    const MAX_SECS   = 30
+    const MAX_ATTEMPTS = (MAX_SECS * 1000) / POLL_MS   // 60 attempts × 500 ms
 
     const checkXR = () => {
       attempts++
       const hasXR = !!navigator.xr
+
+      // Show live "still checking" counter so the user knows we're trying
+      if (!hasXR && attempts < MAX_ATTEMPTS) {
+        const elapsed = Math.round((attempts * POLL_MS) / 1000)
+        setErrorMsg(`Waiting for WebXR to initialise… (${elapsed}s / ${MAX_SECS}s)\n\nUA: ${ua}`)
+      }
 
       if (hasXR) {
         // ── navigator.xr found → check session support ─────────────────
@@ -127,7 +140,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
       if (attempts >= MAX_ATTEMPTS) {
         // ── Timed out waiting for navigator.xr ─────────────────────────
         const reason = isWebXRViewer
-          ? `navigator.xr not found after 3 s in WebXR Viewer.\nMake sure you opened this URL directly in WebXR Viewer (not via Safari), and that camera permission is granted.`
+          ? `navigator.xr not found after ${MAX_SECS}s in WebXR Viewer.\n\nPossible causes:\n• Camera permission not granted (Settings → WebXR Viewer → Camera)\n• WebXR Viewer v2 may not support iOS 18 / iPhone 17 hardware\n• Try force-quitting WebXR Viewer and reopening this URL`
           : isIOS && isSafari
             ? `navigator.xr not found.\n⚠️ Stock iOS Safari does not support WebXR AR — no flag enables it.\nInstall Mozilla WebXR Viewer from the App Store and open this page there.`
             : inIframe
@@ -139,12 +152,12 @@ export default function LidarScanner({ onComplete, onCancel }) {
       }
 
       // Schedule next check
-      pollTimer = setTimeout(checkXR, 200)
+      pollTimer = setTimeout(checkXR, POLL_MS)
     }
 
-    let pollTimer = setTimeout(checkXR, 200)
+    let pollTimer = setTimeout(checkXR, POLL_MS)
     return () => clearTimeout(pollTimer)
-  }, [])
+  }, [retryCount])  // re-run whenever user taps Retry
 
   /* ── Start the AR session ─────────────────────────────────────────────── */
   const startScan = useCallback(async () => {
@@ -334,7 +347,12 @@ export default function LidarScanner({ onComplete, onCancel }) {
       <div className="lidar-overlay">
         <div className="lidar-card">
           <div className="lidar-spinner" />
-          <p className="lidar-status-text">Checking device capabilities…</p>
+          <p className="lidar-status-text">Checking WebXR…</p>
+          {errorMsg ? (
+            <p className="lidar-desc lidar-desc--diag lidar-desc--checking">{errorMsg}</p>
+          ) : (
+            <p className="lidar-hint">Waiting for WebXR to initialise…</p>
+          )}
         </div>
       </div>
     )
@@ -352,16 +370,16 @@ export default function LidarScanner({ onComplete, onCancel }) {
           <h2 className="lidar-title">LiDAR Not Available</h2>
           <p className="lidar-desc lidar-desc--diag">{errorMsg}</p>
           {directUrl && (
-            <a
-              className="lidar-direct-url"
-              href={directUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
+            /* No target="_blank" — WKWebView crashes trying to open new windows.
+               Navigate in-place; the user is already in WebXR Viewer. */
+            <a className="lidar-direct-url" href={directUrl}>
               {directUrl}
             </a>
           )}
-          <button className="lidar-btn lidar-btn--ghost" onClick={onCancel}>Close</button>
+          <div className="lidar-btn-row">
+            <button className="lidar-btn lidar-btn--ghost" onClick={onCancel}>Close</button>
+            <button className="lidar-btn lidar-btn--primary" onClick={() => setRetryCount(c => c + 1)}>Retry</button>
+          </div>
         </div>
       </div>
     )
