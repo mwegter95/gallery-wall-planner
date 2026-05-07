@@ -77,6 +77,32 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
   })
 }
 
+// ── Gaussian-splat shaders ─────────────────────────────────────────────────
+// Each LiDAR point renders as a perspective-correct Gaussian disc rather than
+// a hard-edged square. Discs blend smoothly where they overlap, filling gaps
+// between sample positions for a dense, photorealistic surface appearance.
+const SPLAT_VERT = /* glsl */`
+  varying vec3 vColor;
+  void main() {
+    vColor = color;                          // injected by Three.js (vertexColors:true)
+    vec4 mvPos  = modelViewMatrix * vec4(position, 1.0);
+    // ~4 cm world-radius disc; clamped 1.5–30 px on screen
+    gl_PointSize = clamp(56.0 / -mvPos.z, 1.5, 30.0);
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`
+
+const SPLAT_FRAG = /* glsl */`
+  varying vec3 vColor;
+  void main() {
+    vec2  uv = gl_PointCoord - 0.5;         // -0.5..0.5 over the point quad
+    float r2 = dot(uv, uv);
+    if (r2 > 0.25) discard;                 // clip to circle (radius = 0.5)
+    float a  = exp(-r2 * 11.0) * 0.95;     // smooth Gaussian falloff
+    gl_FragColor = vec4(vColor, a);
+  }
+`
+
 const FOV_PRESETS = [
   { label: 'Normal', fov: 55  },
   { label: 'Wide',   fov: 90  },
@@ -586,12 +612,12 @@ export default function SpaceBuilderCanvas({
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
 
-      const mat = new THREE.PointsMaterial({
-        size: 0.05,
+      const mat = new THREE.ShaderMaterial({
         vertexColors: true,
-        sizeAttenuation: true,
         transparent: true,
-        opacity: 0.88,
+        depthWrite: false,
+        vertexShader: SPLAT_VERT,
+        fragmentShader: SPLAT_FRAG,
       })
 
       const points = new THREE.Points(geo, mat)
@@ -669,85 +695,10 @@ export default function SpaceBuilderCanvas({
     }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Photorealistic snapshot planes ──────────────────────────────────────
-  // Render each captured camera snapshot as a semi-transparent textured quad
-  // anchored at the camera's world position, looking into the room.
-  // This overlays real photos onto the point cloud for a photorealistic effect.
-  useEffect(() => {
-    const t = threeRef.current
-    if (!t) return
-
-    // Remove old snapshot meshes
-    for (const m of snapshotMeshesRef.current) {
-      t.scene.remove(m)
-      m.geometry.dispose()
-      m.material.map?.dispose()
-      m.material.dispose()
-    }
-    snapshotMeshesRef.current = []
-
-    const snapshots = roomScan?.snapshots
-    if (!snapshots?.length) return
-
-    const yOff = yOffsetRef.current
-    const texLoader = new THREE.TextureLoader()
-
-    for (const snap of snapshots) {
-      if (!snap?.dataUrl || !Array.isArray(snap.transform) || snap.transform.length !== 16) continue
-
-      // Column-major 4×4 ARKit camera-to-world matrix:
-      //   col 0 [0..3]  = camera right   (+X axis)
-      //   col 1 [4..7]  = camera up      (+Y axis)
-      //   col 2 [8..11] = camera -forward (ARKit looks along -Z, so col2 = -forward)
-      //   col 3 [12..15]= camera position
-      const m = snap.transform
-      const camX = m[12], camY = m[13] + yOff, camZ = m[14]
-
-      // Extract and normalise camera basis vectors
-      const rx = m[0], ry = m[1], rz = m[2]        // right
-      const ux = m[4], uy = m[5], uz = m[6]        // up
-      const fwdX = -m[8], fwdY = -m[9], fwdZ = -m[10] // forward = -col2
-
-      const fLen = Math.sqrt(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ) || 1
-      const rLen = Math.sqrt(rx*rx + ry*ry + rz*rz) || 1
-      const uLen = Math.sqrt(ux*ux + uy*uy + uz*uz) || 1
-      const fnx = fwdX/fLen, fny = fwdY/fLen, fnz = fwdZ/fLen
-
-      // Place plane 3.5 m ahead of the camera (toward the scanned wall)
-      const DIST = 3.5
-      const planeX = camX + fnx * DIST
-      const planeY = camY + fny * DIST
-      const planeZ = camZ + fnz * DIST
-
-      // Size roughly matches iPhone wide-angle FOV (~65°) at 3.5 m distance
-      const geo = new THREE.PlaneGeometry(5.0, 3.75)
-      const tex = texLoader.load(snap.dataUrl)
-      tex.colorSpace = THREE.SRGBColorSpace
-      const mat = new THREE.MeshBasicMaterial({
-        map: tex, side: THREE.DoubleSide,
-        transparent: true, opacity: 0.85,
-        depthTest: false,   // render as background layer — always shows behind point cloud
-        depthWrite: false,
-      })
-      const mesh = new THREE.Mesh(geo, mat)
-      mesh.renderOrder = -10  // draw before point cloud and surfaces
-
-      mesh.position.set(planeX, planeY, planeZ)
-
-      // Orient using camera's own basis vectors — FIXED in world space, does NOT
-      // billboard/rotate as the user orbits. PlaneGeometry's face normal is +Z,
-      // so we set +Z = -forward so the photo faces back toward where the camera was.
-      const basisMat = new THREE.Matrix4().makeBasis(
-        new THREE.Vector3(rx/rLen, ry/rLen, rz/rLen),   // +X = camera right
-        new THREE.Vector3(ux/uLen, uy/uLen, uz/uLen),   // +Y = camera up
-        new THREE.Vector3(-fnx, -fny, -fnz),            // +Z = -forward (face toward cam)
-      )
-      mesh.quaternion.setFromRotationMatrix(basisMat)
-
-      t.scene.add(mesh)
-      snapshotMeshesRef.current.push(mesh)
-    }
-  }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
+  // ── Photorealistic snapshot planes (DISABLED) ────────────────────────────
+  // Photo overlay approach parked — dense Gaussian splat point cloud used instead.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { /* disabled */ }, [roomScan])
 
   // ── Composite piece overlays onto surface textures ───────────────────────
   useEffect(() => {
