@@ -581,120 +581,151 @@ export default function SpaceBuilderCanvas({
 
     if (!roomScan) return
 
-    // ── Build colored point cloud ─────────────────────────────────
-    try {
-      const buf = PointCloudBuffer.fromJSON(roomScan.pointCloud)
-      const data = buf.toFloat32Array()  // [x,y,z,r,g,b, ...]
-      const n = buf.pointCount
+    let cancelled = false
 
-      // ARKit Y=0 is at the camera's starting height, so the floor is at ~-1.5 m.
-      // Find the minimum Y (floor level) and shift all points up so the floor
-      // lands on the Three.js grid (which sits at Y=0).
-      let minY = Infinity
-      for (let i = 0; i < n; i++) {
-        const y = data[i * 6 + 1]
-        if (y < minY) minY = y
-      }
-      const yOffset = isFinite(minY) ? -minY : 0
-      yOffsetRef.current = yOffset  // shared with snapshot renderer
-
-      const positions = new Float32Array(n * 3)
-      const colors    = new Float32Array(n * 3)
-      for (let i = 0; i < n; i++) {
-        const base = i * 6
-        positions[i*3]   = data[base]
-        positions[i*3+1] = data[base+1] + yOffset
-        positions[i*3+2] = data[base+2]
-        colors[i*3]      = data[base+3]
-        colors[i*3+1]    = data[base+4]
-        colors[i*3+2]    = data[base+5]
-      }
-
-      const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-      geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
-
-      const mat = new THREE.ShaderMaterial({
-        vertexColors: true,
-        transparent: true,
-        depthWrite: false,
-        vertexShader: SPLAT_VERT,
-        fragmentShader: SPLAT_FRAG,
-      })
-
-      const points = new THREE.Points(geo, mat)
-      t.scene.add(points)
-      pointCloudMeshRef.current = points
-
-      // Auto-frame the camera to show the full room scan
+    // Resolve the PointCloudBuffer from any of three storage formats:
+    //   { _buffer }      — live scan, already decoded in memory (fastest)
+    //   { url }          — loaded from server, fetch the binary blob
+    //   { data }         — legacy base64 JSON format
+    async function buildCloud() {
+      let buf
+      const pc = roomScan.pointCloud
       try {
-        geo.computeBoundingBox()
-        const bbox = geo.boundingBox
-        const center = new THREE.Vector3()
-        bbox.getCenter(center)
-        const sphere = new THREE.Sphere()
-        bbox.getBoundingSphere(sphere)
-        t.orbit.center.copy(center)
-        // Pull back enough to see the whole room; minimum 2m, max 20m
-        t.orbit.radius = Math.max(2, Math.min(20, sphere.radius * 1.8))
-        t.orbit.phi = 1.15  // ~66° from top — slightly above room center
-        t.applyOrbit()
-      } catch { /* ignore framing errors */ }
-    } catch (err) {
-      console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
-    }
-
-    // ── Build ghost plane meshes from detected planes ─────────────────
-    try {
-      if (roomScan.planes?.length) {
-        const planes = planesFromJSON(roomScan.planes)
-        for (const plane of planes) {
-          const verts = plane.vertices  // Float32Array of [x,y,z, x,y,z, ...]
-          const count = verts.length / 3
-          if (count < 3) continue
-
-          // Build a simple polygon mesh by fan-triangulation from centroid
-          const cx = verts.reduce((s, v, i) => i % 3 === 0 ? s + v : s, 0) / count
-          const cy = verts.reduce((s, v, i) => i % 3 === 1 ? s + v : s, 0) / count
-          const cz = verts.reduce((s, v, i) => i % 3 === 2 ? s + v : s, 0) / count
-
-          const positions = [cx, cy, cz]
-          for (let i = 0; i < count; i++) {
-            positions.push(verts[i*3], verts[i*3+1], verts[i*3+2])
-          }
-          const indices = []
-          for (let i = 1; i <= count; i++) {
-            indices.push(0, i, (i % count) + 1)
-          }
-
-          const geo = new THREE.BufferGeometry()
-          geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
-          geo.setIndex(indices)
-          geo.computeVertexNormals()
-
-          const color = plane.orientation === 'horizontal' ? 0x34d399 : 0x4a9eff
-          const mat = new THREE.MeshBasicMaterial({
-            color,
-            transparent: true,
-            opacity: 0.08,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-          })
-
-          // Wireframe outline
-          const wireMat = new THREE.LineBasicMaterial({ color, opacity: 0.35, transparent: true })
-          const wireGeo = new THREE.EdgesGeometry(geo)
-          const wire    = new THREE.LineSegments(wireGeo, wireMat)
-
-          const mesh = new THREE.Mesh(geo, mat)
-          mesh.add(wire)
-          t.scene.add(mesh)
-          planeMeshesRef.current.push(mesh)
+        if (pc?._buffer) {
+          buf = pc._buffer
+        } else if (pc?.url) {
+          const resp = await fetch(pc.url)
+          if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
+          const ab = await resp.arrayBuffer()
+          buf = PointCloudBuffer.fromFloat32Array(new Float32Array(ab), pc.pointCount)
+        } else if (pc?.data) {
+          buf = PointCloudBuffer.fromJSON(pc)
+        } else {
+          return
         }
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] Could not load point cloud:', err)
+        return
       }
-    } catch (err) {
-      console.warn('[SpaceBuilderCanvas] Could not render planes:', err)
+      if (cancelled) return
+
+      // ── Build colored point cloud ─────────────────────────────────
+      try {
+        const data = buf.toFloat32Array()  // [x,y,z,r,g,b, ...]
+        const n = buf.pointCount
+
+        // ARKit Y=0 is at the camera's starting height, so the floor is at ~-1.5 m.
+        // Find the minimum Y (floor level) and shift all points up so the floor
+        // lands on the Three.js grid (which sits at Y=0).
+        let minY = Infinity
+        for (let i = 0; i < n; i++) {
+          const y = data[i * 6 + 1]
+          if (y < minY) minY = y
+        }
+        const yOffset = isFinite(minY) ? -minY : 0
+        yOffsetRef.current = yOffset  // shared with snapshot renderer
+
+        const positions = new Float32Array(n * 3)
+        const colors    = new Float32Array(n * 3)
+        for (let i = 0; i < n; i++) {
+          const base = i * 6
+          positions[i*3]   = data[base]
+          positions[i*3+1] = data[base+1] + yOffset
+          positions[i*3+2] = data[base+2]
+          colors[i*3]      = data[base+3]
+          colors[i*3+1]    = data[base+4]
+          colors[i*3+2]    = data[base+5]
+        }
+
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+        geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
+
+        const mat = new THREE.ShaderMaterial({
+          vertexColors: true,
+          transparent: true,
+          depthWrite: false,
+          vertexShader: SPLAT_VERT,
+          fragmentShader: SPLAT_FRAG,
+        })
+
+        const points = new THREE.Points(geo, mat)
+        t.scene.add(points)
+        pointCloudMeshRef.current = points
+
+        // Auto-frame the camera to show the full room scan
+        try {
+          geo.computeBoundingBox()
+          const bbox = geo.boundingBox
+          const center = new THREE.Vector3()
+          bbox.getCenter(center)
+          const sphere = new THREE.Sphere()
+          bbox.getBoundingSphere(sphere)
+          t.orbit.center.copy(center)
+          // Pull back enough to see the whole room; minimum 2m, max 20m
+          t.orbit.radius = Math.max(2, Math.min(20, sphere.radius * 1.8))
+          t.orbit.phi = 1.15  // ~66° from top — slightly above room center
+          t.applyOrbit()
+        } catch { /* ignore framing errors */ }
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
+      }
+
+      // ── Build ghost plane meshes from detected planes ─────────────────
+      try {
+        if (roomScan.planes?.length) {
+          const planes = planesFromJSON(roomScan.planes)
+          for (const plane of planes) {
+            const verts = plane.vertices  // Float32Array of [x,y,z, x,y,z, ...]
+            const count = verts.length / 3
+            if (count < 3) continue
+
+            // Build a simple polygon mesh by fan-triangulation from centroid
+            const cx = verts.reduce((s, v, i) => i % 3 === 0 ? s + v : s, 0) / count
+            const cy = verts.reduce((s, v, i) => i % 3 === 1 ? s + v : s, 0) / count
+            const cz = verts.reduce((s, v, i) => i % 3 === 2 ? s + v : s, 0) / count
+
+            const positions = [cx, cy, cz]
+            for (let i = 0; i < count; i++) {
+              positions.push(verts[i*3], verts[i*3+1], verts[i*3+2])
+            }
+            const indices = []
+            for (let i = 1; i <= count; i++) {
+              indices.push(0, i, (i % count) + 1)
+            }
+
+            const geo = new THREE.BufferGeometry()
+            geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+            geo.setIndex(indices)
+            geo.computeVertexNormals()
+
+            const color = plane.orientation === 'horizontal' ? 0x34d399 : 0x4a9eff
+            const mat = new THREE.MeshBasicMaterial({
+              color,
+              transparent: true,
+              opacity: 0.08,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+            })
+
+            // Wireframe outline
+            const wireMat = new THREE.LineBasicMaterial({ color, opacity: 0.35, transparent: true })
+            const wireGeo = new THREE.EdgesGeometry(geo)
+            const wire    = new THREE.LineSegments(wireGeo, wireMat)
+
+            const mesh = new THREE.Mesh(geo, mat)
+            mesh.add(wire)
+            t.scene.add(mesh)
+            planeMeshesRef.current.push(mesh)
+          }
+        }
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] Could not render planes:', err)
+      }
     }
+
+    buildCloud()
+    return () => { cancelled = true }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Photorealistic snapshot planes (DISABLED) ────────────────────────────

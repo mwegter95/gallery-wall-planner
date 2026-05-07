@@ -477,11 +477,51 @@ export default function App() {
   const handleSaveSpace = useCallback(async (space, onProgress) => {
     const report = (pct) => { try { onProgress?.(pct) } catch {} }
 
-    // Store the full space (including photo data URLs) as a room record.
+    // Strip the binary point-cloud payload before putRoom so the JSON is tiny.
+    // The blob is uploaded separately below with real XHR progress.
+    const pc = space.roomScan?.pointCloud
+    const hasBinary = pc && (pc._buffer || pc.data)  // in-memory scan OR legacy base64
+    const spaceForMeta = hasBinary
+      ? { ...space, roomScan: { ...space.roomScan,
+            pointCloud: { pointCount: pc.pointCount, url: pc.url ?? null } } }
+      : space
+
     report(5)
-    await api.putRoom(space)
-    report(15)
-    setRooms(prev => ({ ...prev, [space.id]: space }))
+    await api.putRoom(spaceForMeta)   // fast — no binary blob
+    report(12)
+    setRooms(prev => ({ ...prev, [space.id]: space }))  // keep full object in local state
+
+    // ── Upload binary point cloud separately (12% → 68%) ──────────────────────
+    if (hasBinary) {
+      try {
+        let arrayBuffer
+        if (pc._buffer) {
+          // Live scan: buffer already decoded in memory — zero copy
+          const arr = pc._buffer.toFloat32Array()
+          arrayBuffer = arr.buffer.slice(0, arr.byteLength)
+        } else {
+          // Legacy base64 path: decode to binary
+          const raw = atob(pc.data)
+          const bytes = new Uint8Array(raw.length)
+          for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
+          arrayBuffer = bytes.buffer
+        }
+        const { url } = await api.uploadPointCloud(space.id, arrayBuffer, (frac) => {
+          report(12 + Math.round(frac * 56))   // 12% → 68%
+        })
+        // Patch the room record with the resolved URL (fast — just a string now)
+        const roomWithUrl = {
+          ...space,
+          roomScan: space.roomScan
+            ? { ...space.roomScan, pointCloud: { pointCount: pc.pointCount, url } }
+            : null,
+        }
+        await api.putRoom(roomWithUrl)
+      } catch (err) {
+        console.error('[handleSaveSpace] point cloud upload failed', err)
+      }
+    }
+    report(68)
 
     // ── Upload all warped surface images first, then save walls with URLs ──
     // We capture existing walls once so the imageUrl lookup is stable.
@@ -492,7 +532,7 @@ export default function App() {
     const imageUrls   = {}
     const inpaintUrls = {}
     const surfaces = space.surfaces
-    const uploadStep = 70 / Math.max(1, surfaces.length)  // 15% → 85% spread across uploads
+    const uploadStep = 24 / Math.max(1, surfaces.length)  // 68% → 92%
     for (let si = 0; si < surfaces.length; si++) {
       const surface = surfaces[si]
       if (surface.warpedDataUrl) {
@@ -515,11 +555,11 @@ export default function App() {
           }
         }
       }
-      report(15 + Math.round(uploadStep * (si + 1)))
+      report(68 + Math.round(uploadStep * (si + 1)))
     }
 
     // Now build wall objects — all URLs are resolved
-    report(88)
+    report(92)
     const wallUpdates = {}
     for (const surface of surfaces) {
       const wallId   = surface.id

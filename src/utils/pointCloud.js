@@ -59,8 +59,9 @@ export class PointCloudBuffer {
     }
   }
 
-  /** Restore from the plain object returned by toJSON(). */
-  static fromJSON({ pointCount, data }) {
+  /** Restore from the plain object returned by toJSON(). Returns an empty buffer if data is absent. */
+  static fromJSON({ pointCount, data } = {}) {
+    if (!data) return new PointCloudBuffer(0)
     const binary = atob(data)
     const bytes = new Uint8Array(binary.length)
     const CHUNK = 8192
@@ -73,6 +74,19 @@ export class PointCloudBuffer {
     buf._len  = pointCount
     buf._cap  = pointCount
     return buf
+  }
+
+  /**
+   * Bulk-insert a Float32Array chunk (e.g. one chunk from the Swift bridge).
+   * Uses TypedArray.set() — much faster than calling addPoint() in a loop.
+   * The chunk must be interleaved [x,y,z,r,g,b, …].
+   */
+  addChunk(float32Chunk) {
+    const chunkPoints = float32Chunk.length / FLOATS_PER_POINT
+    // Grow until there's room for the whole chunk
+    while (this._len + chunkPoints > this._cap) this._grow()
+    this._data.set(float32Chunk, this._len * FLOATS_PER_POINT)
+    this._len += chunkPoints
   }
 
   /** Wrap an existing Float32Array directly (zero-copy). Used when Swift sends base64 binary. */

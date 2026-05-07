@@ -270,6 +270,44 @@ export async function putRoom(room) {
   })
 }
 
+/**
+ * Upload a raw Float32 binary point cloud blob and return the server URL.
+ * Uses XMLHttpRequest so upload.onprogress is available for real progress.
+ * @param {string}      roomId
+ * @param {ArrayBuffer} arrayBuffer — raw bytes of the interleaved Float32 array
+ * @param {function}    [onProgress] — called with fraction 0-1 during upload
+ */
+export function uploadPointCloud(roomId, arrayBuffer, onProgress) {
+  const jwt    = getJwt()
+  const device = getDeviceToken()
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total) }
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const { url } = JSON.parse(xhr.responseText)
+          // Make relative paths absolute (same as other upload helpers)
+          resolve({ url: url?.startsWith('/') ? `${BASE}${url}` : url })
+        } catch { resolve({}) }
+      } else {
+        reject(new Error(`Point cloud upload failed: ${xhr.status}`))
+      }
+    }
+    xhr.onerror  = () => reject(new Error('Point cloud upload: network error'))
+    xhr.open('POST', `${BASE}/api/rooms/${roomId}/pointcloud`)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.setRequestHeader('X-Device-Token', device)
+    if (jwt) {
+      xhr.setRequestHeader('Authorization', `Bearer ${jwt}`)
+      xhr.setRequestHeader('X-Auth-Token', jwt)
+    }
+    xhr.send(arrayBuffer)
+  })
+}
+
 export async function deleteRoom(roomId) {
   return apiFetch(`/api/rooms/${roomId}`, { method: 'DELETE' })
 }

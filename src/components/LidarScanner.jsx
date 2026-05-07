@@ -45,6 +45,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const sessionRef    = useRef(null)
   const rafRef        = useRef(null)
   const bufferRef     = useRef(null)
+  const nativeBufRef  = useRef(null)  // accumulates streaming chunks from native bridge
   const planesRef     = useRef([])
   const snapshotsRef  = useRef([])  // accumulated photo snapshots from native bridge
   const camCtxRef     = useRef(null)  // 2D canvas ctx for sampling camera color
@@ -70,6 +71,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
         }
         if (result.status === 'scanning') {
           setStatus('scanning')
+          nativeBufRef.current = new PointCloudBuffer(500_000)  // pre-allocate, grows as needed
           return
         }
         if (result.status === 'snapshot') {
@@ -77,7 +79,23 @@ export default function LidarScanner({ onComplete, onCancel }) {
           snapshotsRef.current.push({ dataUrl: result.dataUrl, transform: result.transform })
           return
         }
+        // ── Real-time chunk from Swift ──────────────────────────────────────
+        // Swift streams each batch (~2 000 pts, ~48 KB base64) as it is captured.
+        // We decode and accumulate into nativeBufRef so "done" requires no transfer.
+        if (result.status === 'chunk') {
+          if (!nativeBufRef.current) nativeBufRef.current = new PointCloudBuffer(500_000)
+          const decoded = atob(result.data)
+          const bytes = new Uint8Array(decoded.length)
+          for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i)
+          nativeBufRef.current.addChunk(new Float32Array(bytes.buffer))
+          const n = nativeBufRef.current.pointCount
+          setPointCount(n)
+          // Drive the scanning-phase progress bar (caps at 99 so "done" feels like a bump)
+          setProgress(Math.min(99, Math.round((n / 500_000) * 80)))
+          return
+        }
         if (result.status === 'progress') {
+          // Legacy progress events (older Swift builds without chunk streaming)
           setPointCount(result.pointCount)
           setProgress(Math.min(99, Math.round((result.pointCount / 100_000) * 100)))
           return
@@ -86,15 +104,25 @@ export default function LidarScanner({ onComplete, onCancel }) {
           setStatus('processing')
           setProgress(0)
 
-          // New format: Swift sends raw Float32 bytes as base64 (much smaller/faster than JSON array).
-          // We decode it directly into a Float32Array with chunked atob to keep the UI responsive.
-          if (result.data) {
-            // Chunked base64 decode to avoid blocking the main thread
-            const b64 = result.data
+          const buf = nativeBufRef.current
+
+          if (buf && buf.pointCount > 0) {
+            // ── Fast path: all data already received via 'chunk' events ──────
+            // Pass the PointCloudBuffer directly as _buffer so SpaceBuilderCanvas
+            // can render it without any serialization overhead.
+            setProgress(100)
+            const pointCloud = { pointCount: buf.pointCount, _buffer: buf }
+            const snapshots  = snapshotsRef.current.slice()
+            nativeBufRef.current = null
+            onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
+
+          } else if (result.data) {
+            // ── Fallback: old Swift build sent full blob in 'done' ────────────
+            const b64     = result.data
             const decoded = atob(b64)
             const byteLen = decoded.length
-            const bytes = new Uint8Array(byteLen)
-            const CHUNK = 32768
+            const bytes   = new Uint8Array(byteLen)
+            const CHUNK   = 32768
             let i = 0
             const decodeStep = () => {
               const end = Math.min(i + CHUNK, byteLen)
@@ -103,38 +131,18 @@ export default function LidarScanner({ onComplete, onCancel }) {
               if (i < byteLen) {
                 setTimeout(decodeStep, 0)
               } else {
-                const arr = new Float32Array(bytes.buffer)
-                const buf = PointCloudBuffer.fromFloat32Array(arr, result.pointCount)
-                // Re-use buf.toJSON() but bypass the slow loop — data is already correct base64
-                // (Swift float32 LE bytes == JS Float32Array layout on ARM)
-                setProgress(95)
-                const pointCloud = { pointCount: result.pointCount, data: b64 }
-                const snapshots = snapshotsRef.current.slice()
+                const arr      = new Float32Array(bytes.buffer)
+                const fallback = PointCloudBuffer.fromFloat32Array(arr, result.pointCount)
                 setProgress(100)
+                const pointCloud = { pointCount: result.pointCount, _buffer: fallback }
+                const snapshots  = snapshotsRef.current.slice()
                 onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
               }
             }
             setTimeout(decodeStep, 0)
           } else {
-            // Legacy path: old format sent a JSON float array
-            const pts = result.points ?? []
-            const buf = new PointCloudBuffer(result.pointCount)
-            const CHUNK = 6000
-            let i = 0
-            const addStep = () => {
-              const end = Math.min(i + CHUNK, pts.length)
-              for (; i < end; i += 6) buf.addPoint(pts[i], pts[i+1], pts[i+2], pts[i+3], pts[i+4], pts[i+5])
-              setProgress(Math.round((i / pts.length) * 80))
-              if (i < pts.length) {
-                setTimeout(addStep, 0)
-              } else {
-                const pointCloud = buf.toJSON()
-                const snapshots = snapshotsRef.current.slice()
-                setProgress(100)
-                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
-              }
-            }
-            setTimeout(addStep, 0)
+            setStatus('error')
+            setErrorMsg('No point cloud data received.')
           }
         }
       }
