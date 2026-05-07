@@ -695,34 +695,55 @@ export default function SpaceBuilderCanvas({
     for (const snap of snapshots) {
       if (!snap?.dataUrl || !Array.isArray(snap.transform) || snap.transform.length !== 16) continue
 
-      // Build the camera-to-world matrix from the 16-float column-major array
+      // Column-major 4×4 ARKit camera-to-world matrix:
+      //   col 0 [0..3]  = camera right   (+X axis)
+      //   col 1 [4..7]  = camera up      (+Y axis)
+      //   col 2 [8..11] = camera -forward (ARKit looks along -Z, so col2 = -forward)
+      //   col 3 [12..15]= camera position
       const m = snap.transform
-      // Camera position (column 3)
-      const cx = m[12], cy = m[13] + yOff, cz = m[14]
-      // Camera forward is -Z column (ARKit camera looks along -Z)
-      const fx = -m[8], fy = -m[9], fz = -m[10]
-      const fLen = Math.sqrt(fx*fx + fy*fy + fz*fz) || 1
-      const fnx = fx/fLen, fny = fy/fLen, fnz = fz/fLen
+      const camX = m[12], camY = m[13] + yOff, camZ = m[14]
 
-      // Place photo plane 3 m ahead of the camera (toward the wall it was looking at)
-      const DIST = 3.0
-      const px = cx + fnx * DIST
-      const py = cy + fny * DIST
-      const pz = cz + fnz * DIST
+      // Extract and normalise camera basis vectors
+      const rx = m[0], ry = m[1], rz = m[2]        // right
+      const ux = m[4], uy = m[5], uz = m[6]        // up
+      const fwdX = -m[8], fwdY = -m[9], fwdZ = -m[10] // forward = -col2
 
-      // 16:9-ish plane (3.5 × 2.6 m) — covers a wide-angle camera frustum at ~3 m
-      const geo = new THREE.PlaneGeometry(3.5, 2.6)
+      const fLen = Math.sqrt(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ) || 1
+      const rLen = Math.sqrt(rx*rx + ry*ry + rz*rz) || 1
+      const uLen = Math.sqrt(ux*ux + uy*uy + uz*uz) || 1
+      const fnx = fwdX/fLen, fny = fwdY/fLen, fnz = fwdZ/fLen
+
+      // Place plane 3.5 m ahead of the camera (toward the scanned wall)
+      const DIST = 3.5
+      const planeX = camX + fnx * DIST
+      const planeY = camY + fny * DIST
+      const planeZ = camZ + fnz * DIST
+
+      // Size roughly matches iPhone wide-angle FOV (~65°) at 3.5 m distance
+      const geo = new THREE.PlaneGeometry(5.0, 3.75)
       const tex = texLoader.load(snap.dataUrl)
       tex.colorSpace = THREE.SRGBColorSpace
       const mat = new THREE.MeshBasicMaterial({
-        map: tex, side: THREE.FrontSide,
-        transparent: true, opacity: 0.78,
+        map: tex, side: THREE.DoubleSide,
+        transparent: true, opacity: 0.85,
+        depthTest: false,   // render as background layer — always shows behind point cloud
         depthWrite: false,
       })
       const mesh = new THREE.Mesh(geo, mat)
-      mesh.position.set(px, py, pz)
-      // Face the camera position so the photo is visible from the viewpoint
-      mesh.lookAt(cx, cy, cz)
+      mesh.renderOrder = -10  // draw before point cloud and surfaces
+
+      mesh.position.set(planeX, planeY, planeZ)
+
+      // Orient using camera's own basis vectors — FIXED in world space, does NOT
+      // billboard/rotate as the user orbits. PlaneGeometry's face normal is +Z,
+      // so we set +Z = -forward so the photo faces back toward where the camera was.
+      const basisMat = new THREE.Matrix4().makeBasis(
+        new THREE.Vector3(rx/rLen, ry/rLen, rz/rLen),   // +X = camera right
+        new THREE.Vector3(ux/uLen, uy/uLen, uz/uLen),   // +Y = camera up
+        new THREE.Vector3(-fnx, -fny, -fnz),            // +Z = -forward (face toward cam)
+      )
+      mesh.quaternion.setFromRotationMatrix(basisMat)
+
       t.scene.add(mesh)
       snapshotMeshesRef.current.push(mesh)
     }
