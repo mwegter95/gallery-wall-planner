@@ -78,13 +78,15 @@ export default function LidarScanner({ onComplete, onCancel }) {
         }
         if (result.status === 'done') {
           setStatus('processing')
-          // Convert native flat-float array to the pointCloud format the app expects.
-          // points: [x0,y0,z0,r0,g0,b0, x1,y1,z1,...] (Float32-precision)
-          const pointCloud = {
-            source: 'native-arkit',
-            pointCount: result.pointCount,
-            points: result.points,   // raw flat array from Swift
+          // Convert native flat-float array [x,y,z,r,g,b,...] into
+          // PointCloudBuffer JSON format { pointCount, data: base64 }
+          // so SpaceBuilderCanvas.fromJSON() can decode it correctly.
+          const pts = result.points
+          const buf = new PointCloudBuffer(result.pointCount)
+          for (let i = 0; i < pts.length; i += 6) {
+            buf.addPoint(pts[i], pts[i+1], pts[i+2], pts[i+3], pts[i+4], pts[i+5])
           }
+          const pointCloud = buf.toJSON()  // { pointCount, data: base64 }
           onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
         }
       }

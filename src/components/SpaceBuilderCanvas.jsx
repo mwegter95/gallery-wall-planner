@@ -584,6 +584,21 @@ export default function SpaceBuilderCanvas({
       const points = new THREE.Points(geo, mat)
       t.scene.add(points)
       pointCloudMeshRef.current = points
+
+      // Auto-frame the camera to show the full room scan
+      try {
+        geo.computeBoundingBox()
+        const bbox = geo.boundingBox
+        const center = new THREE.Vector3()
+        bbox.getCenter(center)
+        const sphere = new THREE.Sphere()
+        bbox.getBoundingSphere(sphere)
+        t.orbit.center.copy(center)
+        // Pull back enough to see the whole room; minimum 2m, max 20m
+        t.orbit.radius = Math.max(2, Math.min(20, sphere.radius * 1.8))
+        t.orbit.phi = 1.15  // ~66° from top — slightly above room center
+        t.applyOrbit()
+      } catch { /* ignore framing errors */ }
     } catch (err) {
       console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
     }
