@@ -25,8 +25,8 @@ import {
 } from '../utils/pointCloud'
 
 // How many depth samples to take per frame (spread across the depth image).
-// Higher = denser cloud but heavier CPU/memory. 200 is a good balance.
-const SAMPLES_PER_FRAME = 200
+// Higher = denser cloud but heavier CPU/memory.
+const SAMPLES_PER_FRAME = 600
 
 // Minimum depth (m) to accept — filters out noise from very close surfaces
 const MIN_DEPTH = 0.15
@@ -232,7 +232,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
       const refSpace = await session.requestReferenceSpace('local-floor')
       refSpaceRef.current = refSpace
 
-      bufferRef.current = new PointCloudBuffer(500_000)
+      bufferRef.current = new PointCloudBuffer(2_000_000)
       planesRef.current = []
 
       session.addEventListener('end', () => {

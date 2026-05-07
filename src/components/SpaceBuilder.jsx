@@ -39,10 +39,16 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [saveAsName,      setSaveAsName]      = useState('')
   const saveMenuRef = useRef(null)
   // Room selector + unsaved-changes guard
-  const [pendingRoomId,   setPendingRoomId]   = useState(null) // room to switch to (null = none pending)
-  const [savedSnapshot,   setSavedSnapshot]   = useState(() =>
+  const [pendingRoomId,      setPendingRoomId]      = useState(null) // room to switch to (null = none pending)
+  const [savedSnapshot,      setSavedSnapshot]      = useState(() =>
     existingSpace ? JSON.stringify(existingSpace.surfaces) : '[]'
   )
+  const [savedRoomScanAt,    setSavedRoomScanAt]    = useState(() =>
+    existingSpace?.roomScan?.capturedAt ?? null
+  )
+  // Post-scan save toast
+  const [scanSaveToast,      setScanSaveToast]      = useState(false)
+  const scanToastTimerRef = useRef(null)
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
@@ -63,6 +69,10 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt }) => {
     setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt } }))
     setShowLidarScanner(false)
+    // Show save reminder toast
+    if (scanToastTimerRef.current) clearTimeout(scanToastTimerRef.current)
+    setScanSaveToast(true)
+    scanToastTimerRef.current = setTimeout(() => setScanSaveToast(false), 6000)
   }, [])
 
   const handleRescan = useCallback(() => {
@@ -72,8 +82,10 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     if (confirmed) setShowLidarScanner(true)
   }, [])
 
-  // Detect unsaved changes by comparing current surfaces to saved snapshot
-  const hasUnsavedChanges = JSON.stringify(space.surfaces) !== savedSnapshot
+  // Detect unsaved changes by comparing surfaces OR a new roomScan
+  const hasUnsavedChanges =
+    JSON.stringify(space.surfaces) !== savedSnapshot ||
+    (space.roomScan?.capturedAt ?? null) !== savedRoomScanAt
 
   // Close save menu on outside click
   useEffect(() => {
@@ -391,6 +403,8 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     try {
       await onSave(spaceToSave)
       setSavedSnapshot(JSON.stringify(spaceToSave.surfaces))
+      setSavedRoomScanAt(spaceToSave.roomScan?.capturedAt ?? null)
+      setScanSaveToast(false)
       // If saved as new, switch to that space
       if (overrideName) setSpace(spaceToSave)
     } finally {
@@ -404,6 +418,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     if (!room) return
     setSpace(JSON.parse(JSON.stringify(room)))
     setSavedSnapshot(JSON.stringify(room.surfaces))
+    setSavedRoomScanAt(room.roomScan?.capturedAt ?? null)
     setActiveSurfaceId(null)
     warpQueueRef.current = new Set()
     const h = historyRef.current
@@ -679,6 +694,17 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           onComplete={handleScanComplete}
           onCancel={() => setShowLidarScanner(false)}
         />
+      )}
+      {/* Scan-complete save reminder toast */}
+      {scanSaveToast && (
+        <div className="sb-scan-toast" role="status">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="8" r="7" stroke="#34d399" strokeWidth="1.5"/>
+            <path d="M5 8l2 2 4-4" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Scan captured — <strong>save your room</strong> to keep it!
+          <button className="sb-scan-toast__close" onClick={() => setScanSaveToast(false)} aria-label="Dismiss">✕</button>
+        </div>
       )}
       <div
         className={`sb-modal${isDragOver ? ' sb-modal--drag-over' : ''}`}

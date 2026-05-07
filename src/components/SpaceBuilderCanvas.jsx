@@ -557,12 +557,22 @@ export default function SpaceBuilderCanvas({
       const data = buf.toFloat32Array()  // [x,y,z,r,g,b, ...]
       const n = buf.pointCount
 
+      // ARKit Y=0 is at the camera's starting height, so the floor is at ~-1.5 m.
+      // Find the minimum Y (floor level) and shift all points up so the floor
+      // lands on the Three.js grid (which sits at Y=0).
+      let minY = Infinity
+      for (let i = 0; i < n; i++) {
+        const y = data[i * 6 + 1]
+        if (y < minY) minY = y
+      }
+      const yOffset = isFinite(minY) ? -minY : 0
+
       const positions = new Float32Array(n * 3)
       const colors    = new Float32Array(n * 3)
       for (let i = 0; i < n; i++) {
         const base = i * 6
         positions[i*3]   = data[base]
-        positions[i*3+1] = data[base+1]
+        positions[i*3+1] = data[base+1] + yOffset
         positions[i*3+2] = data[base+2]
         colors[i*3]      = data[base+3]
         colors[i*3+1]    = data[base+4]
@@ -574,11 +584,11 @@ export default function SpaceBuilderCanvas({
       geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
 
       const mat = new THREE.PointsMaterial({
-        size: 0.022,
+        size: 0.05,
         vertexColors: true,
         sizeAttenuation: true,
         transparent: true,
-        opacity: 0.82,
+        opacity: 0.88,
       })
 
       const points = new THREE.Points(geo, mat)

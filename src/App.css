@@ -5282,6 +5282,33 @@ kbd {
 }
 .sb-room-select:focus { border-color: #4a9eff; }
 
+/* ── Scan-complete save toast ────────────────────────────── */
+.sb-scan-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0f2a1e;
+  border: 1px solid #34d399;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #d1fae5;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  white-space: nowrap;
+  pointer-events: auto;
+}
+.sb-scan-toast strong { color: #34d399; }
+.sb-scan-toast__close {
+  background: none; border: none; color: #6ee7b7;
+  cursor: pointer; font-size: 13px; padding: 0 0 0 8px; line-height: 1;
+}
+.sb-scan-toast__close:hover { color: #d1fae5; }
+
 /* ── Save Room popover ───────────────────────────────────── */
 .sb-save-wrap { position: relative; }
 
