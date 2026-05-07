@@ -10,6 +10,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import SpaceBuilderCanvas from './SpaceBuilderCanvas'
 import EraseModal from './EraseModal'
 import LidarScanner from './LidarScanner'
+import WallSetup from './WallSetup'
 import {
   createSpace, createPhoto, createSurfaceDef, genId,
   warpSurface, createSurfaceLayout, createSurfacePiece, SURFACE_COLORS,
@@ -46,9 +47,17 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [savedRoomScanAt,    setSavedRoomScanAt]    = useState(() =>
     existingSpace?.roomScan?.capturedAt ?? null
   )
-  // Post-scan save toast
-  const [scanSaveToast,      setScanSaveToast]      = useState(false)
+  // Post-scan save toast (replaced by modal below)
+  const [scanSaveToast,      setScanSaveToast]      = useState(false)  // kept for compat
   const scanToastTimerRef = useRef(null)
+  // Post-scan save modal
+  const [showPostScanSave, setShowPostScanSave] = useState(false)
+  const [postScanName,     setPostScanName]     = useState('')
+  // 'Add Surface from View' screenshot workflow
+  const [scanScreenshot, setScanScreenshot] = useState(null)
+  // Stable ref so handleScanComplete closure can read current space name
+  const spaceNameRef = useRef(space.name)
+  useEffect(() => { spaceNameRef.current = space.name }, [space.name])
   // Layout management state (scoped to active surface)
   const [layoutNameInput, setLayoutNameInput] = useState('')
   const [showLibPicker,   setShowLibPicker]   = useState(false)
@@ -66,14 +75,50 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const warpQueueRef  = useRef(new Set())
 
   /* ── LiDAR scan complete ───────────────────────────────────────────────── */
-  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt }) => {
-    setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt } }))
+  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
+    setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt, snapshots: snapshots ?? [] } }))
     setShowLidarScanner(false)
-    // Show save reminder toast
-    if (scanToastTimerRef.current) clearTimeout(scanToastTimerRef.current)
-    setScanSaveToast(true)
-    scanToastTimerRef.current = setTimeout(() => setScanSaveToast(false), 6000)
+    // Prompt to save with a name — pre-fill current space name
+    setPostScanName(spaceNameRef.current?.trim() || 'Scanned Room')
+    setShowPostScanSave(true)
   }, [])
+
+  /* ── Add Surface from 3D view (perspective-warp workflow) ─────────────── */
+  const handleSurfaceFromView = useCallback((dataUrl) => {
+    setScanScreenshot(dataUrl)
+  }, [])
+
+  const handleScanSurfaceApply = useCallback((warpedDataUrl, _corners, dims) => {
+    if (!scanScreenshot) return
+    const src = scanScreenshot
+    const photoId   = genId()
+    const surfaceId = genId()
+    const img = new Image()
+    img.onload = () => {
+      const displayW = Math.min(680, img.naturalWidth)
+      const displayH = Math.round(displayW * img.naturalHeight / img.naturalWidth)
+      setSpace(prev => {
+        const photo   = createPhoto({ dataUrl: src, displayW, displayH, index: prev.photos.length })
+        const surface = createSurfaceDef({ photoId: photo.id, index: prev.surfaces.length })
+        const newSurface = {
+          ...surface,
+          id:          surfaceId,
+          photoId,
+          warpedDataUrl,
+          widthIn:  dims?.width  ?? surface.widthIn,
+          heightIn: dims?.height ?? surface.heightIn,
+        }
+        return {
+          ...prev,
+          photos:   [...prev.photos,   { ...photo,   id: photoId }],
+          surfaces: [...prev.surfaces, newSurface],
+        }
+      })
+      setActiveSurfaceId(surfaceId)
+      setScanScreenshot(null)
+    }
+    img.src = src
+  }, [scanScreenshot])
 
   const handleRescan = useCallback(() => {
     const confirmed = window.confirm(
@@ -706,6 +751,58 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           <button className="sb-scan-toast__close" onClick={() => setScanSaveToast(false)} aria-label="Dismiss">✕</button>
         </div>
       )}
+      {/* Post-scan save modal */}
+      {showPostScanSave && (
+        <div className="sb-post-scan-backdrop">
+          <div className="sb-post-scan-modal">
+            <div className="sb-post-scan-icon">
+              <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                <circle cx="18" cy="18" r="17" stroke="#34d399" strokeWidth="1.5"/>
+                <path d="M11 18l5 5 9-9" stroke="#34d399" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <h3 className="sb-post-scan-title">Scan Complete!</h3>
+            <p className="sb-post-scan-desc">Give this room a name to save it.</p>
+            <input
+              className="sb-post-scan-input"
+              value={postScanName}
+              onChange={e => setPostScanName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && postScanName.trim()) {
+                  handleSave(postScanName.trim()).then(() => setShowPostScanSave(false))
+                }
+              }}
+              placeholder="Room name…"
+              autoFocus
+            />
+            <div className="sb-post-scan-actions">
+              <button className="sb-btn sb-btn--ghost" onClick={() => setShowPostScanSave(false)}>
+                Not now
+              </button>
+              <button
+                className="sb-btn sb-btn--primary"
+                disabled={!postScanName.trim() || isSaving}
+                onClick={() => handleSave(postScanName.trim()).then(() => setShowPostScanSave(false))}
+              >
+                {isSaving ? <><span className="btn-spinner"/>Saving…</> : 'Save Room'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Perspective-warp from 3D view screenshot */}
+      {scanScreenshot && (
+        <WallSetup
+          wallName="Scan Surface"
+          wallWidth={120}
+          wallHeight={96}
+          existingImageUrl={scanScreenshot}
+          onApply={handleScanSurfaceApply}
+          onClose={() => setScanScreenshot(null)}
+        />
+      )}
+
       <div
         className={`sb-modal${isDragOver ? ' sb-modal--drag-over' : ''}`}
         onDragOver={handleDragOver}
@@ -895,7 +992,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               <button
                 className={`sb-btn sb-btn--save${isSaving ? ' sb-btn--loading' : ''}`}
                 onClick={() => { if (!isSaving) setShowSaveMenu(v => !v) }}
-                disabled={isSaving || space.surfaces.length === 0}
+                disabled={isSaving}
                 title="Save room"
               >
                 {isSaving ? <><span className="btn-spinner" />Saving…</> : (
@@ -987,6 +1084,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onSurfaceTap={() => setShowMobilePanel(true)}
               requestCropId={cropRequestId}
               roomScan={space.roomScan ?? null}
+              onSurfaceFromView={handleSurfaceFromView}
             />
           </div>
 

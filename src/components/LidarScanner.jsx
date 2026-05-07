@@ -46,6 +46,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const rafRef        = useRef(null)
   const bufferRef     = useRef(null)
   const planesRef     = useRef([])
+  const snapshotsRef  = useRef([])  // accumulated photo snapshots from native bridge
   const camCtxRef     = useRef(null)  // 2D canvas ctx for sampling camera color
   const glRef         = useRef(null)  // WebGL context
   const refSpaceRef   = useRef(null)
@@ -71,6 +72,11 @@ export default function LidarScanner({ onComplete, onCancel }) {
           setStatus('scanning')
           return
         }
+        if (result.status === 'snapshot') {
+          // Accumulate photorealistic reference photos during the scan
+          snapshotsRef.current.push({ dataUrl: result.dataUrl, transform: result.transform })
+          return
+        }
         if (result.status === 'progress') {
           setPointCount(result.pointCount)
           setProgress(Math.min(99, Math.round((result.pointCount / 100_000) * 100)))
@@ -87,7 +93,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
             buf.addPoint(pts[i], pts[i+1], pts[i+2], pts[i+3], pts[i+4], pts[i+5])
           }
           const pointCloud = buf.toJSON()  // { pointCount, data: base64 }
-          onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
+          const snapshots = snapshotsRef.current.slice()
+          onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
         }
       }
       setStatus('ready')

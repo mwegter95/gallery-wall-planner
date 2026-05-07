@@ -92,6 +92,7 @@ const DOLLY_SPEED  = 0.04   // radius change per frame (same units as PAN_SPEED)
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
   roomScan = null,
+  onSurfaceFromView = null,
 }) {
   const mountRef = useRef(null)
   const threeRef  = useRef(null)
@@ -126,7 +127,7 @@ export default function SpaceBuilderCanvas({
     const mount = mountRef.current
     if (!mount) return
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.setSize(mount.clientWidth, mount.clientHeight)
@@ -501,7 +502,7 @@ export default function SpaceBuilderCanvas({
     }
     animate()
 
-    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera, scene }
+    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera, scene, renderer }
 
     return () => {
       cancelAnimationFrame(raf)
@@ -531,7 +532,8 @@ export default function SpaceBuilderCanvas({
   // ── Point cloud / room scan rendering ────────────────────────────────────
   const pointCloudMeshRef = useRef(null)
   const planeMeshesRef    = useRef([])
-
+  const snapshotMeshesRef = useRef([])
+  const yOffsetRef        = useRef(0)
   useEffect(() => {
     const t = threeRef.current
     if (!t) return
@@ -566,6 +568,7 @@ export default function SpaceBuilderCanvas({
         if (y < minY) minY = y
       }
       const yOffset = isFinite(minY) ? -minY : 0
+      yOffsetRef.current = yOffset  // shared with snapshot renderer
 
       const positions = new Float32Array(n * 3)
       const colors    = new Float32Array(n * 3)
@@ -663,6 +666,65 @@ export default function SpaceBuilderCanvas({
       }
     } catch (err) {
       console.warn('[SpaceBuilderCanvas] Could not render planes:', err)
+    }
+  }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Photorealistic snapshot planes ──────────────────────────────────────
+  // Render each captured camera snapshot as a semi-transparent textured quad
+  // anchored at the camera's world position, looking into the room.
+  // This overlays real photos onto the point cloud for a photorealistic effect.
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+
+    // Remove old snapshot meshes
+    for (const m of snapshotMeshesRef.current) {
+      t.scene.remove(m)
+      m.geometry.dispose()
+      m.material.map?.dispose()
+      m.material.dispose()
+    }
+    snapshotMeshesRef.current = []
+
+    const snapshots = roomScan?.snapshots
+    if (!snapshots?.length) return
+
+    const yOff = yOffsetRef.current
+    const texLoader = new THREE.TextureLoader()
+
+    for (const snap of snapshots) {
+      if (!snap?.dataUrl || !Array.isArray(snap.transform) || snap.transform.length !== 16) continue
+
+      // Build the camera-to-world matrix from the 16-float column-major array
+      const m = snap.transform
+      // Camera position (column 3)
+      const cx = m[12], cy = m[13] + yOff, cz = m[14]
+      // Camera forward is -Z column (ARKit camera looks along -Z)
+      const fx = -m[8], fy = -m[9], fz = -m[10]
+      const fLen = Math.sqrt(fx*fx + fy*fy + fz*fz) || 1
+      const fnx = fx/fLen, fny = fy/fLen, fnz = fz/fLen
+
+      // Place photo plane 3 m ahead of the camera (toward the wall it was looking at)
+      const DIST = 3.0
+      const px = cx + fnx * DIST
+      const py = cy + fny * DIST
+      const pz = cz + fnz * DIST
+
+      // 16:9-ish plane (3.5 × 2.6 m) — covers a wide-angle camera frustum at ~3 m
+      const geo = new THREE.PlaneGeometry(3.5, 2.6)
+      const tex = texLoader.load(snap.dataUrl)
+      tex.colorSpace = THREE.SRGBColorSpace
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex, side: THREE.FrontSide,
+        transparent: true, opacity: 0.78,
+        depthWrite: false,
+      })
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.position.set(px, py, pz)
+      // Face the camera position so the photo is visible from the viewpoint
+      mesh.lookAt(cx, cy, cz)
+      t.scene.add(mesh)
+      snapshotMeshesRef.current.push(mesh)
     }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -985,6 +1047,29 @@ export default function SpaceBuilderCanvas({
           onUpdateSurface={onUpdateSurface}
           onClose={() => setCropSurfaceId(null)}
         />
+      )}
+
+      {/* ── Add Surface from current 3D view (perspective warp) ─── */}
+      {onSurfaceFromView && (
+        <button
+          className="sbc-add-surface-btn"
+          title="Capture this view and apply perspective warp to create a new wall surface"
+          onClick={() => {
+            const t = threeRef.current
+            if (!t?.renderer) return
+            // Force a render so the canvas buffer is fresh
+            t.renderer.render(t.scene, t.camera)
+            const dataUrl = t.renderer.domElement.toDataURL('image/jpeg', 0.88)
+            onSurfaceFromView(dataUrl)
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="2" width="12" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+            <path d="M4 7.5L6 5.5L8 7L10 5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round"/>
+            <path d="M7 12v-2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+          </svg>
+          Add Surface
+        </button>
       )}
     </div>
   )
