@@ -84,10 +84,11 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 const SPLAT_VERT = /* glsl */`
   varying vec3 vColor;
   void main() {
-    vColor = color;                          // injected by Three.js (vertexColors:true)
+    vColor = color;
     vec4 mvPos  = modelViewMatrix * vec4(position, 1.0);
-    // ~4 cm world-radius disc; clamped 1.5–30 px on screen
-    gl_PointSize = clamp(56.0 / -mvPos.z, 1.5, 30.0);
+    // ~2 cm world-radius disc; at 2 m depth → ~5 px. Tight enough to look sharp
+    // while still overlapping enough to fill gaps where points are dense.
+    gl_PointSize = clamp(18.0 / -mvPos.z, 1.0, 12.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -95,10 +96,11 @@ const SPLAT_VERT = /* glsl */`
 const SPLAT_FRAG = /* glsl */`
   varying vec3 vColor;
   void main() {
-    vec2  uv = gl_PointCoord - 0.5;         // -0.5..0.5 over the point quad
+    vec2  uv = gl_PointCoord - 0.5;
     float r2 = dot(uv, uv);
-    if (r2 > 0.25) discard;                 // clip to circle (radius = 0.5)
-    float a  = exp(-r2 * 11.0) * 0.95;     // smooth Gaussian falloff
+    if (r2 > 0.25) discard;             // circle clip
+    // Sharp centre with quick falloff: tight Gaussian keeps points crisp
+    float a  = exp(-r2 * 22.0) * 0.97;
     gl_FragColor = vec4(vColor, a);
   }
 `

@@ -474,9 +474,13 @@ export default function App() {
   }, [])
 
   /* ── Space Builder save ──────────────────────────────── */
-  const handleSaveSpace = useCallback(async (space) => {
+  const handleSaveSpace = useCallback(async (space, onProgress) => {
+    const report = (pct) => { try { onProgress?.(pct) } catch {} }
+
     // Store the full space (including photo data URLs) as a room record.
+    report(5)
     await api.putRoom(space)
+    report(15)
     setRooms(prev => ({ ...prev, [space.id]: space }))
 
     // ── Upload all warped surface images first, then save walls with URLs ──
@@ -484,43 +488,43 @@ export default function App() {
     const existingWalls = {}
     setWalls(prev => { Object.assign(existingWalls, prev); return prev })
 
-    // Upload warped images and new inpaint results in parallel, then build wall objects
+    // Upload warped images and new inpaint results sequentially so progress is trackable
     const imageUrls   = {}
     const inpaintUrls = {}
-    await Promise.all(
-      space.surfaces.map(async surface => {
-        // Warped base image
-        if (surface.warpedDataUrl) {
+    const surfaces = space.surfaces
+    const uploadStep = 70 / Math.max(1, surfaces.length)  // 15% → 85% spread across uploads
+    for (let si = 0; si < surfaces.length; si++) {
+      const surface = surfaces[si]
+      if (surface.warpedDataUrl) {
+        try {
+          const { url } = await api.uploadWallImage(surface.id, surface.warpedDataUrl)
+          imageUrls[surface.id] = url
+        } catch (err) {
+          console.error('[handleSaveSpace] image upload failed for', surface.id, err)
+        }
+      }
+      if (surface.inpaintDataUrl) {
+        const existing     = existingWalls[surface.id]
+        const lastEraseUrl = existing?.eraseHistory?.at(-1)?.dataUrl ?? existing?.inpaintDataUrl
+        if (surface.inpaintDataUrl !== lastEraseUrl) {
           try {
-            const { url } = await api.uploadWallImage(surface.id, surface.warpedDataUrl)
-            imageUrls[surface.id] = url
-          } catch (err) {
-            console.error('[handleSaveSpace] image upload failed for', surface.id, err)
+            const { url } = await api.uploadWallInpaint(surface.id, surface.inpaintDataUrl)
+            inpaintUrls[surface.id] = url
+          } catch {
+            inpaintUrls[surface.id] = surface.inpaintDataUrl
           }
         }
-        // Inpaint/erase result — only upload if it differs from the last recorded entry
-        if (surface.inpaintDataUrl) {
-          const existing   = existingWalls[surface.id]
-          const lastEraseUrl = existing?.eraseHistory?.at(-1)?.dataUrl ?? existing?.inpaintDataUrl
-          if (surface.inpaintDataUrl !== lastEraseUrl) {
-            try {
-              const { url } = await api.uploadWallInpaint(surface.id, surface.inpaintDataUrl)
-              inpaintUrls[surface.id] = url
-            } catch {
-              inpaintUrls[surface.id] = surface.inpaintDataUrl  // keep data URL on failure
-            }
-          }
-        }
-      })
-    )
+      }
+      report(15 + Math.round(uploadStep * (si + 1)))
+    }
 
     // Now build wall objects — all URLs are resolved
+    report(88)
     const wallUpdates = {}
-    for (const surface of space.surfaces) {
+    for (const surface of surfaces) {
       const wallId   = surface.id
       const existing = existingWalls[wallId]
 
-      // Carry forward existing erase history; append new entry if inpaint changed
       let eraseHistory = existing?.eraseHistory || []
       if (inpaintUrls[wallId]) {
         eraseHistory = [...eraseHistory, { id: genId(), createdAt: Date.now(), dataUrl: inpaintUrls[wallId] }]
@@ -541,6 +545,7 @@ export default function App() {
     }
 
     setWalls(prev => ({ ...prev, ...wallUpdates }))
+    report(100)
   }, [])
 
   const handleDeleteSpace = useCallback(async (spaceId) => {

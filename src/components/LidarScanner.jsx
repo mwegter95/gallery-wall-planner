@@ -84,17 +84,58 @@ export default function LidarScanner({ onComplete, onCancel }) {
         }
         if (result.status === 'done') {
           setStatus('processing')
-          // Convert native flat-float array [x,y,z,r,g,b,...] into
-          // PointCloudBuffer JSON format { pointCount, data: base64 }
-          // so SpaceBuilderCanvas.fromJSON() can decode it correctly.
-          const pts = result.points
-          const buf = new PointCloudBuffer(result.pointCount)
-          for (let i = 0; i < pts.length; i += 6) {
-            buf.addPoint(pts[i], pts[i+1], pts[i+2], pts[i+3], pts[i+4], pts[i+5])
+          setProgress(0)
+
+          // New format: Swift sends raw Float32 bytes as base64 (much smaller/faster than JSON array).
+          // We decode it directly into a Float32Array with chunked atob to keep the UI responsive.
+          if (result.data) {
+            // Chunked base64 decode to avoid blocking the main thread
+            const b64 = result.data
+            const decoded = atob(b64)
+            const byteLen = decoded.length
+            const bytes = new Uint8Array(byteLen)
+            const CHUNK = 32768
+            let i = 0
+            const decodeStep = () => {
+              const end = Math.min(i + CHUNK, byteLen)
+              for (; i < end; i++) bytes[i] = decoded.charCodeAt(i)
+              setProgress(Math.round((i / byteLen) * 90))
+              if (i < byteLen) {
+                setTimeout(decodeStep, 0)
+              } else {
+                const arr = new Float32Array(bytes.buffer)
+                const buf = PointCloudBuffer.fromFloat32Array(arr, result.pointCount)
+                // Re-use buf.toJSON() but bypass the slow loop — data is already correct base64
+                // (Swift float32 LE bytes == JS Float32Array layout on ARM)
+                setProgress(95)
+                const pointCloud = { pointCount: result.pointCount, data: b64 }
+                const snapshots = snapshotsRef.current.slice()
+                setProgress(100)
+                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
+              }
+            }
+            setTimeout(decodeStep, 0)
+          } else {
+            // Legacy path: old format sent a JSON float array
+            const pts = result.points ?? []
+            const buf = new PointCloudBuffer(result.pointCount)
+            const CHUNK = 6000
+            let i = 0
+            const addStep = () => {
+              const end = Math.min(i + CHUNK, pts.length)
+              for (; i < end; i += 6) buf.addPoint(pts[i], pts[i+1], pts[i+2], pts[i+3], pts[i+4], pts[i+5])
+              setProgress(Math.round((i / pts.length) * 80))
+              if (i < pts.length) {
+                setTimeout(addStep, 0)
+              } else {
+                const pointCloud = buf.toJSON()
+                const snapshots = snapshotsRef.current.slice()
+                setProgress(100)
+                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
+              }
+            }
+            setTimeout(addStep, 0)
           }
-          const pointCloud = buf.toJSON()  // { pointCount, data: base64 }
-          const snapshots = snapshotsRef.current.slice()
-          onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
         }
       }
       setStatus('ready')
@@ -558,8 +599,12 @@ export default function LidarScanner({ onComplete, onCancel }) {
       <div className="lidar-overlay">
         <div className="lidar-card">
           <div className="lidar-spinner" />
-          <p className="lidar-status-text">Processing point cloud…</p>
+          <p className="lidar-status-text">Processing scan…</p>
           <p className="lidar-hint">{pointCount.toLocaleString()} points captured</p>
+          <div className="lidar-progress-track">
+            <div className="lidar-progress-fill" style={{ width: `${progress}%` }} />
+          </div>
+          <p className="lidar-progress-label">{progress}%</p>
         </div>
       </div>
     )

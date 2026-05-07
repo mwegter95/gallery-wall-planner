@@ -34,6 +34,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [stitchProgress,  setStitchProgress]  = useState(0)
   const [stitchStatus,    setStitchStatus]    = useState('')
   const [isSaving,        setIsSaving]        = useState(false)
+  const [saveProgress,    setSaveProgress]    = useState(0)    // 0-100 during save
   const [isDragOver,      setIsDragOver]      = useState(false)
   // Save Room popover
   const [showSaveMenu,    setShowSaveMenu]    = useState(false)
@@ -443,10 +444,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       ? { ...space, id: genId(), name: overrideName }  // save-as-new: fresh id + new name
       : space
     setIsSaving(true)
+    setSaveProgress(0)
     setShowSaveMenu(false)
     setSaveAsName('')
     try {
-      await onSave(spaceToSave)
+      await onSave(spaceToSave, (pct) => setSaveProgress(Math.round(pct)))
       setSavedSnapshot(JSON.stringify(spaceToSave.surfaces))
       setSavedRoomScanAt(spaceToSave.roomScan?.capturedAt ?? null)
       setScanSaveToast(false)
@@ -454,6 +456,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       if (overrideName) setSpace(spaceToSave)
     } finally {
       setIsSaving(false)
+      setSaveProgress(0)
     }
   }
 
@@ -787,6 +790,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 {isSaving ? <><span className="btn-spinner"/>Saving…</> : 'Save Room'}
               </button>
             </div>
+            {isSaving && (
+              <div className="sb-save-progress-wrap">
+                <div className="sb-save-progress-bar" style={{ width: `${saveProgress}%` }} />
+                <span className="sb-save-progress-label">{saveProgress}%</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1003,6 +1012,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                   </svg>
                 )}
               </button>
+              {isSaving && saveProgress > 0 && (
+                <div className="sb-toolbar-progress">
+                  <div className="sb-toolbar-progress-fill" style={{ width: `${saveProgress}%` }} />
+                </div>
+              )}
               {showSaveMenu && (
                 <div className="sb-save-menu">
                   {/* Overwrite existing */}
