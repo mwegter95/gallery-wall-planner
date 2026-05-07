@@ -508,23 +508,16 @@ export default function LidarScanner({ onComplete, onCancel }) {
   }
 
   if (status === 'scanning') {
+    // When running inside the native StageAR wrapper the full-screen ARSCNView
+    // takes over — this web HUD is hidden behind it. Show a minimal screen just
+    // in case the native view hasn't appeared yet, or for non-native WebXR path.
+    if (window.__stageARNative) {
+      // Native scan view is on top — just render nothing (blank behind it).
+      return null
+    }
     return (
       <div className="lidar-hud">
-        {/* Point count + progress ring */}
         <div className="lidar-hud-stats">
-          <svg className="lidar-ring" viewBox="0 0 60 60">
-            <circle cx="30" cy="30" r="25" stroke="rgba(52,211,153,0.15)" strokeWidth="4" fill="none"/>
-            <circle cx="30" cy="30" r="25"
-              stroke="#34d399" strokeWidth="4" fill="none"
-              strokeDasharray={`${2 * Math.PI * 25}`}
-              strokeDashoffset={`${2 * Math.PI * 25 * (1 - progress / 100)}`}
-              strokeLinecap="round"
-              transform="rotate(-90 30 30)"
-            />
-            <text x="30" y="34" textAnchor="middle" fontSize="11" fontWeight="700" fill="#34d399">
-              {progress}%
-            </text>
-          </svg>
           <div className="lidar-hud-label">
             <span className="lidar-pts">{pointCount.toLocaleString()}</span>
             <span className="lidar-pts-unit">points</span>
