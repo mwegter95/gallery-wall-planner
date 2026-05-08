@@ -83,23 +83,24 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 // between sample positions for a dense, photorealistic surface appearance.
 // ── Adaptive Gaussian Splat Shaders ────────────────────────────────────────
 //
-// Each point carries a `splatScale` attribute (0.25 = very dense, 2.0 = sparse)
-// computed from how many neighbours share its 5 cm voxel cell.
+// splatScale attribute (0.25–2.5) encodes local point density from 10 cm voxels.
 //
-//   Dense areas  (corners, rescanned surfaces):
-//     splatScale ≈ 0.25 → 3 px dot, tight Gaussian (exp * 18) → crisp & sharp
+//   Dense wall surfaces (many neighbours per voxel):
+//     splatScale ≈ 0.25–0.5 → small crisp dot, sharp gaussian → photo-accurate
 //
-//   Normal walls (moderate coverage):
-//     splatScale ≈ 1.0  → 8 px disc, medium Gaussian (exp * 12) → solid
+//   Typical coverage (a few points per voxel):
+//     splatScale ≈ 1.0 → medium disc, moderate gaussian → solid fill
 //
-//   Sparse gaps  (specular surfaces, scan edges):
-//     splatScale ≈ 2.0  → 16 px blob, wide Gaussian (exp * 5) → gap-filling
+//   Sparse gaps (scan edges, specular surfaces):
+//     splatScale ≈ 2.0–2.5 → wide soft blob → seamlessly bridges holes
 //
-// With depthWrite:false, overlapping blobs blend colours correctly via
-// standard alpha compositing; dense crisp cores prevent blur in covered areas.
+// KEY: gl_PointSize multiplies by projectionMatrix[5] (= cot(halfFOV_y)).
+// Narrower FOV / more zoom → larger cot → bigger dots in pixels, maintaining
+// consistent world-space coverage regardless of the zoom level.  Fish-eye
+// already has plenty of on-screen dots so the smaller fovComp there is fine.
 
 const SPLAT_VERT = /* glsl */`
-  attribute float splatScale;    // 0.25 (dense/crisp) → 2.0 (sparse/soft)
+  attribute float splatScale;    // 0.25 (dense) → 2.5 (sparse)
   varying   vec3  vColor;
   varying   float vScale;
 
@@ -107,9 +108,13 @@ const SPLAT_VERT = /* glsl */`
     vColor = color;
     vScale = splatScale;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-    // Base formula gives ~8 px at 3 m for a scale-1 point.
-    // Dense points (scale 0.25) → 2 px; sparse points (scale 2.0) → 16 px.
-    gl_PointSize = clamp(24.0 * splatScale / -mvPos.z, 1.5, 22.0);
+
+    // projectionMatrix[5] = cot(halfFOV_y):
+    //   60° FOV → 1.73   90° fish → 1.0   30° zoomed → 3.46
+    // Multiplying keeps world-space coverage constant as FOV changes.
+    // At 60° FOV, depth 3 m, splatScale 1.0: 18 * 1.73 / 3 ≈ 10 px radius.
+    float fovComp = projectionMatrix[5];
+    gl_PointSize = clamp(18.0 * splatScale * fovComp / -mvPos.z, 1.5, 52.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -121,15 +126,15 @@ const SPLAT_FRAG = /* glsl */`
   void main() {
     vec2  uv = gl_PointCoord - 0.5;
     float r2 = dot(uv, uv);
-    if (r2 > 0.25) discard;                     // circular clip
+    if (r2 > 0.25) discard;
 
-    // Gaussian exponent adapts to local density:
-    //   scale 0.25 (dense) → exponent 18  (sharp, crisp 2-px core)
-    //   scale 1.0  (normal) → exponent 12  (solid disc)
-    //   scale 2.0  (sparse) → exponent  5  (wide, gap-filling halo)
-    float t = clamp((vScale - 0.25) / 1.75, 0.0, 1.0);
-    float exponent = mix(18.0, 5.0, t);
-    float a = exp(-r2 * exponent) * 0.9;
+    // Gaussian exponent: dense → razor-sharp core; sparse → feathered halo
+    //   splatScale 0.25 → t=0 → exponent 22 (near-disc, crisp)
+    //   splatScale 1.0  → t=0.33 → exponent ~15 (solid)
+    //   splatScale 2.5  → t=1.0 → exponent  4 (very soft, gap-filling)
+    float t = clamp((vScale - 0.25) / 2.25, 0.0, 1.0);
+    float exponent = mix(22.0, 4.0, t);
+    float a = exp(-r2 * exponent) * 0.92;
 
     gl_FragColor = vec4(vColor, a);
   }
@@ -668,25 +673,30 @@ export default function SpaceBuilderCanvas({
         }
 
         // ── Per-point density scale (drives adaptive splat size & gaussian) ────
-        // 5 cm voxel grid: hash each point into a voxel, count occupants, then
-        // map count → splatScale: dense voxels → small crisp dots (0.25),
-        //                         sparse voxels → large soft blobs (2.0).
-        const CELL = 0.05
+        // 10 cm voxel grid.  A flat wall with ~1 pt/5 cm has ~4 pts per voxel →
+        // splatScale ≈ 1.0, giving nicely-sized dots that just touch neighbours.
+        // Truly isolated points get splatScale ≈ 2.5 → large soft blob fills the gap.
+        //
+        // Hash: polynomial multiply-add (no XOR, no bit-masking) gives a much
+        // better key distribution and virtually zero collision rate indoors.
+        const CELL = 0.10
+        const hashPoint = (b) => {
+          const ix = Math.floor(data[b]   / CELL)
+          const iy = Math.floor(data[b+1] / CELL)
+          const iz = Math.floor(data[b+2] / CELL)
+          return (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
+        }
         const denseCounts = new Map()
         for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const key = (((Math.floor(data[b]   / CELL) & 0x1FF) * 73856093) ^
-                       ((Math.floor(data[b+1] / CELL) & 0x1FF) * 19349663) ^
-                       ((Math.floor(data[b+2] / CELL) & 0x1FF) * 83492791)) | 0
+          const key = hashPoint(b)
           denseCounts.set(key, (denseCounts.get(key) || 0) + 1)
         }
         const splatScales = new Float32Array(n)
         for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const key = (((Math.floor(data[b]   / CELL) & 0x1FF) * 73856093) ^
-                       ((Math.floor(data[b+1] / CELL) & 0x1FF) * 19349663) ^
-                       ((Math.floor(data[b+2] / CELL) & 0x1FF) * 83492791)) | 0
-          const cnt = denseCounts.get(key) || 1
-          // sqrt dampens the scale so a 4× denser voxel only halves the splat size
-          splatScales[i] = Math.max(0.25, Math.min(2.0, 2.0 / Math.sqrt(cnt)))
+          const cnt = denseCounts.get(hashPoint(b)) || 1
+          // 2.5 / sqrt(cnt): sparse (cnt=1) → 2.5, moderate (cnt=4) → 1.25,
+          // dense (cnt=16) → 0.625, very dense (cnt=100) → 0.25 (clamped).
+          splatScales[i] = Math.max(0.25, Math.min(2.5, 2.5 / Math.sqrt(cnt)))
         }
 
         const geo = new THREE.BufferGeometry()
