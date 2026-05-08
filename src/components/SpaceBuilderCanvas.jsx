@@ -98,13 +98,25 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 const SPLAT_VERT = /* glsl */`
   attribute float splatScale;    // 0.25 (dense) → 1.5 (sparse)
   varying   vec3  vColor;
+  uniform   vec2  uResolution;   // framebuffer width, height in device pixels (after DPR)
 
   void main() {
     vColor = color;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-    // projectionMatrix[1][1] = cot(halfFOV_y): keeps coverage constant across FOV presets.
-    float fovComp = projectionMatrix[1][1];
-    gl_PointSize = clamp(7.0 * splatScale * fovComp / -mvPos.z, 1.5, 16.0);
+    // Resolution-aware disc sizing so surfaces fill solid at every screen size / DPR.
+    //
+    // Derivation:
+    //   A LiDAR sample in a dense wall is spaced ≈ 0.05 m apart on average.
+    //   We want each disc to cover ~1.5× that spacing (worldDia ≈ 0.075 m × splatScale).
+    //   pixels = worldDia * (fy_pixels / depth)
+    //   fy_pixels = projectionMatrix[1][1] * (framebufferHeight / 2)
+    //   → gl_PointSize = 0.075 * splatScale * projectionMatrix[1][1] * halfH / depth
+    //
+    // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizing correct across FOV presets.
+    // uResolution.y (framebuffer pixels) accounts for canvas size and retina DPR —
+    // without this, the same formula gives half-sized dots on a 2× Retina display.
+    float halfH = uResolution.y * 0.5;
+    gl_PointSize = clamp(0.075 * splatScale * projectionMatrix[1][1] * halfH / -mvPos.z, 2.0, 48.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -154,6 +166,9 @@ export default function SpaceBuilderCanvas({
   const [zoomRadius,    setZoomRadius]    = useState(8)   // mirrors orbit.radius for slider UI
   const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
   setZoomRef.current = setZoomRadius
+  // When a room scan is loaded, orbit switches to FPS mode (camera rotates in
+  // place at orbit.center) rather than classic third-person orbit around a pivot.
+  const cameraFPSRef = useRef(false)
   const [joyPos,        setJoyPos]        = useState({ x: 0, y: 0 }) // orbit thumb CSS offset
   const [panJoyPos,     setPanJoyPos]     = useState({ x: 0, y: 0 }) // pan thumb CSS offset
   const [fwdJoyPos,     setFwdJoyPos]     = useState({ x: 0, y: 0 }) // fwd/back thumb CSS offset
@@ -188,12 +203,25 @@ export default function SpaceBuilderCanvas({
     const orbit = { phi: 1.1, theta: 0.4, radius: 8, center: new THREE.Vector3() }
     function applyOrbit() {
       orbit.phi = Math.max(0.05, Math.min(Math.PI - 0.05, orbit.phi))
-      camera.position.set(
-        orbit.center.x + orbit.radius * Math.sin(orbit.phi) * Math.sin(orbit.theta),
-        orbit.center.y + orbit.radius * Math.cos(orbit.phi),
-        orbit.center.z + orbit.radius * Math.sin(orbit.phi) * Math.cos(orbit.theta),
-      )
-      camera.lookAt(orbit.center)
+      if (cameraFPSRef.current) {
+        // ── FPS mode (room scan loaded) ───────────────────────────────────────
+        // Camera sits at orbit.center and rotates in place — no external pivot.
+        // Dragging looks around, pan joystick strafes, fwd joystick/scroll flies.
+        camera.position.copy(orbit.center)
+        camera.lookAt(
+          orbit.center.x + Math.sin(orbit.phi) * Math.sin(orbit.theta),
+          orbit.center.y + Math.cos(orbit.phi),
+          orbit.center.z + Math.sin(orbit.phi) * Math.cos(orbit.theta),
+        )
+      } else {
+        // ── Classic orbit (surface-only mode) ────────────────────────────────
+        camera.position.set(
+          orbit.center.x + orbit.radius * Math.sin(orbit.phi) * Math.sin(orbit.theta),
+          orbit.center.y + orbit.radius * Math.cos(orbit.phi),
+          orbit.center.z + orbit.radius * Math.sin(orbit.phi) * Math.cos(orbit.theta),
+        )
+        camera.lookAt(orbit.center)
+      }
     }
     applyOrbit()
 
@@ -444,10 +472,21 @@ export default function SpaceBuilderCanvas({
     }
 
     function onWheel(e) {
-      // Allow radius as low as 0.1 m so the camera can move inside the room
-      orbit.radius = Math.max(0.1, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
-      applyOrbit()
-      setZoomRef.current(orbit.radius)
+      if (cameraFPSRef.current) {
+        // FPS: scroll flies along look direction (positive deltaY = scroll down = step back)
+        const sphi = Math.sin(orbit.phi), cphi = Math.cos(orbit.phi)
+        const sth  = Math.sin(orbit.theta), cth = Math.cos(orbit.theta)
+        const step = e.deltaY * 0.003
+        orbit.center.x -= sphi * sth * step
+        orbit.center.y -= cphi       * step
+        orbit.center.z -= sphi * cth * step
+        applyOrbit()
+      } else {
+        // Classic: scroll changes orbit radius
+        orbit.radius = Math.max(0.1, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
+        applyOrbit()
+        setZoomRef.current(orbit.radius)
+      }
     }
 
     function onDbl(e) {
@@ -505,6 +544,15 @@ export default function SpaceBuilderCanvas({
       camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
       renderer.setSize(mount.clientWidth, mount.clientHeight)
+      // Keep the point-cloud disc-size uniform in sync with the actual framebuffer
+      // dimensions (canvas CSS size × DPR). Without this, discs shrink on resize.
+      const pcm = pointCloudMeshRef.current
+      if (pcm?.material?.uniforms?.uResolution) {
+        pcm.material.uniforms.uResolution.value.set(
+          renderer.domElement.width,
+          renderer.domElement.height,
+        )
+      }
     })
     ro.observe(mount)
 
@@ -532,15 +580,23 @@ export default function SpaceBuilderCanvas({
         needsUpdate = true
       }
 
-      // Forward/Back (dolly) joystick — changes orbit.radius so the camera physically
-      // moves toward/away from the scene center WITHOUT moving orbit.center.
-      // Keeping orbit.center fixed means orbit always rotates around the same point.
-      // ny < 0 (joystick up) = forward = closer = decrease radius.
+      // Forward/Back (dolly) joystick.
+      // FPS mode: fly along the camera look direction (ny < 0 = joystick up = forward).
+      // Classic mode: change orbit.radius to dolly toward/away from the pivot.
       const fwd = fwdJoystickRef.current
       if (fwd.active && fwd.ny !== 0) {
-        const newR = Math.max(0.1, Math.min(80, orbit.radius + fwd.ny * DOLLY_SPEED))
-        orbit.radius = newR
-        setZoomRef.current(newR)
+        if (cameraFPSRef.current) {
+          const sphi = Math.sin(orbit.phi), cphi = Math.cos(orbit.phi)
+          const sth  = Math.sin(orbit.theta), cth = Math.cos(orbit.theta)
+          // ny < 0 (joystick up) = forward → add look direction
+          orbit.center.x += sphi * sth * (-fwd.ny) * DOLLY_SPEED
+          orbit.center.y += cphi       * (-fwd.ny) * DOLLY_SPEED
+          orbit.center.z += sphi * cth * (-fwd.ny) * DOLLY_SPEED
+        } else {
+          const newR = Math.max(0.1, Math.min(80, orbit.radius + fwd.ny * DOLLY_SPEED))
+          orbit.radius = newR
+          setZoomRef.current(newR)
+        }
         needsUpdate = true
       }
 
@@ -603,6 +659,9 @@ export default function SpaceBuilderCanvas({
       m.geometry.dispose(); m.material.dispose()
     }
     planeMeshesRef.current = []
+
+    // Switch orbit style based on whether a scan is loaded
+    cameraFPSRef.current = !!roomScan
 
     if (!roomScan) return
 
@@ -743,6 +802,14 @@ export default function SpaceBuilderCanvas({
           vertexColors: true,
           transparent: false,   // solid discs — no alpha blending halos
           depthWrite: true,     // correct depth occlusion between discs
+          uniforms: {
+            // Framebuffer dimensions in device pixels (CSS size × DPR).
+            // Used by the vertex shader to size discs so they fill gaps at any DPR.
+            uResolution: { value: new THREE.Vector2(
+              t.renderer.domElement.width,
+              t.renderer.domElement.height,
+            )},
+          },
           vertexShader: SPLAT_VERT,
           fragmentShader: SPLAT_FRAG,
         })
@@ -777,12 +844,12 @@ export default function SpaceBuilderCanvas({
           const bbox = geo.boundingBox
           const center = new THREE.Vector3()
           bbox.getCenter(center)
-          const sphere = new THREE.Sphere()
-          bbox.getBoundingSphere(sphere)
-          t.orbit.center.copy(center)
-          // Pull back enough to see the whole room; minimum 2m, max 20m
-          t.orbit.radius = Math.max(2, Math.min(20, sphere.radius * 1.8))
-          t.orbit.phi = 1.15  // ~66° from top — slightly above room center
+
+          // FPS mode: stand at room centre at eye height, look horizontally
+          const EYE_HEIGHT = 1.6   // metres above floor (yOffset already applied)
+          t.orbit.center.set(center.x, EYE_HEIGHT, center.z)
+          t.orbit.phi   = Math.PI / 2   // look horizontally
+          t.orbit.theta = 0.4           // initial heading (matches default)
           t.applyOrbit()
         } catch { /* ignore framing errors */ }
       } catch (err) {
@@ -845,8 +912,9 @@ export default function SpaceBuilderCanvas({
     buildCloud()
 
     // ── Surface reconstruction (async, after point cloud) ─────────────────
-    // Runs after the point cloud is visible so the user sees the room immediately.
-    // Voxelises points, box-blurs, extracts an isosurface mesh, Laplacian-smooths.
+    // Disabled: marching-cubes result was rejected (smoothed all colours to grey).
+    // The function is kept here for future work; it is NOT called on load.
+    // eslint-disable-next-line no-unused-vars
     async function buildSurface() {
       const pc = roomScan.pointCloud
       if (!pc) return
@@ -925,7 +993,7 @@ export default function SpaceBuilderCanvas({
       setReconstructing(false)
     }
 
-    buildSurface()
+    // buildSurface()  — disabled until surface reconstruction is ready
     return () => { cancelled = true }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1120,23 +1188,43 @@ export default function SpaceBuilderCanvas({
         <span className="sbc-ctrl-label">Zoom</span>
         <button
           className="sbc-zoom-btn"
-          title="Zoom in"
+          title={cameraFPSRef.current ? 'Step forward' : 'Zoom in'}
           onClick={() => {
-            const r = Math.max(ZOOM_MIN, zoomRadius * 0.8)
-            setZoomRadius(r)
-            const t = threeRef.current
-            if (t) { t.orbit.radius = r; t.applyOrbit() }
+            const t = threeRef.current; if (!t) return
+            if (cameraFPSRef.current) {
+              // FPS: step forward along look direction
+              const o = t.orbit
+              const sphi = Math.sin(o.phi), cphi = Math.cos(o.phi)
+              o.center.x += sphi * Math.sin(o.theta) * 0.5
+              o.center.y += cphi                      * 0.5
+              o.center.z += sphi * Math.cos(o.theta) * 0.5
+            } else {
+              const r = Math.max(ZOOM_MIN, zoomRadius * 0.8)
+              setZoomRadius(r)
+              t.orbit.radius = r
+            }
+            t.applyOrbit()
           }}
         >+</button>
         <span className="sbc-zoom-val">{radiusToSlider(zoomRadius).toFixed(0)}%</span>
         <button
           className="sbc-zoom-btn"
-          title="Zoom out"
+          title={cameraFPSRef.current ? 'Step back' : 'Zoom out'}
           onClick={() => {
-            const r = Math.min(ZOOM_MAX, zoomRadius * 1.25)
-            setZoomRadius(r)
-            const t = threeRef.current
-            if (t) { t.orbit.radius = r; t.applyOrbit() }
+            const t = threeRef.current; if (!t) return
+            if (cameraFPSRef.current) {
+              // FPS: step back
+              const o = t.orbit
+              const sphi = Math.sin(o.phi), cphi = Math.cos(o.phi)
+              o.center.x -= sphi * Math.sin(o.theta) * 0.5
+              o.center.y -= cphi                      * 0.5
+              o.center.z -= sphi * Math.cos(o.theta) * 0.5
+            } else {
+              const r = Math.min(ZOOM_MAX, zoomRadius * 1.25)
+              setZoomRadius(r)
+              t.orbit.radius = r
+            }
+            t.applyOrbit()
           }}
         >−</button>
       </div>
