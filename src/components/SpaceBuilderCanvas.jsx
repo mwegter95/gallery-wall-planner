@@ -113,7 +113,9 @@ const SPLAT_VERT = /* glsl */`
     //   60° FOV → 1.73   90° fish → 1.0   30° zoomed → 3.46
     // Multiplying keeps world-space coverage constant as FOV changes.
     // At 60° FOV, depth 3 m, splatScale 1.0: 18 * 1.73 / 3 ≈ 10 px radius.
-    float fovComp = projectionMatrix[5];
+    // projectionMatrix[1][1] = cot(halfFOV_y) in column-major GLSL mat4
+    // (col 1, row 1). Larger when zoomed in/narrow FOV → bigger dots in px.
+    float fovComp = projectionMatrix[1][1];
     gl_PointSize = clamp(18.0 * splatScale * fovComp / -mvPos.z, 1.5, 52.0);
     gl_Position  = projectionMatrix * mvPos;
   }
