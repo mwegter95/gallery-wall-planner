@@ -81,30 +81,56 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 // Each LiDAR point renders as a perspective-correct Gaussian disc rather than
 // a hard-edged square. Discs blend smoothly where they overlap, filling gaps
 // between sample positions for a dense, photorealistic surface appearance.
+// ── Adaptive Gaussian Splat Shaders ────────────────────────────────────────
+//
+// Each point carries a `splatScale` attribute (0.25 = very dense, 2.0 = sparse)
+// computed from how many neighbours share its 5 cm voxel cell.
+//
+//   Dense areas  (corners, rescanned surfaces):
+//     splatScale ≈ 0.25 → 3 px dot, tight Gaussian (exp * 18) → crisp & sharp
+//
+//   Normal walls (moderate coverage):
+//     splatScale ≈ 1.0  → 8 px disc, medium Gaussian (exp * 12) → solid
+//
+//   Sparse gaps  (specular surfaces, scan edges):
+//     splatScale ≈ 2.0  → 16 px blob, wide Gaussian (exp * 5) → gap-filling
+//
+// With depthWrite:false, overlapping blobs blend colours correctly via
+// standard alpha compositing; dense crisp cores prevent blur in covered areas.
+
 const SPLAT_VERT = /* glsl */`
-  varying vec3 vColor;
+  attribute float splatScale;    // 0.25 (dense/crisp) → 2.0 (sparse/soft)
+  varying   vec3  vColor;
+  varying   float vScale;
+
   void main() {
     vColor = color;
-    vec4 mvPos  = modelViewMatrix * vec4(position, 1.0);
-    // ~3 cm world-radius splat. At 3 m → 15 px, at 1.5 m → 30 px (clamped).
-    // 2.5× larger than the old formula so discs overlap and fill gaps.
-    gl_PointSize = clamp(45.0 / -mvPos.z, 2.0, 30.0);
+    vScale = splatScale;
+    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+    // Base formula gives ~8 px at 3 m for a scale-1 point.
+    // Dense points (scale 0.25) → 2 px; sparse points (scale 2.0) → 16 px.
+    gl_PointSize = clamp(24.0 * splatScale / -mvPos.z, 1.5, 22.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
 
 const SPLAT_FRAG = /* glsl */`
-  varying vec3 vColor;
+  varying vec3  vColor;
+  varying float vScale;
+
   void main() {
     vec2  uv = gl_PointCoord - 0.5;
     float r2 = dot(uv, uv);
-    if (r2 > 0.25) discard;              // circular clip
-    // Wide Gaussian (exponent 8 vs old 22): the full disc contributes.
-    // Old exp(-r2*22) was near-zero at half-radius — only 2 px of a 6 px disc showed.
-    // New exp(-r2*8) keeps ~14% alpha at the disc edge so adjacent splats blend.
-    // Max alpha 0.88 lets overlapping splats average their colors instead of
-    // the first-drawn point fully dominating a pixel.
-    float a = exp(-r2 * 8.0) * 0.88;
+    if (r2 > 0.25) discard;                     // circular clip
+
+    // Gaussian exponent adapts to local density:
+    //   scale 0.25 (dense) → exponent 18  (sharp, crisp 2-px core)
+    //   scale 1.0  (normal) → exponent 12  (solid disc)
+    //   scale 2.0  (sparse) → exponent  5  (wide, gap-filling halo)
+    float t = clamp((vScale - 0.25) / 1.75, 0.0, 1.0);
+    float exponent = mix(18.0, 5.0, t);
+    float a = exp(-r2 * exponent) * 0.9;
+
     gl_FragColor = vec4(vColor, a);
   }
 `
@@ -641,9 +667,32 @@ export default function SpaceBuilderCanvas({
           colors[i*3+2]    = data[base+5]
         }
 
+        // ── Per-point density scale (drives adaptive splat size & gaussian) ────
+        // 5 cm voxel grid: hash each point into a voxel, count occupants, then
+        // map count → splatScale: dense voxels → small crisp dots (0.25),
+        //                         sparse voxels → large soft blobs (2.0).
+        const CELL = 0.05
+        const denseCounts = new Map()
+        for (let i = 0, b = 0; i < n; i++, b += 6) {
+          const key = (((Math.floor(data[b]   / CELL) & 0x1FF) * 73856093) ^
+                       ((Math.floor(data[b+1] / CELL) & 0x1FF) * 19349663) ^
+                       ((Math.floor(data[b+2] / CELL) & 0x1FF) * 83492791)) | 0
+          denseCounts.set(key, (denseCounts.get(key) || 0) + 1)
+        }
+        const splatScales = new Float32Array(n)
+        for (let i = 0, b = 0; i < n; i++, b += 6) {
+          const key = (((Math.floor(data[b]   / CELL) & 0x1FF) * 73856093) ^
+                       ((Math.floor(data[b+1] / CELL) & 0x1FF) * 19349663) ^
+                       ((Math.floor(data[b+2] / CELL) & 0x1FF) * 83492791)) | 0
+          const cnt = denseCounts.get(key) || 1
+          // sqrt dampens the scale so a 4× denser voxel only halves the splat size
+          splatScales[i] = Math.max(0.25, Math.min(2.0, 2.0 / Math.sqrt(cnt)))
+        }
+
         const geo = new THREE.BufferGeometry()
-        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-        geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
+        geo.setAttribute('position',   new THREE.BufferAttribute(positions,  3))
+        geo.setAttribute('color',      new THREE.BufferAttribute(colors,     3))
+        geo.setAttribute('splatScale', new THREE.BufferAttribute(splatScales, 1))
 
         const mat = new THREE.ShaderMaterial({
           vertexColors: true,
