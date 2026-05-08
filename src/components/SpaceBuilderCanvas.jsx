@@ -78,71 +78,45 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
   })
 }
 
-// ── Gaussian-splat shaders ─────────────────────────────────────────────────
-// Each LiDAR point renders as a perspective-correct Gaussian disc rather than
-// a hard-edged square. Discs blend smoothly where they overlap, filling gaps
-// between sample positions for a dense, photorealistic surface appearance.
-// ── Adaptive Gaussian Splat Shaders ────────────────────────────────────────
+// ── Solid-disc splat shaders ────────────────────────────────────────────────
+// Each LiDAR point renders as a solid opaque disc with a hard circular clip.
+// depthWrite: true + opaque alpha means discs correctly occlude one another,
+// so the point cloud reads as a solid coloured surface rather than a cloud of
+// semi-transparent halos.
 //
-// splatScale attribute (0.25–2.5) encodes local point density from 10 cm voxels.
+// splatScale (0.25–1.5) is still computed from 10 cm voxel density and drives
+// disc size so dense regions stay crisp while sparse gap areas fill in slightly.
 //
-//   Dense wall surfaces (many neighbours per voxel):
-//     splatScale ≈ 0.25–0.5 → small crisp dot, sharp gaussian → photo-accurate
-//
-//   Typical coverage (a few points per voxel):
-//     splatScale ≈ 1.0 → medium disc, moderate gaussian → solid fill
-//
-//   Sparse gaps (scan edges, specular surfaces):
-//     splatScale ≈ 2.0–2.5 → wide soft blob → seamlessly bridges holes
-//
-// KEY: gl_PointSize multiplies by projectionMatrix[5] (= cot(halfFOV_y)).
-// Narrower FOV / more zoom → larger cot → bigger dots in pixels, maintaining
-// consistent world-space coverage regardless of the zoom level.  Fish-eye
-// already has plenty of on-screen dots so the smaller fovComp there is fine.
+// Sizing math (solid discs need ~10–20 % less radius than Gaussian blobs):
+//   projectionMatrix[1][1] = cot(halfFOV_y) in column-major GLSL mat4.
+//   At 55° FOV (cot≈2.05), depth 3 m, splatScale 1.0 → 7.0 * 2.05 / 3 ≈ 4.8 px.
+//   Average inter-point gap at 3 m with 10 M points ≈ 1.15 px → gap completely
+//   closed by a 2.4 px-radius opaque disc. Minimum 1.5 px ensures single-pixel
+//   points are still visible at maximum zoom-out.
 
 const SPLAT_VERT = /* glsl */`
-  attribute float splatScale;    // 0.25 (dense) → 2.5 (sparse)
+  attribute float splatScale;    // 0.25 (dense) → 1.5 (sparse)
   varying   vec3  vColor;
-  varying   float vScale;
 
   void main() {
     vColor = color;
-    vScale = splatScale;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-
-    // projectionMatrix[5] = cot(halfFOV_y):
-    //   60° FOV → 1.73   90° fish → 1.0   30° zoomed → 3.46
-    // Multiplying keeps world-space coverage constant as FOV changes.
-    // At 60° FOV, depth 3 m, splatScale 1.0: 18 * 1.73 / 3 ≈ 10 px radius.
-    // projectionMatrix[1][1] = cot(halfFOV_y) in column-major GLSL mat4
-    // (col 1, row 1). Larger when zoomed in/narrow FOV → bigger dots in px.
+    // projectionMatrix[1][1] = cot(halfFOV_y): keeps coverage constant across FOV presets.
     float fovComp = projectionMatrix[1][1];
-    // Multiplier 10: at 60° FOV (fovComp≈1.73), depth 3m, splatScale 1.0 → 5.8px radius.
-    // SOR removes true outliers so splatScale never exceeds 1.5 → max ~8.7px radius (17px dia).
-    gl_PointSize = clamp(10.0 * splatScale * fovComp / -mvPos.z, 1.5, 24.0);
+    gl_PointSize = clamp(7.0 * splatScale * fovComp / -mvPos.z, 1.5, 16.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
 
 const SPLAT_FRAG = /* glsl */`
   varying vec3  vColor;
-  varying float vScale;
 
   void main() {
-    vec2  uv = gl_PointCoord - 0.5;
-    float r2 = dot(uv, uv);
-    if (r2 > 0.25) discard;
-
-    // Gaussian exponent: dense → razor-sharp core; sparse → feathered halo
-    //   splatScale 0.25 (dense)  → t=0   → exponent 22 (crisp disc)
-    //   splatScale 0.75 (normal) → t=0.4 → exponent ~14 (solid)
-    //   splatScale 1.5  (sparse) → t=1.0 → exponent  5 (soft gap-filler)
-    // Range is 0.25–1.5 because SOR removes outliers, capping useful splatScale.
-    float t = clamp((vScale - 0.25) / 1.25, 0.0, 1.0);
-    float exponent = mix(22.0, 4.0, t);
-    float a = exp(-r2 * exponent) * 0.92;
-
-    gl_FragColor = vec4(vColor, a);
+    // Hard circular clip — discard the corners of the GL_POINT square.
+    // This gives clean circular discs with no semi-transparent halos.
+    vec2 uv = gl_PointCoord - 0.5;
+    if (dot(uv, uv) > 0.25) discard;
+    gl_FragColor = vec4(vColor, 1.0);
   }
 `
 
@@ -766,8 +740,8 @@ export default function SpaceBuilderCanvas({
 
         const mat = new THREE.ShaderMaterial({
           vertexColors: true,
-          transparent: true,
-          depthWrite: false,
+          transparent: false,   // solid discs — no alpha blending halos
+          depthWrite: true,     // correct depth occlusion between discs
           vertexShader: SPLAT_VERT,
           fragmentShader: SPLAT_FRAG,
         })
@@ -1117,26 +1091,7 @@ export default function SpaceBuilderCanvas({
           >{p.label}</button>
         ))}
 
-        {/* ── View mode toggle (Points / Surface) ─────────── */}
-        {roomScan?.pointCloud && (
-          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span className="sbc-ctrl-label">VIEW</span>
-            <button
-              className={`sbc-fov-btn${viewMode === 'points' ? ' sbc-fov-btn--active' : ''}`}
-              onClick={() => setViewMode('points')}
-              title="Show raw point cloud"
-            >Points</button>
-            <button
-              className={`sbc-fov-btn${viewMode === 'surface' ? ' sbc-fov-btn--active' : ''}`}
-              onClick={() => setViewMode('surface')}
-              title="Show reconstructed surface mesh"
-              disabled={reconstructing || !surfaceMeshRef.current}
-              style={{ opacity: reconstructing ? 0.5 : 1, position: 'relative' }}
-            >
-              {reconstructing ? '…' : 'Surface'}
-            </button>
-          </div>
-        )}
+        {/* Surface mode toggle hidden — marching cubes result not ready yet */}
       </div>
 
       {/* ── Zoom controls — right side, vertical ─────────────────────── */}
