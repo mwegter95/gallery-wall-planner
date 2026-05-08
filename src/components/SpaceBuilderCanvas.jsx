@@ -4,11 +4,12 @@
  * Shift+drag = move Y | Arrow keys = rotate selected | Dbl-click = crop editor
  * Edge snap: drag a surface near another's edge → release to connect
  */
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
+import { reconstructSurface } from '../utils/surfaceReconstruction'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -172,6 +173,9 @@ export default function SpaceBuilderCanvas({
   const [snapHint,      setSnapHint]      = useState(null)
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   const [fov,           setFov]           = useState(55)
+  const [viewMode,      setViewMode]      = useState('points')   // 'points' | 'surface'
+  const [reconstructing, setReconstructing] = useState(false)
+  const surfaceMeshRef = useRef(null)   // holds the reconstructed mesh THREE.Mesh
   const [zoomRadius,    setZoomRadius]    = useState(8)   // mirrors orbit.radius for slider UI
   const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
   setZoomRef.current = setZoomRadius
@@ -606,12 +610,18 @@ export default function SpaceBuilderCanvas({
     const t = threeRef.current
     if (!t) return
 
-    // Remove old point cloud + plane meshes
+    // Remove old point cloud + surface mesh + plane meshes
     if (pointCloudMeshRef.current) {
       t.scene.remove(pointCloudMeshRef.current)
       pointCloudMeshRef.current.geometry.dispose()
       pointCloudMeshRef.current.material.dispose()
       pointCloudMeshRef.current = null
+    }
+    if (surfaceMeshRef.current) {
+      t.scene.remove(surfaceMeshRef.current)
+      surfaceMeshRef.current.geometry.dispose()
+      surfaceMeshRef.current.material.dispose()
+      surfaceMeshRef.current = null
     }
     for (const m of planeMeshesRef.current) {
       t.scene.remove(m)
@@ -838,8 +848,99 @@ export default function SpaceBuilderCanvas({
     }
 
     buildCloud()
+
+    // ── Surface reconstruction (async, after point cloud) ─────────────────
+    // Runs after the point cloud is visible so the user sees the room immediately.
+    // Voxelises points, box-blurs, extracts an isosurface mesh, Laplacian-smooths.
+    async function buildSurface() {
+      const pc = roomScan.pointCloud
+      if (!pc) return
+
+      // Re-resolve the buffer (same logic as buildCloud — buf may not be closured)
+      let buf
+      try {
+        if (pc?._buffer) {
+          buf = pc._buffer
+        } else if (pc?.url) {
+          const resp = await fetch(pc.url)
+          if (!resp.ok) return
+          const ab = await resp.arrayBuffer()
+          buf = PointCloudBuffer.fromFloat32Array(new Float32Array(ab), pc.pointCount)
+        } else if (pc?.data) {
+          buf = PointCloudBuffer.fromJSON(pc)
+        } else { return }
+      } catch { return }
+
+      if (cancelled) return
+      setReconstructing(true)
+
+      // Yield to browser so the point cloud renders first
+      await new Promise(r => setTimeout(r, 50))
+      if (cancelled) { setReconstructing(false); return }
+
+      let result
+      try {
+        result = reconstructSurface(buf, {
+          cellSize:     0.07,   // 7 cm voxels — good balance of quality vs speed
+          smoothPasses: 4,      // Laplacian iterations to soften voxel edges
+          yOffset:      yOffsetRef.current,
+        })
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] Surface reconstruction failed:', err)
+        setReconstructing(false)
+        return
+      }
+
+      if (cancelled || !result) { setReconstructing(false); return }
+
+      try {
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.BufferAttribute(result.positions, 3))
+        geo.setAttribute('color',    new THREE.BufferAttribute(result.colors,    3))
+        geo.setIndex(new THREE.BufferAttribute(result.indices, 1))
+        geo.computeVertexNormals()
+
+        const mat = new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          roughness:    0.85,
+          metalness:    0.0,
+          side:         THREE.DoubleSide,
+        })
+
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.visible = false   // hidden by default; user toggles in 'surface' mode
+
+        // Add ambient + directional light to scene if not already present
+        const t2 = threeRef.current
+        if (t2 && !t2.scene.getObjectByName('__reconLight')) {
+          const amb = new THREE.AmbientLight(0xffffff, 0.65)
+          amb.name = '__reconLight'
+          const dir = new THREE.DirectionalLight(0xffffff, 0.9)
+          dir.name = '__reconDir'
+          dir.position.set(2, 8, 4)
+          t2.scene.add(amb, dir)
+        }
+
+        if (cancelled) { geo.dispose(); mat.dispose(); setReconstructing(false); return }
+        const t3 = threeRef.current
+        if (t3) { t3.scene.add(mesh); surfaceMeshRef.current = mesh }
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] Could not add surface mesh:', err)
+      }
+      setReconstructing(false)
+    }
+
+    buildSurface()
     return () => { cancelled = true }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Toggle point cloud / surface mesh visibility based on viewMode ─────────
+  useEffect(() => {
+    const pc = pointCloudMeshRef.current
+    const sm = surfaceMeshRef.current
+    if (pc) pc.visible = (viewMode === 'points')
+    if (sm) sm.visible = (viewMode === 'surface')
+  }, [viewMode, reconstructing])  // re-run after reconstruction finishes too
 
   // ── Photorealistic snapshot planes (DISABLED) ────────────────────────────
   // Photo overlay approach parked — dense Gaussian splat point cloud used instead.
@@ -1015,6 +1116,27 @@ export default function SpaceBuilderCanvas({
             title={`${p.fov}° field of view`}
           >{p.label}</button>
         ))}
+
+        {/* ── View mode toggle (Points / Surface) ─────────── */}
+        {roomScan?.pointCloud && (
+          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span className="sbc-ctrl-label">VIEW</span>
+            <button
+              className={`sbc-fov-btn${viewMode === 'points' ? ' sbc-fov-btn--active' : ''}`}
+              onClick={() => setViewMode('points')}
+              title="Show raw point cloud"
+            >Points</button>
+            <button
+              className={`sbc-fov-btn${viewMode === 'surface' ? ' sbc-fov-btn--active' : ''}`}
+              onClick={() => setViewMode('surface')}
+              title="Show reconstructed surface mesh"
+              disabled={reconstructing || !surfaceMeshRef.current}
+              style={{ opacity: reconstructing ? 0.5 : 1, position: 'relative' }}
+            >
+              {reconstructing ? '…' : 'Surface'}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Zoom controls — right side, vertical ─────────────────────── */}
