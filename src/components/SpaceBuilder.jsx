@@ -25,10 +25,18 @@ const MAX_HISTORY = 50
 const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
 
 export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, walls = {}, rooms = {} }) {
-  const [space, setSpace]                 = useState(() => existingSpace
-    ? JSON.parse(JSON.stringify(existingSpace))
-    : createSpace()
-  )
+  const [space, setSpace]                 = useState(() => {
+    if (!existingSpace) return createSpace()
+    // Deep-clone the space for local editing, but preserve the PointCloudBuffer
+    // _buffer reference — it's a class instance whose Float32Array backing and
+    // getters are destroyed by JSON round-tripping (they become a plain object).
+    const cloned = JSON.parse(JSON.stringify(existingSpace))
+    const liveBuffer = existingSpace.roomScan?.pointCloud?._buffer
+    if (liveBuffer && cloned.roomScan?.pointCloud) {
+      cloned.roomScan.pointCloud._buffer = liveBuffer
+    }
+    return cloned
+  })
   const [activeSurfaceId, setActiveSurfaceId] = useState(null)
   const [isStitching,     setIsStitching]     = useState(false)
   const [stitchProgress,  setStitchProgress]  = useState(0)

@@ -1379,6 +1379,10 @@ kbd {
   border-radius: 8px;
   overflow: visible;
   max-width: 100%;
+  /* Extra padding on all sides so handles at the very edge of the photo
+     are never visually cut off or unclickable. The svg overlay uses
+     pointer-events:none so the padding area still passes touches through. */
+  padding: 18px;
   /* Prevent scroll and long-press callout from starting anywhere in the image/handle zone */
   touch-action: none;
   -webkit-touch-callout: none;
@@ -1388,7 +1392,8 @@ kbd {
 
 .ws-photo {
   max-width: 100%;
-  max-height: calc(96vh - 200px);
+  /* Reduce max-height to compensate for the 18 px padding top+bottom */
+  max-height: calc(96vh - 240px);
   display: block;
   border-radius: 8px;
   user-select: none;

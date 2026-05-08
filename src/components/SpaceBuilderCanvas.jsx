@@ -10,6 +10,7 @@ import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructSurface } from '../utils/surfaceReconstruction'
+import { buildPhotoColors } from '../utils/photoMesh'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -750,6 +751,26 @@ export default function SpaceBuilderCanvas({
         t.scene.add(points)
         pointCloudMeshRef.current = points
 
+        // ── Photo retexture (async, after cloud is visible) ────────────────
+        // If snapshots with camera intrinsics were captured during the scan,
+        // replace the low-res depth-sensor colours with high-res JPEG samples.
+        // The colAttr.array reference stays live in Three.js, so mutating it
+        // and setting needsUpdate is sufficient — no geometry rebuild needed.
+        const snapshots = roomScan.snapshots?.filter(s => s.intrinsics?.length === 6)
+        if (snapshots?.length) {
+          ;(async () => {
+            try {
+              const newColors = await buildPhotoColors(buf, snapshots)
+              if (cancelled || !newColors) return
+              const colAttr = geo.getAttribute('color')
+              colAttr.array.set(newColors)
+              colAttr.needsUpdate = true
+            } catch (err) {
+              console.warn('[SpaceBuilderCanvas] Photo retexture failed:', err)
+            }
+          })()
+        }
+
         // Auto-frame the camera to show the full room scan
         try {
           geo.computeBoundingBox()
@@ -1225,7 +1246,7 @@ export default function SpaceBuilderCanvas({
         <span>Dbl-click: crop corners</span>
         <span>Scroll: zoom in/out</span>
       </div>
-      {space.surfaces.length === 0 && (
+      {space.surfaces.length === 0 && !roomScan && (
         <div className="sbc-3d-empty">
           <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
             <rect x="4" y="12" width="48" height="32" rx="4" stroke="#4a9eff" strokeWidth="2"/>
@@ -1263,7 +1284,7 @@ export default function SpaceBuilderCanvas({
             <path d="M4 7.5L6 5.5L8 7L10 5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round"/>
             <path d="M7 12v-2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
           </svg>
-          Add Surface
+          {roomScan ? 'Declare Surface' : 'Add Surface'}
         </button>
       )}
     </div>

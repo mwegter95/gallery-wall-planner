@@ -75,8 +75,13 @@ export default function LidarScanner({ onComplete, onCancel }) {
           return
         }
         if (result.status === 'snapshot') {
-          // Accumulate photorealistic reference photos during the scan
-          snapshotsRef.current.push({ dataUrl: result.dataUrl, transform: result.transform })
+          // Accumulate high-res reference photos during the scan.
+          // intrinsics = [fx, fy, cx, cy, imageWidth, imageHeight] at JPEG resolution.
+          snapshotsRef.current.push({
+            dataUrl:    result.dataUrl,
+            transform:  result.transform,   // column-major 4×4 camera→world (16 floats)
+            intrinsics: result.intrinsics,  // [fx, fy, cx, cy, w, h]
+          })
           return
         }
         // ── Real-time chunk from Swift ──────────────────────────────────────
