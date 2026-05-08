@@ -86,9 +86,9 @@ const SPLAT_VERT = /* glsl */`
   void main() {
     vColor = color;
     vec4 mvPos  = modelViewMatrix * vec4(position, 1.0);
-    // ~2 cm world-radius disc; at 2 m depth → ~5 px. Tight enough to look sharp
-    // while still overlapping enough to fill gaps where points are dense.
-    gl_PointSize = clamp(18.0 / -mvPos.z, 1.0, 12.0);
+    // ~3 cm world-radius splat. At 3 m → 15 px, at 1.5 m → 30 px (clamped).
+    // 2.5× larger than the old formula so discs overlap and fill gaps.
+    gl_PointSize = clamp(45.0 / -mvPos.z, 2.0, 30.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -98,9 +98,13 @@ const SPLAT_FRAG = /* glsl */`
   void main() {
     vec2  uv = gl_PointCoord - 0.5;
     float r2 = dot(uv, uv);
-    if (r2 > 0.25) discard;             // circle clip
-    // Sharp centre with quick falloff: tight Gaussian keeps points crisp
-    float a  = exp(-r2 * 22.0) * 0.97;
+    if (r2 > 0.25) discard;              // circular clip
+    // Wide Gaussian (exponent 8 vs old 22): the full disc contributes.
+    // Old exp(-r2*22) was near-zero at half-radius — only 2 px of a 6 px disc showed.
+    // New exp(-r2*8) keeps ~14% alpha at the disc edge so adjacent splats blend.
+    // Max alpha 0.88 lets overlapping splats average their colors instead of
+    // the first-drawn point fully dominating a pixel.
+    float a = exp(-r2 * 8.0) * 0.88;
     gl_FragColor = vec4(vColor, a);
   }
 `
