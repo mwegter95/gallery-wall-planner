@@ -116,7 +116,9 @@ const SPLAT_VERT = /* glsl */`
     // projectionMatrix[1][1] = cot(halfFOV_y) in column-major GLSL mat4
     // (col 1, row 1). Larger when zoomed in/narrow FOV → bigger dots in px.
     float fovComp = projectionMatrix[1][1];
-    gl_PointSize = clamp(18.0 * splatScale * fovComp / -mvPos.z, 1.5, 52.0);
+    // Multiplier 10: at 60° FOV (fovComp≈1.73), depth 3m, splatScale 1.0 → 5.8px radius.
+    // SOR removes true outliers so splatScale never exceeds 1.5 → max ~8.7px radius (17px dia).
+    gl_PointSize = clamp(10.0 * splatScale * fovComp / -mvPos.z, 1.5, 24.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -131,10 +133,11 @@ const SPLAT_FRAG = /* glsl */`
     if (r2 > 0.25) discard;
 
     // Gaussian exponent: dense → razor-sharp core; sparse → feathered halo
-    //   splatScale 0.25 → t=0 → exponent 22 (near-disc, crisp)
-    //   splatScale 1.0  → t=0.33 → exponent ~15 (solid)
-    //   splatScale 2.5  → t=1.0 → exponent  4 (very soft, gap-filling)
-    float t = clamp((vScale - 0.25) / 2.25, 0.0, 1.0);
+    //   splatScale 0.25 (dense)  → t=0   → exponent 22 (crisp disc)
+    //   splatScale 0.75 (normal) → t=0.4 → exponent ~14 (solid)
+    //   splatScale 1.5  (sparse) → t=1.0 → exponent  5 (soft gap-filler)
+    // Range is 0.25–1.5 because SOR removes outliers, capping useful splatScale.
+    float t = clamp((vScale - 0.25) / 1.25, 0.0, 1.0);
     float exponent = mix(22.0, 4.0, t);
     float a = exp(-r2 * exponent) * 0.92;
 
@@ -648,57 +651,102 @@ export default function SpaceBuilderCanvas({
 
       // ── Build colored point cloud ─────────────────────────────────
       try {
-        const data = buf.toFloat32Array()  // [x,y,z,r,g,b, ...]
-        const n = buf.pointCount
+        // Zero-copy: access buf._data directly rather than toFloat32Array()
+        // which would copy the entire array (240 MB for a 10M-point scan).
+        const rawData = buf._data
+        const n       = buf.pointCount
 
-        // ARKit Y=0 is at the camera's starting height, so the floor is at ~-1.5 m.
-        // Find the minimum Y (floor level) and shift all points up so the floor
-        // lands on the Three.js grid (which sits at Y=0).
-        let minY = Infinity
-        for (let i = 0; i < n; i++) {
-          const y = data[i * 6 + 1]
-          if (y < minY) minY = y
-        }
-        const yOffset = isFinite(minY) ? -minY : 0
-        yOffsetRef.current = yOffset  // shared with snapshot renderer
-
-        const positions = new Float32Array(n * 3)
-        const colors    = new Float32Array(n * 3)
-        for (let i = 0; i < n; i++) {
-          const base = i * 6
-          positions[i*3]   = data[base]
-          positions[i*3+1] = data[base+1] + yOffset
-          positions[i*3+2] = data[base+2]
-          colors[i*3]      = data[base+3]
-          colors[i*3+1]    = data[base+4]
-          colors[i*3+2]    = data[base+5]
-        }
-
-        // ── Per-point density scale (drives adaptive splat size & gaussian) ────
-        // 10 cm voxel grid.  A flat wall with ~1 pt/5 cm has ~4 pts per voxel →
-        // splatScale ≈ 1.0, giving nicely-sized dots that just touch neighbours.
-        // Truly isolated points get splatScale ≈ 2.5 → large soft blob fills the gap.
+        // ── 3-pass algorithm ─────────────────────────────────────────────────
         //
-        // Hash: polynomial multiply-add (no XOR, no bit-masking) gives a much
-        // better key distribution and virtually zero collision rate indoors.
-        const CELL = 0.10
-        const hashPoint = (b) => {
-          const ix = Math.floor(data[b]   / CELL)
-          const iy = Math.floor(data[b+1] / CELL)
-          const iz = Math.floor(data[b+2] / CELL)
-          return (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
-        }
-        const denseCounts = new Map()
+        // Pass 1: build 10 cm voxel grid + precompute per-point hash key + find minY.
+        //   Each voxel accumulates the count of points inside it.
+        //
+        // Pass 2: Statistical Outlier Removal (SOR) for singleton voxels.
+        //   A singleton whose 3×3×3 neighbourhood has fewer than SOR_MIN total
+        //   points is a noisy LiDAR return (floating blob in air, specular ghost).
+        //   These are the source of the random giant splats — we remove them.
+        //   Only singletons are checked, so the 27-cell lookup runs on a tiny
+        //   fraction of the total point count.
+        //
+        // Pass 3: build typed arrays, skipping outliers, assigning splatScale
+        //   from local voxel density.  splatScale is capped at 1.5 because SOR
+        //   ensures no truly isolated point remains.
+        //
+        const CELL     = 0.10        // voxel size in metres
+        const CELL_INV = 10.0        // 1 / CELL
+        const SOR_MIN  = 5           // neighbourhood points required to keep a singleton
+
+        const hashXYZ = (ix, iy, iz) =>
+          (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
+
+        // ── Pass 1 ───────────────────────────────────────────────────────────
+        const voxelCounts = new Map()
+        const voxelKeys   = new Int32Array(n)
+        let   minY        = Infinity
+
         for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const key = hashPoint(b)
-          denseCounts.set(key, (denseCounts.get(key) || 0) + 1)
+          const y = rawData[b + 1]
+          if (y < minY) minY = y
+
+          const ix  = Math.floor(rawData[b]   * CELL_INV)
+          const iy  = Math.floor(rawData[b+1] * CELL_INV)
+          const iz  = Math.floor(rawData[b+2] * CELL_INV)
+          const key = hashXYZ(ix, iy, iz)
+          voxelKeys[i] = key
+          voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
         }
-        const splatScales = new Float32Array(n)
+
+        const yOffset = isFinite(minY) ? -minY : 0
+        yOffsetRef.current = yOffset
+
+        // ── Pass 2: SOR ──────────────────────────────────────────────────────
+        // Build the set of singleton voxels and record one data-offset per key
+        // (we need it to recompute ix/iy/iz for the neighbourhood lookup).
+        const singletonOffset = new Map()   // key → raw-data byte offset b
         for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const cnt = denseCounts.get(hashPoint(b)) || 1
-          // 2.5 / sqrt(cnt): sparse (cnt=1) → 2.5, moderate (cnt=4) → 1.25,
-          // dense (cnt=16) → 0.625, very dense (cnt=100) → 0.25 (clamped).
-          splatScales[i] = Math.max(0.25, Math.min(2.5, 2.5 / Math.sqrt(cnt)))
+          const key = voxelKeys[i]
+          if ((voxelCounts.get(key) || 0) === 1) singletonOffset.set(key, b)
+        }
+
+        const outlierKeys = new Set()
+        for (const [key, b] of singletonOffset) {
+          const ix = Math.floor(rawData[b]   * CELL_INV)
+          const iy = Math.floor(rawData[b+1] * CELL_INV)
+          const iz = Math.floor(rawData[b+2] * CELL_INV)
+          let nhTotal = 0
+          outer: for (let dx = -1; dx <= 1; dx++)
+            for (let dy = -1; dy <= 1; dy++)
+              for (let dz = -1; dz <= 1; dz++) {
+                nhTotal += voxelCounts.get(hashXYZ(ix+dx, iy+dy, iz+dz)) || 0
+                if (nhTotal >= SOR_MIN) break outer  // early-exit once threshold met
+              }
+          if (nhTotal < SOR_MIN) outlierKeys.add(key)
+        }
+
+        // ── Pass 3: geometry arrays ──────────────────────────────────────────
+        // Each outlier key has exactly one point (cnt=1), so:
+        const validCount  = n - outlierKeys.size
+        const positions   = new Float32Array(validCount * 3)
+        const colors      = new Float32Array(validCount * 3)
+        const splatScales = new Float32Array(validCount)
+        let vi = 0
+
+        for (let i = 0, b = 0; i < n; i++, b += 6) {
+          const key = voxelKeys[i]
+          if (outlierKeys.has(key)) continue
+
+          const cnt = voxelCounts.get(key) || 1
+          positions[vi*3]   = rawData[b]
+          positions[vi*3+1] = rawData[b+1] + yOffset
+          positions[vi*3+2] = rawData[b+2]
+          colors[vi*3]      = rawData[b+3]
+          colors[vi*3+1]    = rawData[b+4]
+          colors[vi*3+2]    = rawData[b+5]
+          // Dense wall (cnt≈1000) → splatScale≈0.063 → clamped 0.25 (tiny crisp dot)
+          // Moderate  (cnt≈4)    → splatScale≈1.0   (medium fill)
+          // Sparse edge (cnt=1, passed SOR) → splatScale≈1.5 (soft gap-filler, not giant)
+          splatScales[vi] = Math.max(0.25, Math.min(1.5, 2.0 / Math.sqrt(cnt)))
+          vi++
         }
 
         const geo = new THREE.BufferGeometry()
