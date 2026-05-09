@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyOrbitJoystickStep,
   radiusToSlider,
+  scaleZoomRadius,
   sliderToRadius,
   ZOOM_MIN,
   ZOOM_MAX,
@@ -31,6 +32,12 @@ describe('cameraControls', () => {
     const nearMax = sliderToRadius(100, ZOOM_MIN, ZOOM_MAX)
     expect(nearMin).toBeCloseTo(ZOOM_MIN, 8)
     expect(nearMax).toBeCloseTo(ZOOM_MAX, 8)
+  })
+
+  it('clamps scaled zoom radius to configured bounds', () => {
+    expect(scaleZoomRadius(1, 0.01, ZOOM_MIN, ZOOM_MAX)).toBeCloseTo(ZOOM_MIN, 8)
+    expect(scaleZoomRadius(40, 10, ZOOM_MIN, ZOOM_MAX)).toBeCloseTo(ZOOM_MAX, 8)
+    expect(scaleZoomRadius(10, 0.8, ZOOM_MIN, ZOOM_MAX)).toBeCloseTo(8, 8)
   })
 
   it('applies proportional joystick speed curve', () => {

@@ -9,8 +9,9 @@ import * as THREE from 'three'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
-import { buildPhotoColors } from '../utils/photoMesh'
-import { applyOrbitJoystickStep, radiusToSlider, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
+import { buildPhotoColorsForPositions } from '../utils/photoMesh'
+import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
+import { getPreviewStride, selectPreviewSnapshots } from '../utils/scanPreview'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -561,9 +562,10 @@ export default function SpaceBuilderCanvas({
         orbit.center.y -= cphi       * step
         orbit.center.z -= sphi * cth * step
         applyOrbit()
+        setZoomRef.current(prev => scaleZoomRadius(prev, Math.exp(e.deltaY * 0.001), ZOOM_MIN, ZOOM_MAX))
       } else {
         // Classic: scroll changes orbit radius
-        orbit.radius = Math.max(0.1, Math.min(80, orbit.radius * (1 + e.deltaY * 0.001)))
+        orbit.radius = scaleZoomRadius(orbit.radius, 1 + e.deltaY * 0.001, ZOOM_MIN, ZOOM_MAX)
         applyOrbit()
         setZoomRef.current(orbit.radius)
       }
@@ -781,6 +783,8 @@ export default function SpaceBuilderCanvas({
         // which would copy the entire array (240 MB for a 10M-point scan).
         const rawData = buf._data
         const n       = buf.pointCount
+        const previewStride = getPreviewStride(n)
+        const previewCount = Math.ceil(n / previewStride)
 
         // ── 3-pass algorithm ─────────────────────────────────────────────────
         //
@@ -807,12 +811,13 @@ export default function SpaceBuilderCanvas({
 
         // ── Pass 1 ───────────────────────────────────────────────────────────
         const voxelCounts = new Map()
-        const voxelKeys   = new Int32Array(n)
+        const voxelKeys   = new Int32Array(previewCount)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
         let   minZ = Infinity, maxZ = -Infinity
 
-        for (let i = 0, b = 0; i < n; i++, b += 6) {
+        for (let i = 0, sampleIndex = 0; i < n; i += previewStride, sampleIndex++) {
+          const b = i * 6
           const x = rawData[b], y = rawData[b+1], z = rawData[b+2]
           if (y < minY) minY = y;  if (y > maxY) maxY = y
           if (x < minX) minX = x;  if (x > maxX) maxX = x
@@ -822,7 +827,7 @@ export default function SpaceBuilderCanvas({
           const iy  = Math.floor(y * CELL_INV)
           const iz  = Math.floor(z * CELL_INV)
           const key = hashXYZ(ix, iy, iz)
-          voxelKeys[i] = key
+          voxelKeys[sampleIndex] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
         }
 
@@ -838,8 +843,9 @@ export default function SpaceBuilderCanvas({
         // Build the set of singleton voxels and record one data-offset per key
         // (we need it to recompute ix/iy/iz for the neighbourhood lookup).
         const singletonOffset = new Map()   // key → raw-data byte offset b
-        for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const key = voxelKeys[i]
+        for (let i = 0, sampleIndex = 0; i < n; i += previewStride, sampleIndex++) {
+          const b = i * 6
+          const key = voxelKeys[sampleIndex]
           if ((voxelCounts.get(key) || 0) === 1) singletonOffset.set(key, b)
         }
 
@@ -860,7 +866,7 @@ export default function SpaceBuilderCanvas({
 
         // ── Pass 3: geometry arrays ──────────────────────────────────────────
         // Each outlier key has exactly one point (cnt=1), so:
-        const validCount  = n - outlierKeys.size
+        const validCount  = previewCount - outlierKeys.size
         const positions   = new Float32Array(validCount * 3)
         const colors      = new Float32Array(validCount * 3)
         const splatScales = new Float32Array(validCount)
@@ -871,8 +877,9 @@ export default function SpaceBuilderCanvas({
         const floorTop    = minY + roomHeight * 0.20
         const ceilBottom  = maxY - roomHeight * 0.20
 
-        for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const key = voxelKeys[i]
+        for (let i = 0, sampleIndex = 0; i < n; i += previewStride, sampleIndex++) {
+          const b = i * 6
+          const key = voxelKeys[sampleIndex]
           if (outlierKeys.has(key)) continue
 
           const cnt = voxelCounts.get(key) || 1
@@ -930,11 +937,11 @@ export default function SpaceBuilderCanvas({
         // replace the low-res depth-sensor colours with high-res JPEG samples.
         // The colAttr.array reference stays live in Three.js, so mutating it
         // and setting needsUpdate is sufficient — no geometry rebuild needed.
-        const snapshots = roomScan.snapshots?.filter(s => s.intrinsics?.length === 6)
+        const snapshots = selectPreviewSnapshots(roomScan.snapshots?.filter(s => s.intrinsics?.length === 6))
         if (snapshots?.length) {
           ;(async () => {
             try {
-              const newColors = await buildPhotoColors(buf, snapshots)
+              const newColors = await buildPhotoColorsForPositions(positions, colors, snapshots, yOffsetRef.current)
               if (cancelled || !newColors) return
               const colAttr = geo.getAttribute('color')
               colAttr.array.set(newColors)
@@ -1206,8 +1213,9 @@ export default function SpaceBuilderCanvas({
               o.center.x += sphi * Math.sin(o.theta) * 0.5
               o.center.y += cphi                      * 0.5
               o.center.z += sphi * Math.cos(o.theta) * 0.5
+              setZoomRadius(prev => scaleZoomRadius(prev, 0.8, ZOOM_MIN, ZOOM_MAX))
             } else {
-              const r = Math.max(ZOOM_MIN, zoomRadius * 0.8)
+              const r = scaleZoomRadius(zoomRadius, 0.8, ZOOM_MIN, ZOOM_MAX)
               setZoomRadius(r)
               t.orbit.radius = r
             }
@@ -1227,8 +1235,9 @@ export default function SpaceBuilderCanvas({
               o.center.x -= sphi * Math.sin(o.theta) * 0.5
               o.center.y -= cphi                      * 0.5
               o.center.z -= sphi * Math.cos(o.theta) * 0.5
+              setZoomRadius(prev => scaleZoomRadius(prev, 1.25, ZOOM_MIN, ZOOM_MAX))
             } else {
-              const r = Math.min(ZOOM_MAX, zoomRadius * 1.25)
+              const r = scaleZoomRadius(zoomRadius, 1.25, ZOOM_MIN, ZOOM_MAX)
               setZoomRadius(r)
               t.orbit.radius = r
             }

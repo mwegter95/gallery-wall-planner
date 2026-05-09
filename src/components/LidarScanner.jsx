@@ -71,18 +71,16 @@ export default function LidarScanner({ onComplete, onCancel }) {
         }
         if (result.status === 'scanning') {
           setStatus('scanning')
-          nativeBufRef.current = new PointCloudBuffer(500_000)  // pre-allocate, grows as needed
+          nativeBufRef.current = new PointCloudBuffer(2_000_000)  // reduce expensive growth copies on long scans
           snapshotsRef.current = []
           return
         }
         if (result.status === 'snapshot') {
           // Accumulate high-res reference photos during the scan.
           // intrinsics = [fx, fy, cx, cy, imageWidth, imageHeight] at JPEG resolution.
-          const dataUrl = result.dataUrl || (result.jpegB64 ? `data:image/jpeg;base64,${result.jpegB64}` : null)
-          if (!dataUrl) return
+          if (!result.dataUrl && !result.jpegB64) return
           snapshotsRef.current.push({
-            dataUrl,
-            jpegB64:    result.jpegB64 || null,
+            ...(result.jpegB64 ? { jpegB64: result.jpegB64 } : { dataUrl: result.dataUrl }),
             transform:  result.transform,   // column-major 4×4 camera→world (16 floats)
             intrinsics: result.intrinsics,  // [fx, fy, cx, cy, w, h]
           })
@@ -92,7 +90,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
         // Swift streams each batch (~2 000 pts, ~48 KB base64) as it is captured.
         // We decode and accumulate into nativeBufRef so "done" requires no transfer.
         if (result.status === 'chunk') {
-          if (!nativeBufRef.current) nativeBufRef.current = new PointCloudBuffer(500_000)
+          if (!nativeBufRef.current) nativeBufRef.current = new PointCloudBuffer(2_000_000)
           const decoded = atob(result.data)
           const bytes = new Uint8Array(decoded.length)
           for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i)

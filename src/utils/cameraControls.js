@@ -11,6 +11,10 @@ export function sliderToRadius(value, min = ZOOM_MIN, max = ZOOM_MAX) {
   return Math.exp(Math.log(min) + (value / 100) * (Math.log(max) - Math.log(min)))
 }
 
+export function scaleZoomRadius(radius, scale, min = ZOOM_MIN, max = ZOOM_MAX) {
+  return Math.max(min, Math.min(max, radius * scale))
+}
+
 export function applyOrbitJoystickStep(orbit, joyX, joyY, speed) {
   if (!orbit) return false
   if (!joyX && !joyY) return false
