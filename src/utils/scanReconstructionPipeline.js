@@ -1,5 +1,4 @@
 import { buildPhotoColorsForPositions } from './photoMesh'
-import { reconstructSurface } from './surfaceReconstruction'
 
 const EPSILON = 1e-6
 
@@ -46,6 +45,294 @@ export function computeUvBasis(normal) {
   const tangent = normalize(cross(up, unit))
   const bitangent = normalize(cross(unit, tangent))
   return { tangent, bitangent }
+}
+
+function pointFromRoomFrame(frame, u, v, y) {
+  return [
+    frame.origin[0] + frame.axisU[0] * u + frame.axisV[0] * v,
+    y,
+    frame.origin[2] + frame.axisU[2] * u + frame.axisV[2] * v,
+  ]
+}
+
+function pushQuad(out, segmentId, classification, normal, corners, colors) {
+  const positions = new Float32Array([
+    ...corners[0],
+    ...corners[1],
+    ...corners[2],
+    ...corners[3],
+  ])
+  const indices = Uint32Array.from([0, 1, 2, 0, 2, 3])
+  const colorArray = new Float32Array([
+    ...colors[0],
+    ...colors[1],
+    ...colors[2],
+    ...colors[3],
+  ])
+  out.push({
+    id: segmentId,
+    classification,
+    normal,
+    positions,
+    colors: colorArray,
+    indices,
+    uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+  })
+}
+
+function computeRoomFrame(buf) {
+  const D = buf._data
+  const n = buf.pointCount
+  const INF = Infinity
+  let minY = INF, maxY = -INF
+  let minX = INF, maxX = -INF
+  let minZ = INF, maxZ = -INF
+  let sumX = 0, sumZ = 0, sumXX = 0, sumXZ = 0, sumZZ = 0
+
+  for (let i = 0, b = 0; i < n; i++, b += 6) {
+    const x = D[b]
+    const y = D[b + 1]
+    const z = D[b + 2]
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+    if (z < minZ) minZ = z
+    if (z > maxZ) maxZ = z
+    sumX += x; sumZ += z
+    sumXX += x * x; sumXZ += x * z; sumZZ += z * z
+  }
+
+  const meanX = n > 0 ? sumX / n : 0
+  const meanZ = n > 0 ? sumZ / n : 0
+  const covXX = n > 0 ? sumXX / n - meanX * meanX : 1
+  const covXZ = n > 0 ? sumXZ / n - meanX * meanZ : 0
+  const covZZ = n > 0 ? sumZZ / n - meanZ * meanZ : 1
+
+  const angle = 0.5 * Math.atan2(2 * covXZ, covXX - covZZ)
+  let axisU = [Math.cos(angle), 0, Math.sin(angle)]
+  let axisV = [-Math.sin(angle), 0, Math.cos(angle)]
+  if (axisU[0] < 0) {
+    axisU = [-axisU[0], 0, -axisU[2]]
+    axisV = [-axisV[0], 0, -axisV[2]]
+  }
+
+  const origin = [meanX, 0, meanZ]
+  const frame = { origin, axisU, axisV }
+
+  let uMin = INF, uMax = -INF, vMin = INF, vMax = -INF
+  let floorMinY = INF, floorMaxY = -INF, ceilMinY = INF, ceilMaxY = -INF
+  let wallUMinVMin = INF, wallUMinVMax = -INF, wallUMinYMin = INF, wallUMinYMax = -INF
+  let wallUMaxVMin = INF, wallUMaxVMax = -INF, wallUMaxYMin = INF, wallUMaxYMax = -INF
+  let wallVMinUMin = INF, wallVMinUMax = -INF, wallVMinYMin = INF, wallVMinYMax = -INF
+  let wallVMaxUMin = INF, wallVMaxUMax = -INF, wallVMaxYMin = INF, wallVMaxYMax = -INF
+
+  for (let i = 0, b = 0; i < n; i++, b += 6) {
+    const x = D[b]
+    const y = D[b + 1]
+    const z = D[b + 2]
+    const dx = x - meanX
+    const dz = z - meanZ
+    const u = dx * axisU[0] + dz * axisU[2]
+    const v = dx * axisV[0] + dz * axisV[2]
+    if (u < uMin) uMin = u
+    if (u > uMax) uMax = u
+    if (v < vMin) vMin = v
+    if (v > vMax) vMax = v
+  }
+
+  const yOffset = Number.isFinite(minY) ? -minY : 0
+  const displayMinY = minY + yOffset
+  const displayMaxY = maxY + yOffset
+  const yBand = Math.max(0.05, (displayMaxY - displayMinY) * 0.08)
+  const uvBand = Math.max(0.05, Math.max(uMax - uMin, vMax - vMin) * 0.08)
+
+  for (let i = 0, b = 0; i < n; i++, b += 6) {
+    const x = D[b]
+    const y = D[b + 1] + yOffset
+    const z = D[b + 2]
+    const r = D[b + 3]
+    const g = D[b + 4]
+    const blue = D[b + 5]
+    const dx = x - meanX
+    const dz = z - meanZ
+    const u = dx * axisU[0] + dz * axisU[2]
+    const v = dx * axisV[0] + dz * axisV[2]
+
+    if (Math.abs(y - displayMinY) <= yBand) {
+      if (y < floorMinY) floorMinY = y
+      if (y > floorMaxY) floorMaxY = y
+    }
+    if (Math.abs(y - displayMaxY) <= yBand) {
+      if (y < ceilMinY) ceilMinY = y
+      if (y > ceilMaxY) ceilMaxY = y
+    }
+
+    if (Math.abs(u - uMin) <= uvBand) {
+      if (v < wallUMinVMin) wallUMinVMin = v
+      if (v > wallUMinVMax) wallUMinVMax = v
+      if (y < wallUMinYMin) wallUMinYMin = y
+      if (y > wallUMinYMax) wallUMinYMax = y
+    }
+    if (Math.abs(u - uMax) <= uvBand) {
+      if (v < wallUMaxVMin) wallUMaxVMin = v
+      if (v > wallUMaxVMax) wallUMaxVMax = v
+      if (y < wallUMaxYMin) wallUMaxYMin = y
+      if (y > wallUMaxYMax) wallUMaxYMax = y
+    }
+    if (Math.abs(v - vMin) <= uvBand) {
+      if (u < wallVMinUMin) wallVMinUMin = u
+      if (u > wallVMinUMax) wallVMinUMax = u
+      if (y < wallVMinYMin) wallVMinYMin = y
+      if (y > wallVMinYMax) wallVMinYMax = y
+    }
+    if (Math.abs(v - vMax) <= uvBand) {
+      if (u < wallVMaxUMin) wallVMaxUMin = u
+      if (u > wallVMaxUMax) wallVMaxUMax = u
+      if (y < wallVMaxYMin) wallVMaxYMin = y
+      if (y > wallVMaxYMax) wallVMaxYMax = y
+    }
+  }
+
+  const avgPointColor = (filterFn) => {
+    let sr = 0, sg = 0, sb = 0, count = 0
+    for (let i = 0, b = 0; i < n; i++, b += 6) {
+      if (!filterFn(b)) continue
+      sr += D[b + 3]
+      sg += D[b + 4]
+      sb += D[b + 5]
+      count++
+    }
+    const inv = count > 0 ? 1 / count : 1
+    return [sr * inv || 0.5, sg * inv || 0.5, sb * inv || 0.5]
+  }
+
+  const segments = []
+  const floorColor = avgPointColor(b => Math.abs((D[b + 1] + yOffset) - displayMinY) <= yBand)
+  const ceilColor = avgPointColor(b => Math.abs((D[b + 1] + yOffset) - displayMaxY) <= yBand)
+  const wallUminColor = avgPointColor(b => {
+    const dx = D[b] - meanX
+    const dz = D[b + 2] - meanZ
+    const u = dx * axisU[0] + dz * axisU[2]
+    return Math.abs(u - uMin) <= uvBand
+  })
+  const wallUmaxColor = avgPointColor(b => {
+    const dx = D[b] - meanX
+    const dz = D[b + 2] - meanZ
+    const u = dx * axisU[0] + dz * axisU[2]
+    return Math.abs(u - uMax) <= uvBand
+  })
+  const wallVminColor = avgPointColor(b => {
+    const dx = D[b] - meanX
+    const dz = D[b + 2] - meanZ
+    const v = dx * axisV[0] + dz * axisV[2]
+    return Math.abs(v - vMin) <= uvBand
+  })
+  const wallVmaxColor = avgPointColor(b => {
+    const dx = D[b] - meanX
+    const dz = D[b + 2] - meanZ
+    const v = dx * axisV[0] + dz * axisV[2]
+    return Math.abs(v - vMax) <= uvBand
+  })
+
+  const floorY = Number.isFinite(floorMinY) ? floorMinY : displayMinY
+  const ceilY = Number.isFinite(ceilMaxY) ? ceilMaxY : displayMaxY
+  const wallYMin = Number.isFinite(wallUMinYMin) ? Math.min(wallUMinYMin, wallUMaxYMin, wallVMinYMin, wallVMaxYMin) : floorY
+  const wallYMax = Number.isFinite(wallUMinYMax) ? Math.max(wallUMinYMax, wallUMaxYMax, wallVMinYMax, wallVMaxYMax) : ceilY
+  const wallUMinVMinSafe = Number.isFinite(wallUMinVMin) ? wallUMinVMin : vMin
+  const wallUMinVMaxSafe = Number.isFinite(wallUMinVMax) ? wallUMinVMax : vMax
+  const wallUMaxVMinSafe = Number.isFinite(wallUMaxVMin) ? wallUMaxVMin : vMin
+  const wallUMaxVMaxSafe = Number.isFinite(wallUMaxVMax) ? wallUMaxVMax : vMax
+  const wallVMinUMinSafe = Number.isFinite(wallVMinUMin) ? wallVMinUMin : uMin
+  const wallVMinUMaxSafe = Number.isFinite(wallVMinUMax) ? wallVMinUMax : uMax
+  const wallVMaxUMinSafe = Number.isFinite(wallVMaxUMin) ? wallVMaxUMin : uMin
+  const wallVMaxUMaxSafe = Number.isFinite(wallVMaxUMax) ? wallVMaxUMax : uMax
+
+  pushQuad(
+    segments,
+    'floor',
+    'floor',
+    [0, 1, 0],
+    [
+      pointFromRoomFrame(frame, uMin, vMin, floorY),
+      pointFromRoomFrame(frame, uMax, vMin, floorY),
+      pointFromRoomFrame(frame, uMax, vMax, floorY),
+      pointFromRoomFrame(frame, uMin, vMax, floorY),
+    ],
+    [floorColor, floorColor, floorColor, floorColor],
+  )
+
+  pushQuad(
+    segments,
+    'ceiling',
+    'ceiling',
+    [0, -1, 0],
+    [
+      pointFromRoomFrame(frame, uMin, vMin, ceilY),
+      pointFromRoomFrame(frame, uMin, vMax, ceilY),
+      pointFromRoomFrame(frame, uMax, vMax, ceilY),
+      pointFromRoomFrame(frame, uMax, vMin, ceilY),
+    ],
+    [ceilColor, ceilColor, ceilColor, ceilColor],
+  )
+
+  pushQuad(
+    segments,
+    'wall-u-min',
+    'wall',
+    [-axisU[0], 0, -axisU[2]],
+    [
+      pointFromRoomFrame(frame, uMin, wallUMinVMinSafe, wallYMin),
+      pointFromRoomFrame(frame, uMin, wallUMinVMaxSafe, wallYMin),
+      pointFromRoomFrame(frame, uMin, wallUMinVMaxSafe, wallYMax),
+      pointFromRoomFrame(frame, uMin, wallUMinVMinSafe, wallYMax),
+    ],
+    [wallUminColor, wallUminColor, wallUminColor, wallUminColor],
+  )
+
+  pushQuad(
+    segments,
+    'wall-u-max',
+    'wall',
+    [axisU[0], 0, axisU[2]],
+    [
+      pointFromRoomFrame(frame, uMax, wallUMaxVMinSafe, wallYMin),
+      pointFromRoomFrame(frame, uMax, wallUMaxVMinSafe, wallYMax),
+      pointFromRoomFrame(frame, uMax, wallUMaxVMaxSafe, wallYMax),
+      pointFromRoomFrame(frame, uMax, wallUMaxVMaxSafe, wallYMin),
+    ],
+    [wallUmaxColor, wallUmaxColor, wallUmaxColor, wallUmaxColor],
+  )
+
+  pushQuad(
+    segments,
+    'wall-v-min',
+    'wall',
+    [-axisV[0], 0, -axisV[2]],
+    [
+      pointFromRoomFrame(frame, wallVMinUMinSafe, vMin, wallYMin),
+      pointFromRoomFrame(frame, wallVMinUMaxSafe, vMin, wallYMin),
+      pointFromRoomFrame(frame, wallVMinUMaxSafe, vMin, wallYMax),
+      pointFromRoomFrame(frame, wallVMinUMinSafe, vMin, wallYMax),
+    ],
+    [wallVminColor, wallVminColor, wallVminColor, wallVminColor],
+  )
+
+  pushQuad(
+    segments,
+    'wall-v-max',
+    'wall',
+    [axisV[0], 0, axisV[2]],
+    [
+      pointFromRoomFrame(frame, wallVMaxUMinSafe, vMax, wallYMin),
+      pointFromRoomFrame(frame, wallVMaxUMinSafe, vMax, wallYMax),
+      pointFromRoomFrame(frame, wallVMaxUMaxSafe, vMax, wallYMax),
+      pointFromRoomFrame(frame, wallVMaxUMaxSafe, vMax, wallYMin),
+    ],
+    [wallVmaxColor, wallVmaxColor, wallVmaxColor, wallVmaxColor],
+  )
+
+  return { segments, yOffset, frame }
 }
 
 function finalizeSegment(segment) {
@@ -194,18 +481,52 @@ export async function reconstructPlanarSurfaces(buf, {
   snapshots = [],
   yOffset = 0,
   segmentation,
-  ...reconstruction
 } = {}) {
-  const mesh = reconstructSurface(buf, { ...reconstruction, yOffset })
-  if (!mesh) return null
+  const room = computeRoomFrame(buf)
+  if (!room?.segments?.length) return null
 
-  const segments = segmentReconstructedMesh(mesh, segmentation)
-  if (!snapshots.length) return { mesh, segments }
+  const segments = segmentation ? room.segments.filter(segment => {
+    if (segment.classification === 'wall') return true
+    return true
+  }) : room.segments
+
+  if (!snapshots.length) {
+    return {
+      mesh: combineSegments(segments),
+      segments,
+    }
+  }
 
   const texturedSegments = await Promise.all(segments.map(async (segment) => ({
     ...segment,
-    textureColors: await buildPhotoColorsForPositions(segment.positions, segment.colors, snapshots, yOffset) || segment.colors,
+    textureColors: await buildPhotoColorsForPositions(segment.positions, segment.colors, snapshots, room.yOffset) || segment.colors,
   })))
 
-  return { mesh, segments: texturedSegments }
+  return {
+    mesh: combineSegments(texturedSegments),
+    segments: texturedSegments,
+  }
+}
+
+function combineSegments(segments) {
+  let positionTotal = 0
+  let colorTotal = 0
+  let indexTotal = 0
+  for (const segment of segments) {
+    positionTotal += segment.positions.length
+    colorTotal += segment.colors.length
+    indexTotal += segment.indices.length
+  }
+  const positions = new Float32Array(positionTotal)
+  const colors = new Float32Array(colorTotal)
+  const indices = new Uint32Array(indexTotal)
+  let p = 0, c = 0, i = 0, vertexOffset = 0
+  for (const segment of segments) {
+    positions.set(segment.positions, p); p += segment.positions.length
+    colors.set(segment.textureColors || segment.colors, c); c += segment.colors.length
+    for (let j = 0; j < segment.indices.length; j++) indices[i + j] = segment.indices[j] + vertexOffset
+    i += segment.indices.length
+    vertexOffset += segment.positions.length / 3
+  }
+  return { positions, colors, indices }
 }

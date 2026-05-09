@@ -10,9 +10,9 @@ import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { buildPhotoColorsForPositions } from '../utils/photoMesh'
+import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { selectPreviewSnapshots } from '../utils/scanPreview'
-import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -726,7 +726,7 @@ export default function SpaceBuilderCanvas({
   // ── Point cloud / room scan rendering ────────────────────────────────────
   const pointCloudMeshRef = useRef(null)
   const planeMeshesRef    = useRef([])
-  const reconMeshesRef    = useRef([])
+  const reconstructionMeshesRef = useRef([])
   const snapshotMeshesRef = useRef([])
   const yOffsetRef        = useRef(0)
   useEffect(() => {
@@ -745,11 +745,11 @@ export default function SpaceBuilderCanvas({
       m.geometry.dispose(); m.material.dispose()
     }
     planeMeshesRef.current = []
-    for (const m of reconMeshesRef.current) {
+    for (const m of reconstructionMeshesRef.current) {
       t.scene.remove(m)
       m.geometry.dispose(); m.material.dispose()
     }
-    reconMeshesRef.current = []
+    reconstructionMeshesRef.current = []
 
     // Switch orbit style based on whether a scan is loaded
     cameraFPSRef.current = !!roomScan
@@ -938,56 +938,8 @@ export default function SpaceBuilderCanvas({
           })()
         }
 
-        // ── Dedicated planar reconstruction pipeline (surface extraction +
-        // segmentation/classification + UV/texturing per segment) ───────────
-        const canReconstruct = n <= 3_500_000
-        if (canReconstruct) {
-          ;(async () => {
-            try {
-              const recon = await reconstructPlanarSurfaces(buf, {
-                snapshots,
-                yOffset: yOffsetRef.current,
-                cellSize: 0.06,
-                smoothPasses: 2,
-                segmentation: {
-                  minTriangles: 28,
-                  normalTolerance: 0.1,
-                  planeTolerance: 0.16,
-                },
-              })
-              if (cancelled || !recon?.segments?.length) return
-
-              for (const segment of recon.segments) {
-                const segGeo = new THREE.BufferGeometry()
-                segGeo.setAttribute('position', new THREE.BufferAttribute(segment.positions, 3))
-                segGeo.setAttribute(
-                  'color',
-                  new THREE.BufferAttribute(segment.textureColors || segment.colors, 3),
-                )
-                segGeo.setAttribute('uv', new THREE.BufferAttribute(segment.uvs, 2))
-                segGeo.setIndex(new THREE.BufferAttribute(segment.indices, 1))
-                segGeo.computeVertexNormals()
-
-                const opacity = segment.classification === 'wall' ? 0.38 : 0.30
-                const segMat = new THREE.MeshBasicMaterial({
-                  vertexColors: true,
-                  side: THREE.DoubleSide,
-                  transparent: true,
-                  opacity,
-                  depthWrite: false,
-                  polygonOffset: true,
-                  polygonOffsetFactor: -1,
-                })
-                const segMesh = new THREE.Mesh(segGeo, segMat)
-                segMesh.renderOrder = 2
-                t.scene.add(segMesh)
-                reconMeshesRef.current.push(segMesh)
-              }
-            } catch (err) {
-              console.warn('[SpaceBuilderCanvas] Reconstruction pipeline failed:', err)
-            }
-          })()
-        }
+        // Dedicated reconstruction is rendered as a separate mesh layer so the
+        // room shape stays faithful without replacing the point cloud preview.
 
         // Auto-frame the camera to show the full room scan
         try {
@@ -1005,6 +957,47 @@ export default function SpaceBuilderCanvas({
         } catch { /* ignore framing errors */ }
       } catch (err) {
         console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
+      }
+
+      try {
+        const reconstruction = await reconstructPlanarSurfaces(buf, {
+          snapshots: roomScan.snapshots || [],
+          yOffset: yOffsetRef.current,
+        })
+
+        if (!cancelled && reconstruction?.segments?.length) {
+          for (const segment of reconstruction.segments) {
+            const geo = new THREE.BufferGeometry()
+            geo.setAttribute('position', new THREE.BufferAttribute(segment.positions, 3))
+            const colors = segment.textureColors || segment.colors
+            if (colors?.length) {
+              geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+            }
+            geo.setAttribute('uv', new THREE.BufferAttribute(segment.uvs, 2))
+            geo.setIndex(new THREE.BufferAttribute(segment.indices, 1))
+            geo.computeVertexNormals()
+
+            const mat = new THREE.MeshBasicMaterial({
+              vertexColors: !!colors?.length,
+              transparent: true,
+              opacity: segment.classification === 'ceiling' ? 0.2 : 0.28,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+            })
+            const mesh = new THREE.Mesh(geo, mat)
+            mesh.renderOrder = 2
+
+            const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.18, transparent: true })
+            const wireGeo = new THREE.EdgesGeometry(geo)
+            const wire = new THREE.LineSegments(wireGeo, wireMat)
+            mesh.add(wire)
+
+            t.scene.add(mesh)
+            reconstructionMeshesRef.current.push(mesh)
+          }
+        }
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] Could not render reconstructed mesh:', err)
       }
 
       // ── Build ghost plane meshes from detected planes ─────────────────
