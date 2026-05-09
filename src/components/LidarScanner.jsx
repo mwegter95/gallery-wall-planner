@@ -72,13 +72,17 @@ export default function LidarScanner({ onComplete, onCancel }) {
         if (result.status === 'scanning') {
           setStatus('scanning')
           nativeBufRef.current = new PointCloudBuffer(500_000)  // pre-allocate, grows as needed
+          snapshotsRef.current = []
           return
         }
         if (result.status === 'snapshot') {
           // Accumulate high-res reference photos during the scan.
           // intrinsics = [fx, fy, cx, cy, imageWidth, imageHeight] at JPEG resolution.
+          const dataUrl = result.dataUrl || (result.jpegB64 ? `data:image/jpeg;base64,${result.jpegB64}` : null)
+          if (!dataUrl) return
           snapshotsRef.current.push({
-            dataUrl:    result.dataUrl,
+            dataUrl,
+            jpegB64:    result.jpegB64 || null,
             transform:  result.transform,   // column-major 4×4 camera→world (16 floats)
             intrinsics: result.intrinsics,  // [fx, fy, cx, cy, w, h]
           })

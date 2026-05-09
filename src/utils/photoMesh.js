@@ -41,9 +41,14 @@ function invertRigid(t) {
   ])
 }
 
-/** Load a data URL into ImageData (RGBA Uint8ClampedArray) via an offscreen canvas. */
-function loadPixels(dataUrl) {
+/** Load a data URL or base64 JPEG payload into ImageData via an offscreen canvas. */
+function loadPixels(snapshot) {
   return new Promise((resolve, reject) => {
+    const src = snapshot.dataUrl || (snapshot.jpegB64 ? `data:image/jpeg;base64,${snapshot.jpegB64}` : null)
+    if (!src) {
+      reject(new Error('Snapshot has no image source'))
+      return
+    }
     const img = new Image()
     img.onload = () => {
       const w = img.naturalWidth, h = img.naturalHeight
@@ -54,8 +59,34 @@ function loadPixels(dataUrl) {
       resolve({ data: ctx.getImageData(0, 0, w, h).data, width: w, height: h })
     }
     img.onerror = reject
-    img.src = dataUrl
+    img.src = src
   })
+}
+
+function bilinearSampleRGBA(pix, width, height, u, v) {
+  const x = Math.max(0, Math.min(width - 1, u))
+  const y = Math.max(0, Math.min(height - 1, v))
+  const x0 = x | 0
+  const y0 = y | 0
+  const x1 = Math.min(width - 1, x0 + 1)
+  const y1 = Math.min(height - 1, y0 + 1)
+  const tx = x - x0
+  const ty = y - y0
+  const i00 = (y0 * width + x0) * 4
+  const i10 = (y0 * width + x1) * 4
+  const i01 = (y1 * width + x0) * 4
+  const i11 = (y1 * width + x1) * 4
+
+  const w00 = (1 - tx) * (1 - ty)
+  const w10 = tx * (1 - ty)
+  const w01 = (1 - tx) * ty
+  const w11 = tx * ty
+
+  return [
+    (pix[i00] * w00 + pix[i10] * w10 + pix[i01] * w01 + pix[i11] * w11) / 255,
+    (pix[i00 + 1] * w00 + pix[i10 + 1] * w10 + pix[i01 + 1] * w01 + pix[i11 + 1] * w11) / 255,
+    (pix[i00 + 2] * w00 + pix[i10 + 2] * w10 + pix[i01 + 2] * w01 + pix[i11 + 2] * w11) / 255,
+  ]
 }
 
 /**
@@ -91,7 +122,7 @@ export async function buildPhotoColorsForPositions(positions, fallback, snapshot
  * through the best-covering snapshot.
  *
  * @param {import('./pointCloud').PointCloudBuffer} buf
- * @param {{ dataUrl:string, transform:number[], intrinsics:number[] }[]} snapshots
+ * @param {{ dataUrl?:string, jpegB64?:string, transform:number[], intrinsics:number[] }[]} snapshots
  * @returns {Promise<Float32Array | null>}
  */
 export async function buildPhotoColors(buf, snapshots) {
@@ -103,7 +134,7 @@ export async function buildPhotoColors(buf, snapshots) {
   // ── Load all snapshot images in parallel ─────────────────────────────────
   let pixMaps
   try {
-    pixMaps = await Promise.all(snapshots.map(s => loadPixels(s.dataUrl)))
+    pixMaps = await Promise.all(snapshots.map(loadPixels))
   } catch (err) {
     console.warn('[photoMesh] Failed to load snapshot images:', err)
     return null
@@ -150,8 +181,9 @@ export async function buildPhotoColors(buf, snapshots) {
       const v    = intr[1] * cpy / negZ + intr[3]
       if (u < 0 || v < 0 || u >= fw || v >= fh) continue  // outside frame
 
-      // cos²(angle) = negZ² / (cpx²+cpy²+negZ²) — avoids sqrt, monotone with cos
-      const score = (negZ * negZ) / (cpx*cpx + cpy*cpy + negZ*negZ)
+      // Score balances view alignment with proximity so closer snapshots win
+      // when angles are similar (less blur / less reprojection drift).
+      const score = ((negZ * negZ) / (cpx*cpx + cpy*cpy + negZ*negZ)) / (1.0 + 0.08 * negZ)
       if (score > bestScore) { bestScore = score; bestSnap = si }
     }
 
@@ -167,12 +199,10 @@ export async function buildPhotoColors(buf, snapshots) {
       const u    = intr[0] * cpx / negZ + intr[2]
       const v    = intr[1] * cpy / negZ + intr[3]
       const px   = pixMaps[bestSnap]
-      const ix   = Math.min(fw - 1, Math.max(0, u | 0))
-      const iy   = Math.min(fh - 1, Math.max(0, v | 0))
-      const pidx = (iy * px.width + ix) * 4
-      newColors[i*3]   = px.data[pidx]   / 255
-      newColors[i*3+1] = px.data[pidx+1] / 255
-      newColors[i*3+2] = px.data[pidx+2] / 255
+      const [r, g, b] = bilinearSampleRGBA(px.data, px.width, px.height, u, v)
+      newColors[i*3]   = r
+      newColors[i*3+1] = g
+      newColors[i*3+2] = b
     } else {
       // No snapshot covers this point — keep original depth-sensor colour
       newColors[i*3]   = or

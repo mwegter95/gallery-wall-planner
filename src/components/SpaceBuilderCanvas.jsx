@@ -10,6 +10,7 @@ import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { buildPhotoColors } from '../utils/photoMesh'
+import { applyOrbitJoystickStep, radiusToSlider, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -638,9 +639,7 @@ export default function SpaceBuilderCanvas({
       // ny is inverted: joystick-up (ny < 0) should move camera higher → phi decreases
       const joy = joystickRef.current
       if (joy.active && (joy.nx !== 0 || joy.ny !== 0)) {
-        orbit.theta -= joy.nx * JOY_SPEED
-        orbit.phi   -= joy.ny * JOY_SPEED
-        needsUpdate = true
+        needsUpdate = applyOrbitJoystickStep(orbit, joy.nx, joy.ny, JOY_SPEED) || needsUpdate
       }
 
       // Continuous pan / move joystick
@@ -1162,15 +1161,9 @@ export default function SpaceBuilderCanvas({
 
   // Zoom slider — logarithmic so drag feels linear in perceptual space
   // slider value 0–100 maps to orbit.radius 0.1–80 via log scale
-  const ZOOM_MIN = 0.1, ZOOM_MAX = 80
-  const radiusToSlider = r => Math.round(
-    (Math.log(r) - Math.log(ZOOM_MIN)) / (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN)) * 100
-  )
-  const sliderToRadius = v =>
-    Math.exp(Math.log(ZOOM_MIN) + (v / 100) * (Math.log(ZOOM_MAX) - Math.log(ZOOM_MIN)))
 
   function handleZoomSlider(e) {
-    const r = sliderToRadius(Number(e.target.value))
+    const r = sliderToRadius(Number(e.target.value), ZOOM_MIN, ZOOM_MAX)
     setZoomRadius(r)
     const t = threeRef.current
     if (t) { t.orbit.radius = r; t.applyOrbit() }
@@ -1221,7 +1214,7 @@ export default function SpaceBuilderCanvas({
             t.applyOrbit()
           }}
         >+</button>
-        <span className="sbc-zoom-val">{radiusToSlider(zoomRadius).toFixed(0)}%</span>
+        <span className="sbc-zoom-val">{radiusToSlider(zoomRadius, ZOOM_MIN, ZOOM_MAX).toFixed(0)}%</span>
         <button
           className="sbc-zoom-btn"
           title={cameraFPSRef.current ? 'Step back' : 'Zoom out'}

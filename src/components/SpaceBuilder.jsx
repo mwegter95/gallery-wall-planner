@@ -6,6 +6,7 @@
  *   Right (35%): Surface panel — name, W×H, connections, z-order, delete
  *   Header:      Space name, Add Photo, Stitch Seams, Erase Object, Save, Close
  */
+import React from 'react'
 import { useState, useCallback, useRef, useEffect } from 'react'
 import SpaceBuilderCanvas from './SpaceBuilderCanvas'
 import EraseModal from './EraseModal'
@@ -17,6 +18,7 @@ import {
   getEffectiveSurfaceUrl,
 } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
+import { cloneRoomForEditing } from '../utils/roomScanPersistence'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -27,15 +29,7 @@ const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
 export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, walls = {}, rooms = {} }) {
   const [space, setSpace]                 = useState(() => {
     if (!existingSpace) return createSpace()
-    // Deep-clone the space for local editing, but preserve the PointCloudBuffer
-    // _buffer reference — it's a class instance whose Float32Array backing and
-    // getters are destroyed by JSON round-tripping (they become a plain object).
-    const cloned = JSON.parse(JSON.stringify(existingSpace))
-    const liveBuffer = existingSpace.roomScan?.pointCloud?._buffer
-    if (liveBuffer && cloned.roomScan?.pointCloud) {
-      cloned.roomScan.pointCloud._buffer = liveBuffer
-    }
-    return cloned
+    return cloneRoomForEditing(existingSpace)
   })
   const [activeSurfaceId, setActiveSurfaceId] = useState(null)
   const [isStitching,     setIsStitching]     = useState(false)
@@ -472,7 +466,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const doLoadRoom = (roomId) => {
     const room = rooms[roomId]
     if (!room) return
-    setSpace(JSON.parse(JSON.stringify(room)))
+    setSpace(cloneRoomForEditing(room))
     setSavedSnapshot(JSON.stringify(room.surfaces))
     setSavedRoomScanAt(room.roomScan?.capturedAt ?? null)
     setActiveSurfaceId(null)

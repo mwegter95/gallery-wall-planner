@@ -94,4 +94,10 @@ export default defineConfig({
   build: {
     chunkSizeWarningLimit: 2000,
   },
+
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setupTests.js',
+    include: ['src/**/*.test.{js,jsx}'],
+  },
 })

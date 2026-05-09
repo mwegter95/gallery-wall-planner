@@ -15,6 +15,8 @@ import AuthModal, { UserBadge } from './components/AuthModal'
 import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP } from './components/Tutorial'
 import * as api from './utils/api'
 import { DEFAULT_SNAP } from './utils/units'
+import { buildPhotoColors } from './utils/photoMesh'
+import { toRoomScanMeta } from './utils/roomScanPersistence'
 import './App.css'
 
 const TUTORIAL_KEY = 'gwp-tutorial-done'
@@ -477,13 +479,40 @@ export default function App() {
   const handleSaveSpace = useCallback(async (space, onProgress) => {
     const report = (pct) => { try { onProgress?.(pct) } catch {} }
 
+    const rawSnapshots = space.roomScan?.snapshots || []
+    const usableSnapshots = rawSnapshots.filter(s =>
+      (s?.dataUrl || s?.jpegB64) &&
+      Array.isArray(s?.transform) && s.transform.length === 16 &&
+      Array.isArray(s?.intrinsics) && s.intrinsics.length === 6
+    )
+
+    // Optional pre-save retexture: bake photo colours directly into the point
+    // cloud so reloading a saved room still looks photorealistic without
+    // carrying large snapshot image payloads in room JSON.
+    const livePc = space.roomScan?.pointCloud
+    if (livePc?._buffer && usableSnapshots.length) {
+      try {
+        report(4)
+        const baked = await buildPhotoColors(livePc._buffer, usableSnapshots)
+        if (baked) {
+          const raw = livePc._buffer._data
+          for (let i = 0, p = 0; i < livePc._buffer.pointCount; i++, p += 6) {
+            raw[p + 3] = baked[i * 3]
+            raw[p + 4] = baked[i * 3 + 1]
+            raw[p + 5] = baked[i * 3 + 2]
+          }
+        }
+      } catch (err) {
+        console.warn('[handleSaveSpace] photo retexture bake failed:', err)
+      }
+    }
+
     // Strip the binary point-cloud payload before putRoom so the JSON is tiny.
     // The blob is uploaded separately below with real XHR progress.
     const pc = space.roomScan?.pointCloud
     const hasBinary = pc && (pc._buffer || pc.data)  // in-memory scan OR legacy base64
-    const spaceForMeta = hasBinary
-      ? { ...space, roomScan: { ...space.roomScan,
-            pointCloud: { pointCount: pc.pointCount, url: pc.url ?? null } } }
+    const spaceForMeta = space.roomScan
+      ? { ...space, roomScan: toRoomScanMeta(space.roomScan) }
       : space
 
     report(5)
@@ -513,10 +542,11 @@ export default function App() {
         const roomWithUrl = {
           ...space,
           roomScan: space.roomScan
-            ? { ...space.roomScan, pointCloud: { pointCount: pc.pointCount, url } }
+            ? { ...toRoomScanMeta(space.roomScan), pointCloud: { pointCount: pc.pointCount, url } }
             : null,
         }
         await api.putRoom(roomWithUrl)
+        setRooms(prev => ({ ...prev, [roomWithUrl.id]: roomWithUrl }))
       } catch (err) {
         console.error('[handleSaveSpace] point cloud upload failed', err)
       }
