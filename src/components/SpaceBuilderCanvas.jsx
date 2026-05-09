@@ -917,7 +917,13 @@ export default function SpaceBuilderCanvas({
         t.scene.add(points)
         pointCloudMeshRef.current = points
 
-        const snapshots = selectPreviewSnapshots(roomScan.snapshots?.filter(s => s.intrinsics?.length === 6))
+        const snapshots = selectPreviewSnapshots(
+          roomScan.snapshots?.filter(s =>
+            (s?.dataUrl || s?.jpegB64) &&
+            Array.isArray(s?.transform) && s.transform.length === 16 &&
+            Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
+          ),
+        )
 
         // ── Photo retexture (async, after cloud is visible) ────────────────
         // If snapshots with camera intrinsics were captured during the scan,

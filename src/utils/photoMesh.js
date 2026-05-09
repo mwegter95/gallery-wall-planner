@@ -104,6 +104,121 @@ export function normalizeIntrinsicsForImage(intrinsics, width, height) {
   return [fx * sx, fy * sy, cx * sx, cy * sy, dstW, dstH]
 }
 
+const VISIBILITY_TARGET_SAMPLES = 900_000
+const VISIBILITY_MAX_DIM = 512
+const VISIBILITY_REL_TOL = 0.03
+const VISIBILITY_ABS_TOL = 0.06
+const FUSION_MAX_CANDIDATES = 3
+const COLOR_GATE_L1 = 0.33
+
+function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
+  const longest = Math.max(width, height)
+  const scale = longest > maxDim ? (maxDim / longest) : 1
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  }
+}
+
+function projectToSnapshot(wx, wy, wz, view, intr) {
+  const cpx = view[0] * wx + view[4] * wy + view[8] * wz + view[12]
+  const cpy = view[1] * wx + view[5] * wy + view[9] * wz + view[13]
+  const cpz = view[2] * wx + view[6] * wy + view[10] * wz + view[14]
+  if (cpz >= 0) return null
+
+  const depth = -cpz
+  const u = intr[0] * cpx / depth + intr[2]
+  const v = intr[1] * cpy / depth + intr[3]
+  if (u < 0 || v < 0 || u >= intr[4] || v >= intr[5]) return null
+
+  const invLen2 = 1 / (cpx * cpx + cpy * cpy + depth * depth)
+  const facing = depth * depth * invLen2
+  const proximity = 1 / (1 + 0.08 * depth)
+  const score = facing * proximity
+  return { u, v, depth, score }
+}
+
+export function isDepthVisible(sampleDepth, mapDepth, relTol = VISIBILITY_REL_TOL, absTol = VISIBILITY_ABS_TOL) {
+  if (!Number.isFinite(sampleDepth) || !Number.isFinite(mapDepth)) return false
+  const tolerance = absTol + relTol * mapDepth
+  return sampleDepth <= mapDepth + tolerance
+}
+
+function updateBestCandidates(candidates, candidate, maxCount = FUSION_MAX_CANDIDATES) {
+  candidates.push(candidate)
+  candidates.sort((a, b) => b.score - a.score)
+  if (candidates.length > maxCount) candidates.length = maxCount
+}
+
+function scoreToWeight(score) {
+  return score * score
+}
+
+export function fuseVisibleCandidates(candidates) {
+  if (!candidates?.length) return null
+  if (candidates.length === 1) return candidates[0].color
+
+  const ref = candidates[0].color
+  const filtered = candidates.filter(c => {
+    const l1 = Math.abs(c.color[0] - ref[0]) + Math.abs(c.color[1] - ref[1]) + Math.abs(c.color[2] - ref[2])
+    return l1 <= COLOR_GATE_L1
+  })
+  const pool = filtered.length > 0 ? filtered : [candidates[0]]
+
+  let total = 0
+  let r = 0
+  let g = 0
+  let b = 0
+  for (const c of pool) {
+    const w = scoreToWeight(c.score)
+    total += w
+    r += c.color[0] * w
+    g += c.color[1] * w
+    b += c.color[2] * w
+  }
+  if (total <= 0) return pool[0].color
+  return [r / total, g / total, b / total]
+}
+
+async function buildVisibilityAtlases(buf, views, intrs, {
+  yieldEvery = 120_000,
+  maxSamples = VISIBILITY_TARGET_SAMPLES,
+} = {}) {
+  const n = buf.pointCount
+  const D = buf._data
+  const stride = Math.max(1, Math.ceil(n / Math.max(1, maxSamples)))
+  const atlases = intrs.map(intr => {
+    const size = getVisibilityAtlasSize(intr[4], intr[5])
+    return {
+      width: size.width,
+      height: size.height,
+      invW: size.width / intr[4],
+      invH: size.height / intr[5],
+      depth: new Float32Array(size.width * size.height).fill(Infinity),
+    }
+  })
+
+  for (let i = 0; i < n; i += stride) {
+    if (i > 0 && i % yieldEvery === 0) {
+      await new Promise(r => setTimeout(r, 0))
+    }
+    const b = i * 6
+    const wx = D[b]
+    const wy = D[b + 1]
+    const wz = D[b + 2]
+    for (let si = 0; si < views.length; si++) {
+      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
+      if (!proj) continue
+      const atlas = atlases[si]
+      const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
+      const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
+      const idx = ay * atlas.width + ax
+      if (proj.depth < atlas.depth[idx]) atlas.depth[idx] = proj.depth
+    }
+  }
+  return atlases
+}
+
 /**
  * Apply photo colours to mesh vertices produced by reconstructSurface().
  *
@@ -167,6 +282,7 @@ export async function buildPhotoColors(buf, snapshots) {
   // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
   const views = snapshots.map(s => invertRigid(s.transform))
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
+  const atlases = await buildVisibilityAtlases(buf, views, intrs)
 
   for (let i = 0; i < n; i++) {
     // Yield to browser to keep UI responsive
@@ -178,38 +294,32 @@ export async function buildPhotoColors(buf, snapshots) {
     const wx = D[b],  wy = D[b+1], wz = D[b+2]   // original world coords (no yOffset)
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
 
-    let bestCandidate = null
+    const candidates = []
 
     for (let si = 0; si < S; si++) {
-      const V = views[si]
-      // Multiply column-major 4×4 by [wx, wy, wz, 1]
-      const cpx = V[0]*wx + V[4]*wy + V[8]*wz  + V[12]
-      const cpy = V[1]*wx + V[5]*wy + V[9]*wz  + V[13]
-      const cpz = V[2]*wx + V[6]*wy + V[10]*wz + V[14]
-      if (cpz >= 0) continue                       // behind camera
+      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
+      if (!proj) continue
 
-      const intr = intrs[si]
-      if (!intr) continue
-      const fw   = intr[4], fh = intr[5]
-      const negZ = -cpz
-      const u    = intr[0] * cpx / negZ + intr[2]
-      const v    = intr[1] * cpy / negZ + intr[3]
-      if (u < 0 || v < 0 || u >= fw || v >= fh) continue  // outside frame
+      const atlas = atlases[si]
+      const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
+      const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
+      const idx = ay * atlas.width + ax
+      if (!isDepthVisible(proj.depth, atlas.depth[idx])) continue
 
-      // Score balances view alignment with proximity so closer snapshots win
-      // when angles are similar (less blur / less reprojection drift).
-      const score = ((negZ * negZ) / (cpx*cpx + cpy*cpy + negZ*negZ)) / (1.0 + 0.08 * negZ)
-      if (!bestCandidate || score > bestCandidate.score) {
-        bestCandidate = { si, score, u, v }
-      }
+      const px = pixMaps[si]
+      const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
+      updateBestCandidates(candidates, {
+        si,
+        score: proj.score,
+        color,
+      })
     }
 
-    if (bestCandidate) {
-      const px = pixMaps[bestCandidate.si]
-      const [r, g, b] = bilinearSampleRGBA(px.data, px.width, px.height, bestCandidate.u, bestCandidate.v)
-      newColors[i*3]   = r
-      newColors[i*3+1] = g
-      newColors[i*3+2] = b
+    if (candidates.length > 0) {
+      const fused = fuseVisibleCandidates(candidates)
+      newColors[i*3] = fused[0]
+      newColors[i*3+1] = fused[1]
+      newColors[i*3+2] = fused[2]
     } else {
       // No snapshot covers this point — keep original depth-sensor colour
       newColors[i*3]   = or
