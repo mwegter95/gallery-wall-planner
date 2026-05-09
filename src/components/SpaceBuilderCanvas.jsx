@@ -9,8 +9,7 @@ import * as THREE from 'three'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
-import { reconstructSurface } from '../utils/surfaceReconstruction'
-import { buildPhotoColors, buildPhotoColorsForPositions } from '../utils/photoMesh'
+import { buildPhotoColors } from '../utils/photoMesh'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -97,16 +96,28 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 
 const SPLAT_VERT = /* glsl */`
   attribute float splatScale;    // 0.25 (dense) → 1.5 (sparse)
+  attribute vec3  aNormal;       // estimated surface normal (floor/ceiling/wall heuristic)
   varying   vec3  vColor;
 
   void main() {
     vColor = color;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-    // Small crisp discs — Screen-Space Depth Dilation (SSDD) fills the inter-point
-    // gaps in the post-processing pass, so we don't need huge overlapping discs here.
-    // Factor 8 gives ≈1.5 device-px for dense walls; splatScale widens sparse discs.
+
+    // ── View-dependent disc enlargement ──────────────────────────────────────
+    // Transform estimated surface normal into camera space, then check how
+    // edge-on the surface is to the camera (small |mvN.z| = grazing angle).
+    // Enlarging discs at grazing angles fills coverage gaps that would otherwise
+    // show as thin gaps between dots on walls viewed edge-on.
+    // angleFactor is clamped so head-on surfaces (mvN.z≈1) stay crisp.
+    vec3  mvN       = normalize(normalMatrix * aNormal);
+    float cosView   = max(0.15, abs(mvN.z));
+    float angleFactor = 1.0 / cosView;   // 1.0 head-on → up to 6.7× at 81° grazing
+
+    // Factor 8 × angleFactor: for a dead-on wall (cosView≈1) this is 8,
+    // giving ≈1.5 device-px for dense surfaces.  At 75° (cosView≈0.26) it's ≈30,
+    // which fills the elongated inter-point gaps without overdrawing.
     // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizes consistent across FOV presets.
-    gl_PointSize = clamp(8.0 * splatScale * projectionMatrix[1][1] / -mvPos.z, 1.5, 32.0);
+    gl_PointSize = clamp(8.0 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.5, 64.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -197,9 +208,6 @@ export default function SpaceBuilderCanvas({
   const [snapHint,      setSnapHint]      = useState(null)
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   const [fov,           setFov]           = useState(55)
-  const [viewMode,      setViewMode]      = useState('points')   // 'points' | 'surface'
-  const [reconstructing, setReconstructing] = useState(false)
-  const surfaceMeshRef = useRef(null)   // holds the reconstructed mesh THREE.Mesh
   const [zoomRadius,    setZoomRadius]    = useState(8)   // mirrors orbit.radius for slider UI
   const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
   setZoomRef.current = setZoomRadius
@@ -639,15 +647,14 @@ export default function SpaceBuilderCanvas({
       const pan = panJoystickRef.current
       if (pan.active && (pan.nx !== 0 || pan.ny !== 0)) {
         if (cameraFPSRef.current) {
-          // FPS mode — standard left-stick controls:
-          //   X axis: strafe sideways  (camera right = cross(look, up) = (-cosθ, 0, sinθ))
-          //   Y axis: walk forward/back along horizontal look direction
-          // ny < 0 = joystick forward = walk forward.
+          // FPS mode — Move joystick:
+          //   X axis: strafe left/right  (camera right = (-cosθ, 0, sinθ) in world XZ)
+          //   Y axis: strafe up/down     (world-Y; joystick up → orbit.center.y increases)
+          // Forward/back is handled separately by the Fwd joystick.
           const sth = Math.sin(orbit.theta), cth = Math.cos(orbit.theta)
-          orbit.center.x -= pan.nx * PAN_SPEED * cth   // strafe
+          orbit.center.x -= pan.nx * PAN_SPEED * cth   // strafe left/right
           orbit.center.z += pan.nx * PAN_SPEED * sth
-          orbit.center.x -= pan.ny * PAN_SPEED * sth   // walk (ny<0=forward→positive add)
-          orbit.center.z -= pan.ny * PAN_SPEED * cth
+          orbit.center.y -= pan.ny * PAN_SPEED          // strafe up/down (ny<0=up=y increases)
         } else {
           // Classic orbit — world-XZ pan + world-Y vertical
           orbit.center.x +=  pan.nx * PAN_SPEED * Math.cos(orbit.theta)
@@ -723,18 +730,12 @@ export default function SpaceBuilderCanvas({
     const t = threeRef.current
     if (!t) return
 
-    // Remove old point cloud + surface mesh + plane meshes
+    // Remove old point cloud + plane meshes
     if (pointCloudMeshRef.current) {
       t.scene.remove(pointCloudMeshRef.current)
       pointCloudMeshRef.current.geometry.dispose()
       pointCloudMeshRef.current.material.dispose()
       pointCloudMeshRef.current = null
-    }
-    if (surfaceMeshRef.current) {
-      t.scene.remove(surfaceMeshRef.current)
-      surfaceMeshRef.current.geometry.dispose()
-      surfaceMeshRef.current.material.dispose()
-      surfaceMeshRef.current = null
     }
     for (const m of planeMeshesRef.current) {
       t.scene.remove(m)
@@ -808,15 +809,19 @@ export default function SpaceBuilderCanvas({
         // ── Pass 1 ───────────────────────────────────────────────────────────
         const voxelCounts = new Map()
         const voxelKeys   = new Int32Array(n)
-        let   minY        = Infinity
+        let   minY = Infinity, maxY = -Infinity
+        let   minX = Infinity, maxX = -Infinity
+        let   minZ = Infinity, maxZ = -Infinity
 
         for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const y = rawData[b + 1]
-          if (y < minY) minY = y
+          const x = rawData[b], y = rawData[b+1], z = rawData[b+2]
+          if (y < minY) minY = y;  if (y > maxY) maxY = y
+          if (x < minX) minX = x;  if (x > maxX) maxX = x
+          if (z < minZ) minZ = z;  if (z > maxZ) maxZ = z
 
-          const ix  = Math.floor(rawData[b]   * CELL_INV)
-          const iy  = Math.floor(rawData[b+1] * CELL_INV)
-          const iz  = Math.floor(rawData[b+2] * CELL_INV)
+          const ix  = Math.floor(x * CELL_INV)
+          const iy  = Math.floor(y * CELL_INV)
+          const iz  = Math.floor(z * CELL_INV)
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
@@ -824,6 +829,11 @@ export default function SpaceBuilderCanvas({
 
         const yOffset = isFinite(minY) ? -minY : 0
         yOffsetRef.current = yOffset
+
+        // Room-centre XZ for wall normal estimation (Pass 3)
+        const roomCenterX  = (minX + maxX) * 0.5
+        const roomCenterZ  = (minZ + maxZ) * 0.5
+        const roomHeight   = isFinite(maxY) && isFinite(minY) ? (maxY - minY) : 1
 
         // ── Pass 2: SOR ──────────────────────────────────────────────────────
         // Build the set of singleton voxels and record one data-offset per key
@@ -855,16 +865,22 @@ export default function SpaceBuilderCanvas({
         const positions   = new Float32Array(validCount * 3)
         const colors      = new Float32Array(validCount * 3)
         const splatScales = new Float32Array(validCount)
+        const normals     = new Float32Array(validCount * 3)
         let vi = 0
+
+        // Thresholds for floor/ceiling classification (20% of room height from each end)
+        const floorTop    = minY + roomHeight * 0.20
+        const ceilBottom  = maxY - roomHeight * 0.20
 
         for (let i = 0, b = 0; i < n; i++, b += 6) {
           const key = voxelKeys[i]
           if (outlierKeys.has(key)) continue
 
           const cnt = voxelCounts.get(key) || 1
-          positions[vi*3]   = rawData[b]
-          positions[vi*3+1] = rawData[b+1] + yOffset
-          positions[vi*3+2] = rawData[b+2]
+          const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
+          positions[vi*3]   = px
+          positions[vi*3+1] = py + yOffset
+          positions[vi*3+2] = pz
           colors[vi*3]      = rawData[b+3]
           colors[vi*3+1]    = rawData[b+4]
           colors[vi*3+2]    = rawData[b+5]
@@ -872,6 +888,23 @@ export default function SpaceBuilderCanvas({
           // Moderate  (cnt≈4)    → splatScale≈1.0   (medium fill)
           // Sparse edge (cnt=1, passed SOR) → splatScale≈1.5 (soft gap-filler, not giant)
           splatScales[vi] = Math.max(0.25, Math.min(1.5, 2.0 / Math.sqrt(cnt)))
+
+          // ── Surface normal estimation (cheap O(1) room-geometry heuristic) ──
+          // Classify each point as floor, ceiling, or wall based on Y position.
+          // Walls get an outward-facing horizontal normal from the room centre.
+          if (py <= floorTop) {
+            // Floor — normal points up
+            normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
+          } else if (py >= ceilBottom) {
+            // Ceiling — normal points down
+            normals[vi*3] = 0;  normals[vi*3+1] = -1; normals[vi*3+2] = 0
+          } else {
+            // Wall — outward horizontal normal away from room centre
+            let nx = px - roomCenterX, nz = pz - roomCenterZ
+            const len = Math.sqrt(nx*nx + nz*nz) || 1
+            normals[vi*3] = nx/len;  normals[vi*3+1] = 0;  normals[vi*3+2] = nz/len
+          }
+
           vi++
         }
 
@@ -879,6 +912,7 @@ export default function SpaceBuilderCanvas({
         geo.setAttribute('position',   new THREE.BufferAttribute(positions,  3))
         geo.setAttribute('color',      new THREE.BufferAttribute(colors,     3))
         geo.setAttribute('splatScale', new THREE.BufferAttribute(splatScales, 1))
+        geo.setAttribute('aNormal',    new THREE.BufferAttribute(normals,    3))
 
         const mat = new THREE.ShaderMaterial({
           vertexColors: true,
@@ -984,111 +1018,8 @@ export default function SpaceBuilderCanvas({
     }
 
     buildCloud()
-
-    // ── Surface reconstruction (async, runs while SSDD-enhanced point cloud is visible)
-    // 4 cm voxels give much finer detail than the rejected 7 cm attempt.
-    // Colour bleeding is eliminated by: (a) finer voxels = fewer points averaged,
-    // (b) photo colours projected onto mesh vertices after reconstruction.
-    async function buildSurface() {
-      const pc = roomScan.pointCloud
-      if (!pc) return
-
-      let surfBuf
-      try {
-        if (pc?._buffer)      surfBuf = pc._buffer
-        else if (pc?.url) {
-          const resp = await fetch(pc.url)
-          if (!resp.ok) return
-          surfBuf = PointCloudBuffer.fromFloat32Array(new Float32Array(await resp.arrayBuffer()), pc.pointCount)
-        } else if (pc?.data)  surfBuf = PointCloudBuffer.fromJSON(pc)
-        else return
-      } catch { return }
-
-      if (cancelled) return
-      setReconstructing(true)
-
-      // Let the point cloud render at least one frame first
-      await new Promise(r => setTimeout(r, 80))
-      if (cancelled) { setReconstructing(false); return }
-
-      let result
-      try {
-        result = reconstructSurface(surfBuf, {
-          cellSize:     0.04,   // 4 cm — much finer than 7 cm, avoids Minecraft look
-          smoothPasses: 0,      // no Laplacian; flat walls need none, photo colours handle the rest
-          yOffset:      yOffsetRef.current,
-        })
-      } catch (err) {
-        console.warn('[SpaceBuilderCanvas] Surface reconstruction failed:', err)
-        setReconstructing(false)
-        return
-      }
-
-      if (cancelled || !result) { setReconstructing(false); return }
-
-      // Apply photo colours to every mesh vertex — far better than averaged voxel colours.
-      // buildPhotoColorsForPositions projects each vertex through the best snapshot.
-      const snapshots = roomScan.snapshots?.filter(s => s.intrinsics?.length === 6)
-      if (snapshots?.length && !cancelled) {
-        try {
-          const photoC = await buildPhotoColorsForPositions(
-            result.positions, result.colors, snapshots, yOffsetRef.current,
-          )
-          if (photoC && !cancelled) result.colors = photoC
-        } catch (err) {
-          console.warn('[SpaceBuilderCanvas] Photo colours on mesh failed:', err)
-        }
-      }
-
-      if (cancelled) { setReconstructing(false); return }
-
-      try {
-        const geo = new THREE.BufferGeometry()
-        geo.setAttribute('position', new THREE.BufferAttribute(result.positions, 3))
-        geo.setAttribute('color',    new THREE.BufferAttribute(result.colors,    3))
-        geo.setIndex(new THREE.BufferAttribute(result.indices, 1))
-        geo.computeVertexNormals()
-
-        const mat = new THREE.MeshStandardMaterial({
-          vertexColors: true,
-          roughness:    0.80,
-          metalness:    0.0,
-          side:         THREE.DoubleSide,
-        })
-
-        const mesh = new THREE.Mesh(geo, mat)
-        mesh.visible = true   // visible immediately in 'surface' mode
-
-        const t2 = threeRef.current
-        if (t2 && !t2.scene.getObjectByName('__reconLight')) {
-          const amb = new THREE.AmbientLight(0xffffff, 0.70); amb.name = '__reconLight'
-          const dir = new THREE.DirectionalLight(0xffffff, 0.85); dir.name = '__reconDir'
-          dir.position.set(3, 8, 5)
-          t2.scene.add(amb, dir)
-        }
-
-        if (cancelled) { geo.dispose(); mat.dispose(); setReconstructing(false); return }
-        const t3 = threeRef.current
-        if (t3) { t3.scene.add(mesh); surfaceMeshRef.current = mesh }
-        // Auto-switch to surface view once the photo-coloured mesh is ready
-        setViewMode('surface')
-      } catch (err) {
-        console.warn('[SpaceBuilderCanvas] Could not add surface mesh:', err)
-      }
-      setReconstructing(false)
-    }
-
-    buildSurface()
     return () => { cancelled = true }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Toggle point cloud / surface mesh visibility based on viewMode ─────────
-  useEffect(() => {
-    const pc = pointCloudMeshRef.current
-    const sm = surfaceMeshRef.current
-    if (pc) pc.visible = (viewMode === 'points')
-    if (sm) sm.visible = (viewMode === 'surface')
-  }, [viewMode, reconstructing])  // re-run after reconstruction finishes too
 
   // ── Photorealistic snapshot planes (DISABLED) ────────────────────────────
   // Photo overlay approach parked — dense Gaussian splat point cloud used instead.
@@ -1265,17 +1196,6 @@ export default function SpaceBuilderCanvas({
           >{p.label}</button>
         ))}
 
-        {/* Surface / points toggle — only shown when a room scan is loaded */}
-        {roomScan && (
-          <button
-            className={`sbc-fov-btn${viewMode === 'surface' ? ' sbc-fov-btn--active' : ''}`}
-            onClick={() => setViewMode(v => v === 'surface' ? 'points' : 'surface')}
-            title={reconstructing ? 'Building mesh…' : viewMode === 'surface' ? 'Show point cloud' : 'Show solid mesh'}
-            disabled={reconstructing && viewMode !== 'surface'}
-          >
-            {reconstructing ? '⏳' : viewMode === 'surface' ? 'Pts' : 'Mesh'}
-          </button>
-        )}
       </div>
 
       {/* ── Zoom controls — right side, vertical ─────────────────────── */}
