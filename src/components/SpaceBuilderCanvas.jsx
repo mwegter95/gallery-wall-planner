@@ -11,7 +11,8 @@ import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { buildPhotoColorsForPositions } from '../utils/photoMesh'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
-import { buildPointCloudPreview, selectPreviewSnapshots } from '../utils/scanPreview'
+import { selectPreviewSnapshots } from '../utils/scanPreview'
+import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -725,6 +726,7 @@ export default function SpaceBuilderCanvas({
   // ── Point cloud / room scan rendering ────────────────────────────────────
   const pointCloudMeshRef = useRef(null)
   const planeMeshesRef    = useRef([])
+  const reconMeshesRef    = useRef([])
   const snapshotMeshesRef = useRef([])
   const yOffsetRef        = useRef(0)
   useEffect(() => {
@@ -743,6 +745,11 @@ export default function SpaceBuilderCanvas({
       m.geometry.dispose(); m.material.dispose()
     }
     planeMeshesRef.current = []
+    for (const m of reconMeshesRef.current) {
+      t.scene.remove(m)
+      m.geometry.dispose(); m.material.dispose()
+    }
+    reconMeshesRef.current = []
 
     // Switch orbit style based on whether a scan is loaded
     cameraFPSRef.current = !!roomScan
@@ -783,8 +790,114 @@ export default function SpaceBuilderCanvas({
         // which would copy the entire array (240 MB for a 10M-point scan).
         const rawData = buf._data
         const n       = buf.pointCount
-        const { positions, colors, splatScales, normals, yOffset } = buildPointCloudPreview(rawData, n)
+
+        // ── 3-pass algorithm ─────────────────────────────────────────────────
+        //
+        // Pass 1: build 10 cm voxel grid + precompute per-point hash key + find minY.
+        //   Each voxel accumulates the count of points inside it.
+        //
+        // Pass 2: Statistical Outlier Removal (SOR) for singleton voxels.
+        //   A singleton whose 3×3×3 neighbourhood has fewer than SOR_MIN total
+        //   points is a noisy LiDAR return (floating blob in air, specular ghost).
+        //   These are the source of the random giant splats — we remove them.
+        //   Only singletons are checked, so the 27-cell lookup runs on a tiny
+        //   fraction of the total point count.
+        //
+        // Pass 3: build typed arrays, skipping outliers, assigning splatScale
+        //   from local voxel density.  splatScale is capped at 1.5 because SOR
+        //   ensures no truly isolated point remains.
+        //
+        const CELL     = 0.10
+        const CELL_INV = 10.0
+        const SOR_MIN  = 5
+
+        const hashXYZ = (ix, iy, iz) =>
+          (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
+
+        const voxelCounts = new Map()
+        const voxelKeys   = new Int32Array(n)
+        let   minY = Infinity, maxY = -Infinity
+        let   minX = Infinity, maxX = -Infinity
+        let   minZ = Infinity, maxZ = -Infinity
+
+        for (let i = 0, b = 0; i < n; i++, b += 6) {
+          const x = rawData[b], y = rawData[b+1], z = rawData[b+2]
+          if (y < minY) minY = y;  if (y > maxY) maxY = y
+          if (x < minX) minX = x;  if (x > maxX) maxX = x
+          if (z < minZ) minZ = z;  if (z > maxZ) maxZ = z
+
+          const ix  = Math.floor(x * CELL_INV)
+          const iy  = Math.floor(y * CELL_INV)
+          const iz  = Math.floor(z * CELL_INV)
+          const key = hashXYZ(ix, iy, iz)
+          voxelKeys[i] = key
+          voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
+        }
+
+        const yOffset = isFinite(minY) ? -minY : 0
         yOffsetRef.current = yOffset
+
+        const roomCenterX  = (minX + maxX) * 0.5
+        const roomCenterZ  = (minZ + maxZ) * 0.5
+        const roomHeight   = isFinite(maxY) && isFinite(minY) ? (maxY - minY) : 1
+
+        const singletonOffset = new Map()
+        for (let i = 0, b = 0; i < n; i++, b += 6) {
+          const key = voxelKeys[i]
+          if ((voxelCounts.get(key) || 0) === 1) singletonOffset.set(key, b)
+        }
+
+        const outlierKeys = new Set()
+        for (const [key, b] of singletonOffset) {
+          const ix = Math.floor(rawData[b]   * CELL_INV)
+          const iy = Math.floor(rawData[b+1] * CELL_INV)
+          const iz = Math.floor(rawData[b+2] * CELL_INV)
+          let nhTotal = 0
+          outer: for (let dx = -1; dx <= 1; dx++)
+            for (let dy = -1; dy <= 1; dy++)
+              for (let dz = -1; dz <= 1; dz++) {
+                nhTotal += voxelCounts.get(hashXYZ(ix+dx, iy+dy, iz+dz)) || 0
+                if (nhTotal >= SOR_MIN) break outer
+              }
+          if (nhTotal < SOR_MIN) outlierKeys.add(key)
+        }
+
+        const validCount  = n - outlierKeys.size
+        const positions   = new Float32Array(validCount * 3)
+        const colors      = new Float32Array(validCount * 3)
+        const splatScales = new Float32Array(validCount)
+        const normals     = new Float32Array(validCount * 3)
+        let vi = 0
+
+        const floorTop    = minY + roomHeight * 0.20
+        const ceilBottom  = maxY - roomHeight * 0.20
+
+        for (let i = 0, b = 0; i < n; i++, b += 6) {
+          const key = voxelKeys[i]
+          if (outlierKeys.has(key)) continue
+
+          const cnt = voxelCounts.get(key) || 1
+          const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
+          positions[vi*3]   = px
+          positions[vi*3+1] = py + yOffset
+          positions[vi*3+2] = pz
+          colors[vi*3]      = rawData[b+3]
+          colors[vi*3+1]    = rawData[b+4]
+          colors[vi*3+2]    = rawData[b+5]
+          splatScales[vi] = Math.max(0.25, Math.min(1.5, 2.0 / Math.sqrt(cnt)))
+
+          if (py <= floorTop) {
+            normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
+          } else if (py >= ceilBottom) {
+            normals[vi*3] = 0;  normals[vi*3+1] = -1; normals[vi*3+2] = 0
+          } else {
+            let nx = px - roomCenterX, nz = pz - roomCenterZ
+            const len = Math.sqrt(nx*nx + nz*nz) || 1
+            normals[vi*3] = nx/len;  normals[vi*3+1] = 0;  normals[vi*3+2] = nz/len
+          }
+
+          vi++
+        }
 
         const geo = new THREE.BufferGeometry()
         geo.setAttribute('position',   new THREE.BufferAttribute(positions,  3))
@@ -804,12 +917,13 @@ export default function SpaceBuilderCanvas({
         t.scene.add(points)
         pointCloudMeshRef.current = points
 
+        const snapshots = selectPreviewSnapshots(roomScan.snapshots?.filter(s => s.intrinsics?.length === 6))
+
         // ── Photo retexture (async, after cloud is visible) ────────────────
         // If snapshots with camera intrinsics were captured during the scan,
         // replace the low-res depth-sensor colours with high-res JPEG samples.
         // The colAttr.array reference stays live in Three.js, so mutating it
         // and setting needsUpdate is sufficient — no geometry rebuild needed.
-        const snapshots = selectPreviewSnapshots(roomScan.snapshots?.filter(s => s.intrinsics?.length === 6))
         if (snapshots?.length) {
           ;(async () => {
             try {
@@ -820,6 +934,57 @@ export default function SpaceBuilderCanvas({
               colAttr.needsUpdate = true
             } catch (err) {
               console.warn('[SpaceBuilderCanvas] Photo retexture failed:', err)
+            }
+          })()
+        }
+
+        // ── Dedicated planar reconstruction pipeline (surface extraction +
+        // segmentation/classification + UV/texturing per segment) ───────────
+        const canReconstruct = n <= 3_500_000
+        if (canReconstruct) {
+          ;(async () => {
+            try {
+              const recon = await reconstructPlanarSurfaces(buf, {
+                snapshots,
+                yOffset: yOffsetRef.current,
+                cellSize: 0.06,
+                smoothPasses: 2,
+                segmentation: {
+                  minTriangles: 28,
+                  normalTolerance: 0.1,
+                  planeTolerance: 0.16,
+                },
+              })
+              if (cancelled || !recon?.segments?.length) return
+
+              for (const segment of recon.segments) {
+                const segGeo = new THREE.BufferGeometry()
+                segGeo.setAttribute('position', new THREE.BufferAttribute(segment.positions, 3))
+                segGeo.setAttribute(
+                  'color',
+                  new THREE.BufferAttribute(segment.textureColors || segment.colors, 3),
+                )
+                segGeo.setAttribute('uv', new THREE.BufferAttribute(segment.uvs, 2))
+                segGeo.setIndex(new THREE.BufferAttribute(segment.indices, 1))
+                segGeo.computeVertexNormals()
+
+                const opacity = segment.classification === 'wall' ? 0.38 : 0.30
+                const segMat = new THREE.MeshBasicMaterial({
+                  vertexColors: true,
+                  side: THREE.DoubleSide,
+                  transparent: true,
+                  opacity,
+                  depthWrite: false,
+                  polygonOffset: true,
+                  polygonOffsetFactor: -1,
+                })
+                const segMesh = new THREE.Mesh(segGeo, segMat)
+                segMesh.renderOrder = 2
+                t.scene.add(segMesh)
+                reconMeshesRef.current.push(segMesh)
+              }
+            } catch (err) {
+              console.warn('[SpaceBuilderCanvas] Reconstruction pipeline failed:', err)
             }
           })()
         }
