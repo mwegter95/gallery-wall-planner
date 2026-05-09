@@ -10,7 +10,7 @@ import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructSurface } from '../utils/surfaceReconstruction'
-import { buildPhotoColors } from '../utils/photoMesh'
+import { buildPhotoColors, buildPhotoColorsForPositions } from '../utils/photoMesh'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -98,25 +98,15 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 const SPLAT_VERT = /* glsl */`
   attribute float splatScale;    // 0.25 (dense) → 1.5 (sparse)
   varying   vec3  vColor;
-  uniform   vec2  uResolution;   // framebuffer width, height in device pixels (after DPR)
 
   void main() {
     vColor = color;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-    // Resolution-aware disc sizing so surfaces fill solid at every screen size / DPR.
-    //
-    // Derivation:
-    //   A LiDAR sample in a dense wall is spaced ≈ 0.05 m apart on average.
-    //   We want each disc to cover ~1.5× that spacing (worldDia ≈ 0.075 m × splatScale).
-    //   pixels = worldDia * (fy_pixels / depth)
-    //   fy_pixels = projectionMatrix[1][1] * (framebufferHeight / 2)
-    //   → gl_PointSize = 0.075 * splatScale * projectionMatrix[1][1] * halfH / depth
-    //
-    // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizing correct across FOV presets.
-    // uResolution.y (framebuffer pixels) accounts for canvas size and retina DPR —
-    // without this, the same formula gives half-sized dots on a 2× Retina display.
-    float halfH = uResolution.y * 0.5;
-    gl_PointSize = clamp(0.075 * splatScale * projectionMatrix[1][1] * halfH / -mvPos.z, 2.0, 48.0);
+    // Small crisp discs — Screen-Space Depth Dilation (SSDD) fills the inter-point
+    // gaps in the post-processing pass, so we don't need huge overlapping discs here.
+    // Factor 8 gives ≈1.5 device-px for dense walls; splatScale widens sparse discs.
+    // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizes consistent across FOV presets.
+    gl_PointSize = clamp(8.0 * splatScale * projectionMatrix[1][1] / -mvPos.z, 1.5, 32.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -130,6 +120,53 @@ const SPLAT_FRAG = /* glsl */`
     vec2 uv = gl_PointCoord - 0.5;
     if (dot(uv, uv) > 0.25) discard;
     gl_FragColor = vec4(vColor, 1.0);
+  }
+`
+
+// ── Screen-Space Depth Dilation (SSDD) ─────────────────────────────────────
+// Post-processing pass that runs after the point cloud is rendered to an FBO.
+// For every screen pixel whose depth = 1.0 (background / gap between dots) we
+// search a (2R+1)² neighbourhood and fill it with the colour of the nearest
+// occupied pixel (minimum depth).  This makes the point cloud appear perfectly
+// solid with no visible holes — regardless of disc size or camera distance.
+//
+// Why min-depth (not nearest pixel)?
+//   Taking the minimum depth finds the closest surface in the neighbourhood,
+//   which is correct — we want foreground surfaces to fill gaps, not distant walls.
+//
+// Performance:  the early-return in the fragment shader means the expensive
+//   9×9 search runs only on empty pixels (background + inter-point gaps).
+//   For a dense room scan, typically < 20 % of pixels trigger the search.
+
+const SSDD_VERT = /* glsl */`
+  void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }
+`
+
+const SSDD_FRAG = /* glsl */`
+  precision highp float;
+  uniform sampler2D tColor;
+  uniform sampler2D tDepth;
+  uniform vec2      uRes;
+  uniform vec3      uBg;
+
+  void main() {
+    vec2  uv = gl_FragCoord.xy / uRes;
+    float d  = texture2D(tDepth, uv).r;
+
+    // Occupied pixel — pass through unchanged
+    if (d < 0.9999) { gl_FragColor = texture2D(tColor, uv); return; }
+
+    // Gap pixel — find closest (min depth) occupied neighbour in a 9×9 window
+    float bestD = 2.0;
+    vec4  bestC = vec4(uBg, 1.0);
+    for (int xi = -4; xi <= 4; xi++) {
+      for (int yi = -4; yi <= 4; yi++) {
+        vec2  suv = uv + vec2(float(xi), float(yi)) / uRes;
+        float nd  = texture2D(tDepth, suv).r;
+        if (nd < bestD) { bestD = nd; bestC = texture2D(tColor, suv); }
+      }
+    }
+    gl_FragColor = (bestD < 0.9999) ? bestC : vec4(uBg, 1.0);
   }
 `
 
@@ -194,6 +231,40 @@ export default function SpaceBuilderCanvas({
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.setSize(mount.clientWidth, mount.clientHeight)
     mount.appendChild(renderer.domElement)
+
+    // ── SSDD: offscreen FBO + fullscreen dilation quad ─────────────────────
+    // The main scene is rendered into `ssdFBO` (color + depth), then the
+    // dilation shader reads both textures and fills inter-point gaps.
+    const makeSSDF = (w, h) => {
+      const dt = new THREE.DepthTexture(w, h)
+      dt.type = THREE.UnsignedIntType
+      return new THREE.WebGLRenderTarget(w, h, {
+        minFilter:   THREE.NearestFilter,
+        magFilter:   THREE.NearestFilter,
+        depthTexture: dt,
+      })
+    }
+    const ssdFBO = makeSSDF(renderer.domElement.width, renderer.domElement.height)
+    const ssdUniforms = {
+      tColor: { value: ssdFBO.texture },
+      tDepth: { value: ssdFBO.depthTexture },
+      uRes:   { value: new THREE.Vector2(renderer.domElement.width, renderer.domElement.height) },
+      uBg:    { value: new THREE.Color(0x080d14) },
+    }
+    const ssdQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      new THREE.ShaderMaterial({
+        uniforms:       ssdUniforms,
+        vertexShader:   SSDD_VERT,
+        fragmentShader: SSDD_FRAG,
+        depthTest:  false,
+        depthWrite: false,
+      }),
+    )
+    ssdQuad.frustumCulled = false
+    const ssdScene = new THREE.Scene()
+    const ssdCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+    ssdScene.add(ssdQuad)
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x080d14)
@@ -544,15 +615,9 @@ export default function SpaceBuilderCanvas({
       camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
       renderer.setSize(mount.clientWidth, mount.clientHeight)
-      // Keep the point-cloud disc-size uniform in sync with the actual framebuffer
-      // dimensions (canvas CSS size × DPR). Without this, discs shrink on resize.
-      const pcm = pointCloudMeshRef.current
-      if (pcm?.material?.uniforms?.uResolution) {
-        pcm.material.uniforms.uResolution.value.set(
-          renderer.domElement.width,
-          renderer.domElement.height,
-        )
-      }
+      const w = renderer.domElement.width, h = renderer.domElement.height
+      ssdFBO.setSize(w, h)
+      ssdUniforms.uRes.value.set(w, h)
     })
     ro.observe(mount)
 
@@ -570,13 +635,25 @@ export default function SpaceBuilderCanvas({
         needsUpdate = true
       }
 
-      // Continuous pan joystick — translates the orbit center
-      // Camera-right in world-XZ: (cos θ, 0, -sin θ); world-up: Y axis
+      // Continuous pan / move joystick
       const pan = panJoystickRef.current
       if (pan.active && (pan.nx !== 0 || pan.ny !== 0)) {
-        orbit.center.x +=  pan.nx * PAN_SPEED * Math.cos(orbit.theta)
-        orbit.center.z -= pan.nx * PAN_SPEED * Math.sin(orbit.theta)
-        orbit.center.y -=  pan.ny * PAN_SPEED
+        if (cameraFPSRef.current) {
+          // FPS mode — standard left-stick controls:
+          //   X axis: strafe sideways  (camera right = cross(look, up) = (-cosθ, 0, sinθ))
+          //   Y axis: walk forward/back along horizontal look direction
+          // ny < 0 = joystick forward = walk forward.
+          const sth = Math.sin(orbit.theta), cth = Math.cos(orbit.theta)
+          orbit.center.x -= pan.nx * PAN_SPEED * cth   // strafe
+          orbit.center.z += pan.nx * PAN_SPEED * sth
+          orbit.center.x -= pan.ny * PAN_SPEED * sth   // walk (ny<0=forward→positive add)
+          orbit.center.z -= pan.ny * PAN_SPEED * cth
+        } else {
+          // Classic orbit — world-XZ pan + world-Y vertical
+          orbit.center.x +=  pan.nx * PAN_SPEED * Math.cos(orbit.theta)
+          orbit.center.z -= pan.nx * PAN_SPEED * Math.sin(orbit.theta)
+          orbit.center.y -=  pan.ny * PAN_SPEED
+        }
         needsUpdate = true
       }
 
@@ -601,11 +678,15 @@ export default function SpaceBuilderCanvas({
       }
 
       if (needsUpdate) applyOrbit()
+      // Two-pass SSDD: render scene to FBO, then blit through gap-fill shader.
+      renderer.setRenderTarget(ssdFBO)
       renderer.render(scene, camera)
+      renderer.setRenderTarget(null)
+      renderer.render(ssdScene, ssdCam)
     }
     animate()
 
-    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera, scene, renderer }
+    threeRef.current = { syncMeshes, applySelection, meshMap, orbit, applyOrbit, camera, scene, renderer, ssdFBO }
 
     return () => {
       cancelAnimationFrame(raf)
@@ -623,6 +704,7 @@ export default function SpaceBuilderCanvas({
         if (o.material?.map) o.material.map.dispose()
         if (o.material) o.material.dispose()
       })
+      ssdFBO.dispose()
       renderer.dispose()
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement)
       threeRef.current = null
@@ -802,14 +884,6 @@ export default function SpaceBuilderCanvas({
           vertexColors: true,
           transparent: false,   // solid discs — no alpha blending halos
           depthWrite: true,     // correct depth occlusion between discs
-          uniforms: {
-            // Framebuffer dimensions in device pixels (CSS size × DPR).
-            // Used by the vertex shader to size discs so they fill gaps at any DPR.
-            uResolution: { value: new THREE.Vector2(
-              t.renderer.domElement.width,
-              t.renderer.domElement.height,
-            )},
-          },
           vertexShader: SPLAT_VERT,
           fragmentShader: SPLAT_FRAG,
         })
@@ -911,41 +985,37 @@ export default function SpaceBuilderCanvas({
 
     buildCloud()
 
-    // ── Surface reconstruction (async, after point cloud) ─────────────────
-    // Disabled: marching-cubes result was rejected (smoothed all colours to grey).
-    // The function is kept here for future work; it is NOT called on load.
-    // eslint-disable-next-line no-unused-vars
+    // ── Surface reconstruction (async, runs while SSDD-enhanced point cloud is visible)
+    // 4 cm voxels give much finer detail than the rejected 7 cm attempt.
+    // Colour bleeding is eliminated by: (a) finer voxels = fewer points averaged,
+    // (b) photo colours projected onto mesh vertices after reconstruction.
     async function buildSurface() {
       const pc = roomScan.pointCloud
       if (!pc) return
 
-      // Re-resolve the buffer (same logic as buildCloud — buf may not be closured)
-      let buf
+      let surfBuf
       try {
-        if (pc?._buffer) {
-          buf = pc._buffer
-        } else if (pc?.url) {
+        if (pc?._buffer)      surfBuf = pc._buffer
+        else if (pc?.url) {
           const resp = await fetch(pc.url)
           if (!resp.ok) return
-          const ab = await resp.arrayBuffer()
-          buf = PointCloudBuffer.fromFloat32Array(new Float32Array(ab), pc.pointCount)
-        } else if (pc?.data) {
-          buf = PointCloudBuffer.fromJSON(pc)
-        } else { return }
+          surfBuf = PointCloudBuffer.fromFloat32Array(new Float32Array(await resp.arrayBuffer()), pc.pointCount)
+        } else if (pc?.data)  surfBuf = PointCloudBuffer.fromJSON(pc)
+        else return
       } catch { return }
 
       if (cancelled) return
       setReconstructing(true)
 
-      // Yield to browser so the point cloud renders first
-      await new Promise(r => setTimeout(r, 50))
+      // Let the point cloud render at least one frame first
+      await new Promise(r => setTimeout(r, 80))
       if (cancelled) { setReconstructing(false); return }
 
       let result
       try {
-        result = reconstructSurface(buf, {
-          cellSize:     0.07,   // 7 cm voxels — good balance of quality vs speed
-          smoothPasses: 4,      // Laplacian iterations to soften voxel edges
+        result = reconstructSurface(surfBuf, {
+          cellSize:     0.04,   // 4 cm — much finer than 7 cm, avoids Minecraft look
+          smoothPasses: 0,      // no Laplacian; flat walls need none, photo colours handle the rest
           yOffset:      yOffsetRef.current,
         })
       } catch (err) {
@@ -956,6 +1026,22 @@ export default function SpaceBuilderCanvas({
 
       if (cancelled || !result) { setReconstructing(false); return }
 
+      // Apply photo colours to every mesh vertex — far better than averaged voxel colours.
+      // buildPhotoColorsForPositions projects each vertex through the best snapshot.
+      const snapshots = roomScan.snapshots?.filter(s => s.intrinsics?.length === 6)
+      if (snapshots?.length && !cancelled) {
+        try {
+          const photoC = await buildPhotoColorsForPositions(
+            result.positions, result.colors, snapshots, yOffsetRef.current,
+          )
+          if (photoC && !cancelled) result.colors = photoC
+        } catch (err) {
+          console.warn('[SpaceBuilderCanvas] Photo colours on mesh failed:', err)
+        }
+      }
+
+      if (cancelled) { setReconstructing(false); return }
+
       try {
         const geo = new THREE.BufferGeometry()
         geo.setAttribute('position', new THREE.BufferAttribute(result.positions, 3))
@@ -965,35 +1051,34 @@ export default function SpaceBuilderCanvas({
 
         const mat = new THREE.MeshStandardMaterial({
           vertexColors: true,
-          roughness:    0.85,
+          roughness:    0.80,
           metalness:    0.0,
           side:         THREE.DoubleSide,
         })
 
         const mesh = new THREE.Mesh(geo, mat)
-        mesh.visible = false   // hidden by default; user toggles in 'surface' mode
+        mesh.visible = true   // visible immediately in 'surface' mode
 
-        // Add ambient + directional light to scene if not already present
         const t2 = threeRef.current
         if (t2 && !t2.scene.getObjectByName('__reconLight')) {
-          const amb = new THREE.AmbientLight(0xffffff, 0.65)
-          amb.name = '__reconLight'
-          const dir = new THREE.DirectionalLight(0xffffff, 0.9)
-          dir.name = '__reconDir'
-          dir.position.set(2, 8, 4)
+          const amb = new THREE.AmbientLight(0xffffff, 0.70); amb.name = '__reconLight'
+          const dir = new THREE.DirectionalLight(0xffffff, 0.85); dir.name = '__reconDir'
+          dir.position.set(3, 8, 5)
           t2.scene.add(amb, dir)
         }
 
         if (cancelled) { geo.dispose(); mat.dispose(); setReconstructing(false); return }
         const t3 = threeRef.current
         if (t3) { t3.scene.add(mesh); surfaceMeshRef.current = mesh }
+        // Auto-switch to surface view once the photo-coloured mesh is ready
+        setViewMode('surface')
       } catch (err) {
         console.warn('[SpaceBuilderCanvas] Could not add surface mesh:', err)
       }
       setReconstructing(false)
     }
 
-    // buildSurface()  — disabled until surface reconstruction is ready
+    buildSurface()
     return () => { cancelled = true }
   }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1180,7 +1265,17 @@ export default function SpaceBuilderCanvas({
           >{p.label}</button>
         ))}
 
-        {/* Surface mode toggle hidden — marching cubes result not ready yet */}
+        {/* Surface / points toggle — only shown when a room scan is loaded */}
+        {roomScan && (
+          <button
+            className={`sbc-fov-btn${viewMode === 'surface' ? ' sbc-fov-btn--active' : ''}`}
+            onClick={() => setViewMode(v => v === 'surface' ? 'points' : 'surface')}
+            title={reconstructing ? 'Building mesh…' : viewMode === 'surface' ? 'Show point cloud' : 'Show solid mesh'}
+            disabled={reconstructing && viewMode !== 'surface'}
+          >
+            {reconstructing ? '⏳' : viewMode === 'surface' ? 'Pts' : 'Mesh'}
+          </button>
+        )}
       </div>
 
       {/* ── Zoom controls — right side, vertical ─────────────────────── */}

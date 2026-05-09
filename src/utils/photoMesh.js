@@ -59,6 +59,34 @@ function loadPixels(dataUrl) {
 }
 
 /**
+ * Apply photo colours to mesh vertices produced by reconstructSurface().
+ *
+ * Vertex positions include yOffset (floor at y=0), but snapshot camera transforms
+ * are in ARKit world space (no yOffset).  We subtract yOffset before projecting.
+ *
+ * @param {Float32Array} positions  [x,y,z …] in display coords (yOffset applied)
+ * @param {Float32Array} fallback   [r,g,b …] base colours when no snapshot covers a vertex
+ * @param {{ dataUrl:string, transform:number[], intrinsics:number[] }[]} snapshots
+ * @param {number} [yOffset=0]
+ * @returns {Promise<Float32Array | null>}
+ */
+export async function buildPhotoColorsForPositions(positions, fallback, snapshots, yOffset = 0) {
+  const n = (positions.length / 3) | 0
+  if (n === 0 || !snapshots?.length) return null
+  // Assemble a fake PointCloudBuffer row layout: [x, y_arkit, z, r, g, b]
+  const data = new Float32Array(n * 6)
+  for (let i = 0; i < n; i++) {
+    data[i*6]   = positions[i*3]
+    data[i*6+1] = positions[i*3+1] - yOffset   // display → ARKit world Y
+    data[i*6+2] = positions[i*3+2]
+    data[i*6+3] = fallback[i*3]
+    data[i*6+4] = fallback[i*3+1]
+    data[i*6+5] = fallback[i*3+2]
+  }
+  return buildPhotoColors({ _data: data, pointCount: n }, snapshots)
+}
+
+/**
  * Build a new Float32Array of per-point RGB colours by projecting each point
  * through the best-covering snapshot.
  *
