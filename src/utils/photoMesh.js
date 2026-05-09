@@ -104,22 +104,6 @@ export function normalizeIntrinsicsForImage(intrinsics, width, height) {
   return [fx * sx, fy * sy, cx * sx, cy * sy, dstW, dstH]
 }
 
-export function blendSnapshotColors(samples) {
-  let total = 0
-  let r = 0
-  let g = 0
-  let b = 0
-  for (const sample of samples) {
-    if (!sample || !Number.isFinite(sample.weight) || sample.weight <= 0) continue
-    total += sample.weight
-    r += sample.color[0] * sample.weight
-    g += sample.color[1] * sample.weight
-    b += sample.color[2] * sample.weight
-  }
-  if (total <= 0) return null
-  return [r / total, g / total, b / total]
-}
-
 /**
  * Apply photo colours to mesh vertices produced by reconstructSurface().
  *
@@ -194,7 +178,7 @@ export async function buildPhotoColors(buf, snapshots) {
     const wx = D[b],  wy = D[b+1], wz = D[b+2]   // original world coords (no yOffset)
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
 
-    const candidates = []
+    let bestCandidate = null
 
     for (let si = 0; si < S; si++) {
       const V = views[si]
@@ -215,29 +199,17 @@ export async function buildPhotoColors(buf, snapshots) {
       // Score balances view alignment with proximity so closer snapshots win
       // when angles are similar (less blur / less reprojection drift).
       const score = ((negZ * negZ) / (cpx*cpx + cpy*cpy + negZ*negZ)) / (1.0 + 0.08 * negZ)
-      candidates.push({ si, score, u, v })
+      if (!bestCandidate || score > bestCandidate.score) {
+        bestCandidate = { si, score, u, v }
+      }
     }
 
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => b.score - a.score)
-      const top = candidates.slice(0, 3)
-      const sampled = top.map(({ si, score, u, v }) => {
-        const px = pixMaps[si]
-        return {
-          color: bilinearSampleRGBA(px.data, px.width, px.height, u, v),
-          weight: score * score * score,
-        }
-      })
-      const blended = blendSnapshotColors(sampled)
-      if (blended) {
-        newColors[i*3]   = blended[0]
-        newColors[i*3+1] = blended[1]
-        newColors[i*3+2] = blended[2]
-      } else {
-        newColors[i*3]   = or
-        newColors[i*3+1] = og
-        newColors[i*3+2] = ob
-      }
+    if (bestCandidate) {
+      const px = pixMaps[bestCandidate.si]
+      const [r, g, b] = bilinearSampleRGBA(px.data, px.width, px.height, bestCandidate.u, bestCandidate.v)
+      newColors[i*3]   = r
+      newColors[i*3+1] = g
+      newColors[i*3+2] = b
     } else {
       // No snapshot covers this point — keep original depth-sensor colour
       newColors[i*3]   = or

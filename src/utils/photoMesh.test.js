@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { blendSnapshotColors, normalizeIntrinsicsForImage } from './photoMesh'
+import { normalizeIntrinsicsForImage } from './photoMesh'
 
 describe('photoMesh', () => {
   it('rescales intrinsics to the decoded image size', () => {
@@ -9,14 +9,4 @@ describe('photoMesh', () => {
     ])
   })
 
-  it('blends snapshot samples with weighted averaging', () => {
-    const blended = blendSnapshotColors([
-      { color: [1, 0, 0], weight: 4 },
-      { color: [0, 0, 1], weight: 1 },
-    ])
-
-    expect(blended?.[0]).toBeCloseTo(0.8, 6)
-    expect(blended?.[1]).toBeCloseTo(0, 6)
-    expect(blended?.[2]).toBeCloseTo(0.2, 6)
-  })
 })

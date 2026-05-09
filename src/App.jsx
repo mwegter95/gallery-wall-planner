@@ -146,6 +146,9 @@ export default function App() {
       // Fix relative image URLs in room surface warped images
       const roomsObj = savedRooms || {}
       for (const room of Object.values(roomsObj)) {
+        if (room.roomScan?.pointCloud?.url?.startsWith('/')) {
+          room.roomScan.pointCloud.url = api.fixUrl(room.roomScan.pointCloud.url)
+        }
         for (const surface of Object.values(room.surfaces || {})) {
           if (surface.warpedImageUrl?.startsWith('/')) surface.warpedImageUrl = api.fixUrl(surface.warpedImageUrl)
         }
