@@ -89,6 +89,37 @@ function bilinearSampleRGBA(pix, width, height, u, v) {
   ]
 }
 
+export function normalizeIntrinsicsForImage(intrinsics, width, height) {
+  if (!Array.isArray(intrinsics) || intrinsics.length < 6) return null
+  const fx = intrinsics[0]
+  const fy = intrinsics[1]
+  const cx = intrinsics[2]
+  const cy = intrinsics[3]
+  const srcW = intrinsics[4]
+  const srcH = intrinsics[5]
+  const dstW = Number.isFinite(width) && width > 0 ? width : srcW
+  const dstH = Number.isFinite(height) && height > 0 ? height : srcH
+  const sx = Number.isFinite(srcW) && srcW > 0 ? dstW / srcW : 1
+  const sy = Number.isFinite(srcH) && srcH > 0 ? dstH / srcH : 1
+  return [fx * sx, fy * sy, cx * sx, cy * sy, dstW, dstH]
+}
+
+export function blendSnapshotColors(samples) {
+  let total = 0
+  let r = 0
+  let g = 0
+  let b = 0
+  for (const sample of samples) {
+    if (!sample || !Number.isFinite(sample.weight) || sample.weight <= 0) continue
+    total += sample.weight
+    r += sample.color[0] * sample.weight
+    g += sample.color[1] * sample.weight
+    b += sample.color[2] * sample.weight
+  }
+  if (total <= 0) return null
+  return [r / total, g / total, b / total]
+}
+
 /**
  * Apply photo colours to mesh vertices produced by reconstructSurface().
  *
@@ -142,16 +173,16 @@ export async function buildPhotoColors(buf, snapshots) {
 
   const S = snapshots.length
 
-  // ── Precompute per-snapshot data ──────────────────────────────────────────
-  // views[si]  = column-major 4×4 world→camera matrix (inverse of cam→world)
-  // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
-  const views = snapshots.map(s => invertRigid(s.transform))
-  const intrs = snapshots.map(s => s.intrinsics)   // already [fx,fy,cx,cy,w,h]
-
   // ── Per-point colour replacement ──────────────────────────────────────────
   const D         = buf._data               // zero-copy raw Float32Array
   const newColors = new Float32Array(n * 3)
   const YIELD_EVERY = 200_000               // yield to browser every 200 K pts
+
+  // ── Precompute per-snapshot data ──────────────────────────────────────────
+  // views[si]  = column-major 4×4 world→camera matrix (inverse of cam→world)
+  // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
+  const views = snapshots.map(s => invertRigid(s.transform))
+  const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
 
   for (let i = 0; i < n; i++) {
     // Yield to browser to keep UI responsive
@@ -163,8 +194,7 @@ export async function buildPhotoColors(buf, snapshots) {
     const wx = D[b],  wy = D[b+1], wz = D[b+2]   // original world coords (no yOffset)
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
 
-    let bestSnap  = -1
-    let bestScore = 0   // cos²(off-axis angle) — avoids sqrt, still ranks correctly
+    const candidates = []
 
     for (let si = 0; si < S; si++) {
       const V = views[si]
@@ -175,6 +205,7 @@ export async function buildPhotoColors(buf, snapshots) {
       if (cpz >= 0) continue                       // behind camera
 
       const intr = intrs[si]
+      if (!intr) continue
       const fw   = intr[4], fh = intr[5]
       const negZ = -cpz
       const u    = intr[0] * cpx / negZ + intr[2]
@@ -184,25 +215,29 @@ export async function buildPhotoColors(buf, snapshots) {
       // Score balances view alignment with proximity so closer snapshots win
       // when angles are similar (less blur / less reprojection drift).
       const score = ((negZ * negZ) / (cpx*cpx + cpy*cpy + negZ*negZ)) / (1.0 + 0.08 * negZ)
-      if (score > bestScore) { bestScore = score; bestSnap = si }
+      candidates.push({ si, score, u, v })
     }
 
-    if (bestSnap >= 0) {
-      // Recompute UV for the winner
-      const V    = views[bestSnap]
-      const cpx  = V[0]*wx + V[4]*wy + V[8]*wz  + V[12]
-      const cpy  = V[1]*wx + V[5]*wy + V[9]*wz  + V[13]
-      const cpz  = V[2]*wx + V[6]*wy + V[10]*wz + V[14]
-      const intr = intrs[bestSnap]
-      const fw   = intr[4], fh = intr[5]
-      const negZ = -cpz
-      const u    = intr[0] * cpx / negZ + intr[2]
-      const v    = intr[1] * cpy / negZ + intr[3]
-      const px   = pixMaps[bestSnap]
-      const [r, g, b] = bilinearSampleRGBA(px.data, px.width, px.height, u, v)
-      newColors[i*3]   = r
-      newColors[i*3+1] = g
-      newColors[i*3+2] = b
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.score - a.score)
+      const top = candidates.slice(0, 3)
+      const sampled = top.map(({ si, score, u, v }) => {
+        const px = pixMaps[si]
+        return {
+          color: bilinearSampleRGBA(px.data, px.width, px.height, u, v),
+          weight: score * score * score,
+        }
+      })
+      const blended = blendSnapshotColors(sampled)
+      if (blended) {
+        newColors[i*3]   = blended[0]
+        newColors[i*3+1] = blended[1]
+        newColors[i*3+2] = blended[2]
+      } else {
+        newColors[i*3]   = or
+        newColors[i*3+1] = og
+        newColors[i*3+2] = ob
+      }
     } else {
       // No snapshot covers this point — keep original depth-sensor colour
       newColors[i*3]   = or
