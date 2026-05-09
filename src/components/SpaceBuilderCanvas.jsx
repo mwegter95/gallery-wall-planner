@@ -11,7 +11,7 @@ import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { buildPhotoColorsForPositions } from '../utils/photoMesh'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
-import { getPreviewStride, selectPreviewSnapshots } from '../utils/scanPreview'
+import { buildPointCloudPreview, selectPreviewSnapshots } from '../utils/scanPreview'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -783,136 +783,8 @@ export default function SpaceBuilderCanvas({
         // which would copy the entire array (240 MB for a 10M-point scan).
         const rawData = buf._data
         const n       = buf.pointCount
-        const previewStride = getPreviewStride(n)
-        const previewCount = Math.ceil(n / previewStride)
-
-        // ── 3-pass algorithm ─────────────────────────────────────────────────
-        //
-        // Pass 1: build 10 cm voxel grid + precompute per-point hash key + find minY.
-        //   Each voxel accumulates the count of points inside it.
-        //
-        // Pass 2: Statistical Outlier Removal (SOR) for singleton voxels.
-        //   A singleton whose 3×3×3 neighbourhood has fewer than SOR_MIN total
-        //   points is a noisy LiDAR return (floating blob in air, specular ghost).
-        //   These are the source of the random giant splats — we remove them.
-        //   Only singletons are checked, so the 27-cell lookup runs on a tiny
-        //   fraction of the total point count.
-        //
-        // Pass 3: build typed arrays, skipping outliers, assigning splatScale
-        //   from local voxel density.  splatScale is capped at 1.5 because SOR
-        //   ensures no truly isolated point remains.
-        //
-        const CELL     = 0.10        // voxel size in metres
-        const CELL_INV = 10.0        // 1 / CELL
-        const SOR_MIN  = 5           // neighbourhood points required to keep a singleton
-
-        const hashXYZ = (ix, iy, iz) =>
-          (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
-
-        // ── Pass 1 ───────────────────────────────────────────────────────────
-        const voxelCounts = new Map()
-        const voxelKeys   = new Int32Array(previewCount)
-        let   minY = Infinity, maxY = -Infinity
-        let   minX = Infinity, maxX = -Infinity
-        let   minZ = Infinity, maxZ = -Infinity
-
-        for (let i = 0, sampleIndex = 0; i < n; i += previewStride, sampleIndex++) {
-          const b = i * 6
-          const x = rawData[b], y = rawData[b+1], z = rawData[b+2]
-          if (y < minY) minY = y;  if (y > maxY) maxY = y
-          if (x < minX) minX = x;  if (x > maxX) maxX = x
-          if (z < minZ) minZ = z;  if (z > maxZ) maxZ = z
-
-          const ix  = Math.floor(x * CELL_INV)
-          const iy  = Math.floor(y * CELL_INV)
-          const iz  = Math.floor(z * CELL_INV)
-          const key = hashXYZ(ix, iy, iz)
-          voxelKeys[sampleIndex] = key
-          voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
-        }
-
-        const yOffset = isFinite(minY) ? -minY : 0
+        const { positions, colors, splatScales, normals, yOffset } = buildPointCloudPreview(rawData, n)
         yOffsetRef.current = yOffset
-
-        // Room-centre XZ for wall normal estimation (Pass 3)
-        const roomCenterX  = (minX + maxX) * 0.5
-        const roomCenterZ  = (minZ + maxZ) * 0.5
-        const roomHeight   = isFinite(maxY) && isFinite(minY) ? (maxY - minY) : 1
-
-        // ── Pass 2: SOR ──────────────────────────────────────────────────────
-        // Build the set of singleton voxels and record one data-offset per key
-        // (we need it to recompute ix/iy/iz for the neighbourhood lookup).
-        const singletonOffset = new Map()   // key → raw-data byte offset b
-        for (let i = 0, sampleIndex = 0; i < n; i += previewStride, sampleIndex++) {
-          const b = i * 6
-          const key = voxelKeys[sampleIndex]
-          if ((voxelCounts.get(key) || 0) === 1) singletonOffset.set(key, b)
-        }
-
-        const outlierKeys = new Set()
-        for (const [key, b] of singletonOffset) {
-          const ix = Math.floor(rawData[b]   * CELL_INV)
-          const iy = Math.floor(rawData[b+1] * CELL_INV)
-          const iz = Math.floor(rawData[b+2] * CELL_INV)
-          let nhTotal = 0
-          outer: for (let dx = -1; dx <= 1; dx++)
-            for (let dy = -1; dy <= 1; dy++)
-              for (let dz = -1; dz <= 1; dz++) {
-                nhTotal += voxelCounts.get(hashXYZ(ix+dx, iy+dy, iz+dz)) || 0
-                if (nhTotal >= SOR_MIN) break outer  // early-exit once threshold met
-              }
-          if (nhTotal < SOR_MIN) outlierKeys.add(key)
-        }
-
-        // ── Pass 3: geometry arrays ──────────────────────────────────────────
-        // Each outlier key has exactly one point (cnt=1), so:
-        const validCount  = previewCount - outlierKeys.size
-        const positions   = new Float32Array(validCount * 3)
-        const colors      = new Float32Array(validCount * 3)
-        const splatScales = new Float32Array(validCount)
-        const normals     = new Float32Array(validCount * 3)
-        let vi = 0
-
-        // Thresholds for floor/ceiling classification (20% of room height from each end)
-        const floorTop    = minY + roomHeight * 0.20
-        const ceilBottom  = maxY - roomHeight * 0.20
-
-        for (let i = 0, sampleIndex = 0; i < n; i += previewStride, sampleIndex++) {
-          const b = i * 6
-          const key = voxelKeys[sampleIndex]
-          if (outlierKeys.has(key)) continue
-
-          const cnt = voxelCounts.get(key) || 1
-          const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
-          positions[vi*3]   = px
-          positions[vi*3+1] = py + yOffset
-          positions[vi*3+2] = pz
-          colors[vi*3]      = rawData[b+3]
-          colors[vi*3+1]    = rawData[b+4]
-          colors[vi*3+2]    = rawData[b+5]
-          // Dense wall (cnt≈1000) → splatScale≈0.063 → clamped 0.25 (tiny crisp dot)
-          // Moderate  (cnt≈4)    → splatScale≈1.0   (medium fill)
-          // Sparse edge (cnt=1, passed SOR) → splatScale≈1.5 (soft gap-filler, not giant)
-          splatScales[vi] = Math.max(0.25, Math.min(1.5, 2.0 / Math.sqrt(cnt)))
-
-          // ── Surface normal estimation (cheap O(1) room-geometry heuristic) ──
-          // Classify each point as floor, ceiling, or wall based on Y position.
-          // Walls get an outward-facing horizontal normal from the room centre.
-          if (py <= floorTop) {
-            // Floor — normal points up
-            normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
-          } else if (py >= ceilBottom) {
-            // Ceiling — normal points down
-            normals[vi*3] = 0;  normals[vi*3+1] = -1; normals[vi*3+2] = 0
-          } else {
-            // Wall — outward horizontal normal away from room centre
-            let nx = px - roomCenterX, nz = pz - roomCenterZ
-            const len = Math.sqrt(nx*nx + nz*nz) || 1
-            normals[vi*3] = nx/len;  normals[vi*3+1] = 0;  normals[vi*3+2] = nz/len
-          }
-
-          vi++
-        }
 
         const geo = new THREE.BufferGeometry()
         geo.setAttribute('position',   new THREE.BufferAttribute(positions,  3))
