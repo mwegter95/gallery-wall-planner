@@ -475,32 +475,6 @@ export default function App() {
   /* ── Space Builder save ──────────────────────────────── */
   const handleSaveSpace = useCallback(async (space, onProgress) => {
     const report = (pct) => { try { onProgress?.(pct) } catch {} }
-    const MAX_UPLOAD_BYTES = 24 * 1024 * 1024
-    const FLOATS_PER_POINT = 6
-
-    const decimateForUpload = (arr) => {
-      if (!arr?.length) return arr
-      const totalBytes = arr.byteLength
-      if (totalBytes <= MAX_UPLOAD_BYTES) return arr
-
-      const totalPoints = Math.floor(arr.length / FLOATS_PER_POINT)
-      const targetPoints = Math.max(120_000, Math.floor(MAX_UPLOAD_BYTES / (FLOATS_PER_POINT * 4)))
-      const stride = Math.max(1, Math.ceil(totalPoints / targetPoints))
-      const keptPoints = Math.ceil(totalPoints / stride)
-      const out = new Float32Array(keptPoints * FLOATS_PER_POINT)
-
-      let oi = 0
-      for (let i = 0; i < totalPoints; i += stride) {
-        const bi = i * FLOATS_PER_POINT
-        out[oi++] = arr[bi]
-        out[oi++] = arr[bi + 1]
-        out[oi++] = arr[bi + 2]
-        out[oi++] = arr[bi + 3]
-        out[oi++] = arr[bi + 4]
-        out[oi++] = arr[bi + 5]
-      }
-      return out
-    }
 
     const rawSnapshots = space.roomScan?.snapshots || []
     const usableSnapshots = rawSnapshots.filter(s =>
@@ -559,20 +533,19 @@ export default function App() {
         let arrayBuffer
         if (pc._buffer) {
           // Live scan: buffer already decoded in memory — zero copy
-          const arr = decimateForUpload(pc._buffer.toFloat32Array())
+          const arr = pc._buffer.toFloat32Array()
           arrayBuffer = arr.buffer.slice(0, arr.byteLength)
         } else {
           // Legacy base64 path: decode to binary
           const raw = atob(pc.data)
           const bytes = new Uint8Array(raw.length)
           for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
-          const arr = decimateForUpload(new Float32Array(bytes.buffer))
-          arrayBuffer = arr.buffer.slice(0, arr.byteLength)
+          arrayBuffer = bytes.buffer.slice(0)
         }
         let uploadError = null
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            const { url } = await api.uploadPointCloud(space.id, arrayBuffer, (frac) => {
+            const { url } = await api.uploadPointCloudChunked(space.id, arrayBuffer, (frac) => {
               // Keep progress moving even before first server bytes arrive.
               const floor = 12 + (attempt - 1) * 2
               report(Math.max(floor, 12 + Math.round(frac * 56)))   // 12% → 68%

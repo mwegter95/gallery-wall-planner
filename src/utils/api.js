@@ -308,6 +308,84 @@ export function uploadPointCloud(roomId, arrayBuffer, onProgress) {
   })
 }
 
+/**
+ * Upload a raw point cloud using chunked transfer to improve reliability on large files.
+ * Falls back to the legacy single-request upload if the backend chunk endpoint is unavailable.
+ */
+export async function uploadPointCloudChunked(roomId, arrayBuffer, onProgress, options = {}) {
+  const totalBytes = arrayBuffer?.byteLength || 0
+  if (totalBytes <= 0) throw new Error('Point cloud upload: empty payload')
+
+  const chunkSize = Math.max(512 * 1024, options.chunkSize || (4 * 1024 * 1024))
+  if (totalBytes <= chunkSize) {
+    return uploadPointCloud(roomId, arrayBuffer, onProgress)
+  }
+
+  const jwt = getJwt()
+  const device = getDeviceToken()
+  const uploadId = crypto.randomUUID()
+  const totalChunks = Math.ceil(totalBytes / chunkSize)
+
+  let completedBytes = 0
+
+  const sendChunk = (chunkBuffer, chunkIndex) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return
+        onProgress(Math.min(1, (completedBytes + e.loaded) / totalBytes))
+      }
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const body = JSON.parse(xhr.responseText || '{}')
+          resolve(body)
+        } catch {
+          resolve({})
+        }
+      } else {
+        const err = new Error(`Point cloud chunk upload failed: ${xhr.status}`)
+        err.status = xhr.status
+        reject(err)
+      }
+    }
+    xhr.onerror = () => reject(new Error('Point cloud chunk upload: network error'))
+    xhr.open('POST', `${BASE}/api/rooms/${roomId}/pointcloud/chunk`)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.setRequestHeader('X-Device-Token', device)
+    xhr.setRequestHeader('X-Upload-Id', uploadId)
+    xhr.setRequestHeader('X-Chunk-Index', String(chunkIndex))
+    xhr.setRequestHeader('X-Chunk-Total', String(totalChunks))
+    if (jwt) {
+      xhr.setRequestHeader('Authorization', `Bearer ${jwt}`)
+      xhr.setRequestHeader('X-Auth-Token', jwt)
+    }
+    xhr.send(chunkBuffer)
+  })
+
+  try {
+    let finalUrl = null
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+      const start = chunkIndex * chunkSize
+      const end = Math.min(totalBytes, start + chunkSize)
+      const chunk = arrayBuffer.slice(start, end)
+      const body = await sendChunk(chunk, chunkIndex)
+      completedBytes = end
+      if (onProgress) onProgress(Math.min(1, completedBytes / totalBytes))
+      if (body?.url) finalUrl = body.url
+    }
+    if (!finalUrl) throw new Error('Point cloud chunk upload failed: missing final URL')
+    return { url: finalUrl?.startsWith('/') ? `${BASE}${finalUrl}` : finalUrl }
+  } catch (err) {
+    // Backward compatibility: if server does not expose chunk endpoint yet, use legacy upload.
+    if (err?.status === 404 || err?.status === 405) {
+      return uploadPointCloud(roomId, arrayBuffer, onProgress)
+    }
+    throw err
+  }
+}
+
 export async function deleteRoom(roomId) {
   return apiFetch(`/api/rooms/${roomId}`, { method: 'DELETE' })
 }
