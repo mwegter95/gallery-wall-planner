@@ -1428,11 +1428,10 @@ export default function SpaceBuilderCanvas({
           <div>Accepted: {projectionDiag.acceptedPct.toFixed(1)}%</div>
           <div>Fallback: {projectionDiag.fallbackPct.toFixed(1)}%</div>
           <div>Multi-view: {projectionDiag.multiViewPct.toFixed(1)}%</div>
-          <div>Voxel-coherent: {((100 * (projectionDiag.voxelCoherentPoints || 0)) / Math.max(1, projectionDiag.acceptedPoints || 1)).toFixed(1)}%</div>
           <div>Depth reject: {projectionDiag.depthRejected.toLocaleString()}</div>
           <div>Score reject: {projectionDiag.scoreRejected.toLocaleString()}</div>
           <div>Edge reject: {(projectionDiag.edgeRejected || 0).toLocaleString()}</div>
-          <div>Voxel override: {(projectionDiag.voxelOverridePoints || 0).toLocaleString()}</div>
+          <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
           <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
         </div>
       )}

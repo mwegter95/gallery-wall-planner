@@ -9,8 +9,9 @@
  *   1. Transform P into each snapshot's camera space: cp = V * P  (V = inverse(transform))
  *   2. Skip if cp.z ≥ 0 (behind camera) or projected UV is outside image bounds.
  *   3. Score = cosine of angle from camera axis = (-cp.z) / |cp| (want ≈ 1 = dead-on).
- *   4. Pick the best view per point, then enforce local voxel-level view coherence.
- *   5. Sample the selected JPEG at the projected pixel; replace depth-sensor colour.
+ *   4. Pick the best view per point with strict visibility and edge-of-lens gating.
+ *   5. Reject ambiguous multi-view ties to avoid ghost duplicates.
+ *   6. Sample the selected JPEG at the projected pixel; replace depth-sensor colour.
  *
  * Coordinate system (ARKit):
  *   - Camera looks along –Z in camera space.
@@ -113,8 +114,8 @@ const COLOR_GATE_L1 = 0.33
 const MIN_PROJECTION_SCORE = 0.2
 const VIEW_EDGE_SIGMA = 0.85
 const VIEW_EDGE_HARD_RADIUS2 = 2.2
-const VIEW_COHERENCE_VOXEL_SIZE = 0.18
-const VIEW_COHERENCE_MIN_CONFIDENCE = 0.14
+const AMBIGUITY_SCORE_RATIO = 0.92
+const AMBIGUITY_COLOR_L1 = 0.26
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   const longest = Math.max(width, height)
@@ -152,45 +153,6 @@ function edgeCentralityWeight(intr, u, v) {
   if (r2 > VIEW_EDGE_HARD_RADIUS2) return { weight: 0, r2 }
   const weight = Math.exp(-r2 / (2 * VIEW_EDGE_SIGMA * VIEW_EDGE_SIGMA))
   return { weight, r2 }
-}
-
-function voxelKey(wx, wy, wz, size = VIEW_COHERENCE_VOXEL_SIZE) {
-  const ix = Math.floor(wx / size)
-  const iy = Math.floor(wy / size)
-  const iz = Math.floor(wz / size)
-  return `${ix}|${iy}|${iz}`
-}
-
-function updateVoxelVote(vote, si, weight) {
-  if (!vote) return { aSi: si, aW: weight, bSi: -1, bW: 0 }
-
-  if (vote.aSi === si) {
-    vote.aW += weight
-    return vote
-  }
-  if (vote.bSi === si) {
-    vote.bW += weight
-    return vote
-  }
-
-  if (vote.aW <= vote.bW) {
-    vote.aSi = si
-    vote.aW = weight
-  } else {
-    vote.bSi = si
-    vote.bW = weight
-  }
-  return vote
-}
-
-function getVoxelDominant(vote) {
-  if (!vote) return null
-  const maxW = Math.max(vote.aW, vote.bW)
-  const minW = Math.min(vote.aW, vote.bW)
-  const si = vote.aW >= vote.bW ? vote.aSi : vote.bSi
-  if (!Number.isFinite(maxW) || maxW <= 0 || si < 0) return null
-  const confidence = (maxW - minW) / (maxW + minW + 1e-6)
-  return { si, confidence }
 }
 
 function projectToSnapshotVerbose(wx, wy, wz, view, intr) {
@@ -362,9 +324,6 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const views = snapshots.map(s => invertRigid(s.transform))
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
-  const bestSnapshotByPoint = new Int16Array(n)
-  bestSnapshotByPoint.fill(-1)
-  const voxelVotes = new Map()
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -378,12 +337,10 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     singleView: 0,
     multiView: 0,
     edgeRejected: 0,
-    voxelCoherent: 0,
-    voxelOverride: 0,
-    dominantFallback: 0,
+    ambiguousRejected: 0,
   } : null
 
-  // Pass 1: per-point candidate search + voxel-level dominant view voting.
+  // Per-point single-view assignment with ambiguity rejection.
   for (let i = 0; i < n; i++) {
     if (i > 0 && i % YIELD_EVERY === 0) {
       await new Promise(r => setTimeout(r, 0))
@@ -393,9 +350,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const wx = D[b],  wy = D[b+1], wz = D[b+2]   // original world coords (no yOffset)
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
 
-    let bestSi = -1
-    let bestScore = -Infinity
-    let bestResidual = Infinity
+    let best = null
+    let second = null
 
     for (let si = 0; si < S; si++) {
       let proj
@@ -437,80 +393,42 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         continue
       }
 
-      if (weightedScore > bestScore || (Math.abs(weightedScore - bestScore) < 1e-9 && depthResidual < bestResidual)) {
-        bestScore = weightedScore
-        bestResidual = depthResidual
-        bestSi = si
+      const px = pixMaps[si]
+      const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
+      const candidate = { si, score: weightedScore, depthResidual, proj, color }
+
+      if (!best || candidate.score > best.score || (Math.abs(candidate.score - best.score) < 1e-9 && candidate.depthResidual < best.depthResidual)) {
+        second = best
+        best = candidate
+      } else if (!second || candidate.score > second.score || (Math.abs(candidate.score - second.score) < 1e-9 && candidate.depthResidual < second.depthResidual)) {
+        second = candidate
       }
     }
 
-    bestSnapshotByPoint[i] = bestSi
-    if (bestSi >= 0) {
-      const key = voxelKey(wx, wy, wz)
-      voxelVotes.set(key, updateVoxelVote(voxelVotes.get(key), bestSi, Math.max(1e-5, bestScore)))
-    }
-  }
-
-  // Pass 2: enforce voxel-coherent dominant view, then sample color.
-  for (let i = 0; i < n; i++) {
-    if (i > 0 && i % YIELD_EVERY === 0) {
-      await new Promise(r => setTimeout(r, 0))
-    }
-
-    const b = i * 6
-    const wx = D[b], wy = D[b + 1], wz = D[b + 2]
-    const or = D[b + 3], og = D[b + 4], ob = D[b + 5]
-    const bestSi = bestSnapshotByPoint[i]
-    const dom = getVoxelDominant(voxelVotes.get(voxelKey(wx, wy, wz)))
-
-    let chosenSi = -1
-    let chosenProj = null
-
-    const tryUseSnapshot = (si) => {
-      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
-      if (!proj) return null
-
-      const center = edgeCentralityWeight(intrs[si], proj.u, proj.v)
-      if (center.weight <= 0) return null
-
-      const atlas = atlases[si]
-      const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
-      const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
-      const idx = ay * atlas.width + ax
-      if (!isDepthVisible(proj.depth, atlas.depth[idx])) return null
-
-      const weightedScore = proj.score * center.weight
-      if (weightedScore < MIN_PROJECTION_SCORE) return null
-      return proj
-    }
-
-    if (dom && dom.confidence >= VIEW_COHERENCE_MIN_CONFIDENCE) {
-      const proj = tryUseSnapshot(dom.si)
-      if (proj) {
-        chosenSi = dom.si
-        chosenProj = proj
-        if (stats) {
-          stats.voxelCoherent++
-          if (bestSi >= 0 && dom.si !== bestSi) stats.voxelOverride++
+    if (best) {
+      // If two views are similarly plausible but disagree in colour, projection is ambiguous.
+      // Keep fallback colour here to avoid duplicate/ghost overlays.
+      if (second) {
+        const ratio = second.score / (best.score + 1e-6)
+        const disagreement =
+          Math.abs(best.color[0] - second.color[0]) +
+          Math.abs(best.color[1] - second.color[1]) +
+          Math.abs(best.color[2] - second.color[2])
+        if (ratio >= AMBIGUITY_SCORE_RATIO && disagreement >= AMBIGUITY_COLOR_L1) {
+          newColors[i*3] = or
+          newColors[i*3+1] = og
+          newColors[i*3+2] = ob
+          if (stats) {
+            stats.ambiguousRejected++
+            stats.fallback++
+          }
+          continue
         }
       }
-    }
 
-    if (chosenSi < 0 && bestSi >= 0) {
-      const proj = tryUseSnapshot(bestSi)
-      if (proj) {
-        chosenSi = bestSi
-        chosenProj = proj
-        if (stats && dom && dom.confidence >= VIEW_COHERENCE_MIN_CONFIDENCE) stats.dominantFallback++
-      }
-    }
-
-    if (chosenSi >= 0 && chosenProj) {
-      const px = pixMaps[chosenSi]
-      const color = bilinearSampleRGBA(px.data, px.width, px.height, chosenProj.u, chosenProj.v)
-      newColors[i*3] = color[0]
-      newColors[i*3+1] = color[1]
-      newColors[i*3+2] = color[2]
+      newColors[i*3] = best.color[0]
+      newColors[i*3+1] = best.color[1]
+      newColors[i*3+2] = best.color[2]
       if (stats) {
         stats.accepted++
         stats.singleView++
@@ -539,9 +457,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       multiViewPoints: stats.multiView,
       multiViewPct: stats.accepted > 0 ? (100 * stats.multiView / stats.accepted) : 0,
       edgeRejected: stats.edgeRejected,
-      voxelCoherentPoints: stats.voxelCoherent,
-      voxelOverridePoints: stats.voxelOverride,
-      dominantFallbackPoints: stats.dominantFallback,
+      ambiguousRejected: stats.ambiguousRejected,
     })
   }
 

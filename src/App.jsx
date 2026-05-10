@@ -16,7 +16,7 @@ import Tutorial, { TUTORIAL_STEP_COUNT, TUTORIAL_LOCK_STEP, TUTORIAL_GRID_STEP }
 import * as api from './utils/api'
 import { DEFAULT_SNAP } from './utils/units'
 import { buildPhotoColors } from './utils/photoMesh'
-import { toRoomScanMeta } from './utils/roomScanPersistence'
+import { normalizeLoadedRooms, toRoomScanMeta, toRoomsSnapshot } from './utils/roomScanPersistence'
 import './App.css'
 
 const TUTORIAL_KEY = 'gwp-tutorial-done'
@@ -143,23 +143,7 @@ export default function App() {
       if (savedPaintLayers && Object.keys(savedPaintLayers).length > 0) {
         setWallPaintLayers(savedPaintLayers)
       }
-      // Fix relative image URLs in room surface warped images
-      const roomsObj = savedRooms || {}
-      for (const room of Object.values(roomsObj)) {
-        if (room.roomScan?.pointCloud?.url?.startsWith('/')) {
-          room.roomScan.pointCloud.url = api.fixUrl(room.roomScan.pointCloud.url)
-        }
-        if (Array.isArray(room.roomScan?.snapshots)) {
-          room.roomScan.snapshots = room.roomScan.snapshots.filter(s =>
-            (s?.dataUrl || s?.jpegB64) &&
-            Array.isArray(s?.transform) && s.transform.length === 16 &&
-            Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
-          )
-        }
-        for (const surface of Object.values(room.surfaces || {})) {
-          if (surface.warpedImageUrl?.startsWith('/')) surface.warpedImageUrl = api.fixUrl(surface.warpedImageUrl)
-        }
-      }
+      const roomsObj = normalizeLoadedRooms(savedRooms || {}, api.fixUrl)
       setRooms(roomsObj)
 
       // ── Auto-migrate existing pieces into library (runs once if library is empty) ──
@@ -262,6 +246,7 @@ export default function App() {
         setWalls(wallsObj)
         setAllLayouts(layoutsObj)
         setLibrary(libObj)
+        setRooms(normalizeLoadedRooms(snap.rooms || {}, api.fixUrl))
         // Restore unsaved canvas pieces so work survives refresh while offline
         if (snap.activePieces?.length > 0) {
           const fixedPieces = snap.activePieces.map(p =>
@@ -281,6 +266,7 @@ export default function App() {
         // hasLoadedRef set in finally
       } else {
         setWalls({})
+        setRooms({})
         setActiveWallId(null)
         // No auto-open — new users see the tutorial, returning users use the header badge
       }
@@ -291,7 +277,7 @@ export default function App() {
       hasLoadedRef.current = true
       setIsLoading(false)
     }
-  }, [])
+  }, [rooms])
 
   /* ── Boot ──────────────────────────────────────────────── */
   useEffect(() => { loadAppState() }, [loadAppState])
@@ -306,10 +292,11 @@ export default function App() {
     try {
       localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({
         walls, allLayouts, library,
+        rooms: toRoomsSnapshot(rooms),
         activePieces: pieces, activeWallId, currentLayout,
       }))
     } catch { /* storage full - ignore */ }
-  }, [walls, allLayouts, library, pieces, activeWallId, currentLayout])
+  }, [walls, allLayouts, library, rooms, pieces, activeWallId, currentLayout])
 
   /* ── Track last named layout — survives logout/login ──── */
   useEffect(() => {
@@ -521,14 +508,11 @@ export default function App() {
     // The blob is uploaded separately below with real XHR progress.
     const pc = space.roomScan?.pointCloud
     const hasBinary = pc && (pc._buffer || pc.data)  // in-memory scan OR legacy base64
-    const spaceForMeta = space.roomScan
-      ? { ...space, roomScan: toRoomScanMeta(space.roomScan) }
-      : space
+    const previousUrl = pc?.url || rooms[space.id]?.roomScan?.pointCloud?.url || null
+    let pointCloudUrl = previousUrl
 
     report(5)
-    await api.putRoom(spaceForMeta)   // fast — no binary blob
     report(12)
-    setRooms(prev => ({ ...prev, [space.id]: space }))  // keep full object in local state
 
     // ── Upload binary point cloud separately (12% → 68%) ──────────────────────
     if (hasBinary) {
@@ -548,19 +532,29 @@ export default function App() {
         const { url } = await api.uploadPointCloud(space.id, arrayBuffer, (frac) => {
           report(12 + Math.round(frac * 56))   // 12% → 68%
         })
-        // Patch the room record with the resolved URL (fast — just a string now)
-        const roomWithUrl = {
-          ...space,
-          roomScan: space.roomScan
-            ? { ...toRoomScanMeta(space.roomScan), pointCloud: { pointCount: pc.pointCount, url } }
-            : null,
-        }
-        await api.putRoom(roomWithUrl)
-        setRooms(prev => ({ ...prev, [roomWithUrl.id]: roomWithUrl }))
+        pointCloudUrl = url || pointCloudUrl
       } catch (err) {
         console.error('[handleSaveSpace] point cloud upload failed', err)
+        if (!pointCloudUrl) {
+          throw new Error('Point cloud upload failed; room was not saved to avoid missing scan data on reload.')
+        }
       }
     }
+
+    const roomMeta = space.roomScan
+      ? {
+          ...toRoomScanMeta(space.roomScan),
+          pointCloud: {
+            pointCount: pc?.pointCount ?? space.roomScan.pointCloud?.pointCount ?? 0,
+            url: pointCloudUrl,
+          },
+        }
+      : null
+
+    const spaceForMeta = roomMeta ? { ...space, roomScan: roomMeta } : space
+    await api.putRoom(spaceForMeta)
+    setRooms(prev => ({ ...prev, [space.id]: { ...space, roomScan: roomMeta } }))
+
     report(68)
 
     // ── Upload all warped surface images first, then save walls with URLs ──
