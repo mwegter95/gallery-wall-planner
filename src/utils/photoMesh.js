@@ -112,11 +112,12 @@ const VISIBILITY_ABS_TOL = 0.03
 const FUSION_MAX_CANDIDATES = 1
 const COLOR_GATE_L1 = 0.33
 const MIN_PROJECTION_SCORE = 0.2
-const VIEW_EDGE_SIGMA = 0.85
-const VIEW_EDGE_HARD_RADIUS2 = 2.2
+const VIEW_EDGE_SIGMA = 0.62
+const VIEW_EDGE_HARD_RADIUS2 = 1.35
 const AMBIGUITY_SCORE_RATIO = 0.92
 const AMBIGUITY_COLOR_L1 = 0.26
-const PLANE_FACING_MIN = 0.22
+const PLANE_FACING_MIN = 0.05
+const PLANE_CONFIDENT_MIN = 0.55
 const PLANE_EDGE_SOFT = 0.12
 
 function estimateRoomFrame(buf) {
@@ -509,11 +510,16 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const planeFacing = plane
         ? Math.max(0, -(plane.normal[0] * toCam[0] + plane.normal[1] * toCam[1] + plane.normal[2] * toCam[2]))
         : 1
-      if (planeFacing < PLANE_FACING_MIN) {
+      // Only hard-reject on plane-facing when plane classification is confident.
+      // Low-confidence points near boundaries should still be projectable.
+      if (plane && plane.confidence >= PLANE_CONFIDENT_MIN && planeFacing < PLANE_FACING_MIN) {
         if (stats) stats.planeRejected++
         continue
       }
-      const weightedScore = proj.score * center.weight * (0.35 + 0.65 * planeFacing) * (plane ? (0.5 + 0.5 * plane.confidence) : 1)
+      const planeWeight = plane
+        ? (0.7 + 0.3 * plane.confidence) * (0.55 + 0.45 * planeFacing)
+        : 1
+      const weightedScore = proj.score * center.weight * planeWeight
 
       if (weightedScore < MIN_PROJECTION_SCORE) {
         if (stats) stats.scoreRejected++
