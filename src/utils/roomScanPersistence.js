@@ -18,7 +18,7 @@ export function cloneRoomForEditing(room) {
 
 /**
  * Build a compact roomScan payload for persistence.
- * Drops heavy snapshot image payloads and raw point-cloud binary fields.
+ * Keeps a compact keyframe snapshot set for reprojection and drops raw point-cloud binary fields.
  */
 export function toRoomScanMeta(roomScan) {
   if (!roomScan) return roomScan
@@ -26,9 +26,26 @@ export function toRoomScanMeta(roomScan) {
   const pointCloud = pc
     ? { pointCount: pc.pointCount, url: pc.url ?? null }
     : pc
+
+  const snapshots = Array.isArray(roomScan.snapshots)
+    ? roomScan.snapshots
+        .filter(s =>
+          (s?.dataUrl || s?.jpegB64) &&
+          Array.isArray(s?.transform) && s.transform.length === 16 &&
+          Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
+        )
+        // Keep a compact but useful keyframe set for post-reload reprojection.
+        .slice(-36)
+        .map(s => ({
+          ...(s.dataUrl ? { dataUrl: s.dataUrl } : { jpegB64: s.jpegB64 }),
+          transform: s.transform,
+          intrinsics: s.intrinsics,
+        }))
+    : []
+
   return {
     ...roomScan,
     pointCloud,
-    snapshots: [],
+    snapshots,
   }
 }

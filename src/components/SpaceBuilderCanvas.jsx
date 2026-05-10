@@ -113,14 +113,14 @@ const SPLAT_VERT = /* glsl */`
     // show as thin gaps between dots on walls viewed edge-on.
     // angleFactor is clamped so head-on surfaces (mvN.z≈1) stay crisp.
     vec3  mvN       = normalize(normalMatrix * aNormal);
-    float cosView   = max(0.15, abs(mvN.z));
-    float angleFactor = 1.0 / cosView;   // 1.0 head-on → up to 6.7× at 81° grazing
+    float cosView   = max(0.28, abs(mvN.z));
+    float angleFactor = min(2.2, 1.0 / cosView);   // cap grazing boost to avoid bubble artifacts
 
     // Factor 8 × angleFactor: for a dead-on wall (cosView≈1) this is 8,
     // giving ≈1.5 device-px for dense surfaces.  At 75° (cosView≈0.26) it's ≈30,
     // which fills the elongated inter-point gaps without overdrawing.
     // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizes consistent across FOV presets.
-    gl_PointSize = clamp(8.0 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.5, 64.0);
+    gl_PointSize = clamp(5.2 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.2, 22.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -212,6 +212,14 @@ export default function SpaceBuilderCanvas({
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   const [fov,           setFov]           = useState(55)
   const [zoomRadius,    setZoomRadius]    = useState(8)   // mirrors orbit.radius for slider UI
+  const [projectionDiag, setProjectionDiag] = useState(null)
+  const [showProjectionDiag, setShowProjectionDiag] = useState(() => {
+    try {
+      return localStorage.getItem('gwp-projection-diag') === '1'
+    } catch {
+      return false
+    }
+  })
   const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
   setZoomRef.current = setZoomRadius
   // When a room scan is loaded, orbit switches to FPS mode (camera rotates in
@@ -754,7 +762,10 @@ export default function SpaceBuilderCanvas({
     // Switch orbit style based on whether a scan is loaded
     cameraFPSRef.current = !!roomScan
 
-    if (!roomScan) return
+    if (!roomScan) {
+      setProjectionDiag(null)
+      return
+    }
 
     let cancelled = false
 
@@ -923,6 +934,7 @@ export default function SpaceBuilderCanvas({
             Array.isArray(s?.transform) && s.transform.length === 16 &&
             Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
           ),
+          72,
         )
 
         // ── Photo retexture (async, after cloud is visible) ────────────────
@@ -933,7 +945,11 @@ export default function SpaceBuilderCanvas({
         if (snapshots?.length) {
           ;(async () => {
             try {
-              const newColors = await buildPhotoColorsForPositions(positions, colors, snapshots, yOffsetRef.current)
+              const newColors = await buildPhotoColorsForPositions(positions, colors, snapshots, yOffsetRef.current, {
+                onDiagnostics: (diag) => {
+                  if (!cancelled) setProjectionDiag(diag)
+                },
+              })
               if (cancelled || !newColors) return
               const colAttr = geo.getAttribute('color')
               colAttr.array.set(newColors)
@@ -1387,6 +1403,62 @@ export default function SpaceBuilderCanvas({
         <span>Dbl-click: crop corners</span>
         <span>Scroll: zoom in/out</span>
       </div>
+      {roomScan && projectionDiag && showProjectionDiag && (
+        <div
+          style={{
+            position: 'absolute',
+            right: 14,
+            bottom: 180,
+            zIndex: 8,
+            background: 'rgba(9,12,18,0.74)',
+            border: '1px solid rgba(90,150,255,0.35)',
+            borderRadius: 10,
+            color: '#cfe2ff',
+            fontSize: 12,
+            lineHeight: 1.35,
+            padding: '8px 10px',
+            minWidth: 180,
+            backdropFilter: 'blur(4px)',
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Projection Diagnostics</div>
+          <div>Accepted: {projectionDiag.acceptedPct.toFixed(1)}%</div>
+          <div>Fallback: {projectionDiag.fallbackPct.toFixed(1)}%</div>
+          <div>Multi-view: {projectionDiag.multiViewPct.toFixed(1)}%</div>
+          <div>Depth reject: {projectionDiag.depthRejected.toLocaleString()}</div>
+          <div>Score reject: {projectionDiag.scoreRejected.toLocaleString()}</div>
+          <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
+        </div>
+      )}
+
+      {roomScan && (
+        <button
+          type="button"
+          onClick={() => {
+            setShowProjectionDiag(prev => {
+              const next = !prev
+              try { localStorage.setItem('gwp-projection-diag', next ? '1' : '0') } catch {}
+              return next
+            })
+          }}
+          style={{
+            position: 'absolute',
+            right: 14,
+            bottom: 146,
+            zIndex: 8,
+            border: '1px solid rgba(120,160,230,0.45)',
+            background: 'rgba(16,20,30,0.66)',
+            color: '#c7d9ff',
+            borderRadius: 8,
+            padding: '4px 8px',
+            fontSize: 11,
+            cursor: 'pointer',
+          }}
+        >
+          {showProjectionDiag ? 'Hide Projection Stats' : 'Show Projection Stats'}
+        </button>
+      )}
+
       {space.surfaces.length === 0 && !roomScan && (
         <div className="sbc-3d-empty">
           <svg width="56" height="56" viewBox="0 0 56 56" fill="none">

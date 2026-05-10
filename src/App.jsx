@@ -149,6 +149,13 @@ export default function App() {
         if (room.roomScan?.pointCloud?.url?.startsWith('/')) {
           room.roomScan.pointCloud.url = api.fixUrl(room.roomScan.pointCloud.url)
         }
+        if (Array.isArray(room.roomScan?.snapshots)) {
+          room.roomScan.snapshots = room.roomScan.snapshots.filter(s =>
+            (s?.dataUrl || s?.jpegB64) &&
+            Array.isArray(s?.transform) && s.transform.length === 16 &&
+            Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
+          )
+        }
         for (const surface of Object.values(room.surfaces || {})) {
           if (surface.warpedImageUrl?.startsWith('/')) surface.warpedImageUrl = api.fixUrl(surface.warpedImageUrl)
         }

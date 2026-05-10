@@ -104,12 +104,13 @@ export function normalizeIntrinsicsForImage(intrinsics, width, height) {
   return [fx * sx, fy * sy, cx * sx, cy * sy, dstW, dstH]
 }
 
-const VISIBILITY_TARGET_SAMPLES = 900_000
-const VISIBILITY_MAX_DIM = 512
+const VISIBILITY_TARGET_SAMPLES = 1_800_000
+const VISIBILITY_MAX_DIM = 768
 const VISIBILITY_REL_TOL = 0.03
 const VISIBILITY_ABS_TOL = 0.06
 const FUSION_MAX_CANDIDATES = 3
 const COLOR_GATE_L1 = 0.33
+const MIN_PROJECTION_SCORE = 0.12
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   const longest = Math.max(width, height)
@@ -136,6 +137,24 @@ function projectToSnapshot(wx, wy, wz, view, intr) {
   const proximity = 1 / (1 + 0.08 * depth)
   const score = facing * proximity
   return { u, v, depth, score }
+}
+
+function projectToSnapshotVerbose(wx, wy, wz, view, intr) {
+  const cpx = view[0] * wx + view[4] * wy + view[8] * wz + view[12]
+  const cpy = view[1] * wx + view[5] * wy + view[9] * wz + view[13]
+  const cpz = view[2] * wx + view[6] * wy + view[10] * wz + view[14]
+  if (cpz >= 0) return { ok: false, reason: 'behind' }
+
+  const depth = -cpz
+  const u = intr[0] * cpx / depth + intr[2]
+  const v = intr[1] * cpy / depth + intr[3]
+  if (u < 0 || v < 0 || u >= intr[4] || v >= intr[5]) return { ok: false, reason: 'outside' }
+
+  const invLen2 = 1 / (cpx * cpx + cpy * cpy + depth * depth)
+  const facing = depth * depth * invLen2
+  const proximity = 1 / (1 + 0.08 * depth)
+  const score = facing * proximity
+  return { ok: true, u, v, depth, score }
 }
 
 export function isDepthVisible(sampleDepth, mapDepth, relTol = VISIBILITY_REL_TOL, absTol = VISIBILITY_ABS_TOL) {
@@ -231,7 +250,7 @@ async function buildVisibilityAtlases(buf, views, intrs, {
  * @param {number} [yOffset=0]
  * @returns {Promise<Float32Array | null>}
  */
-export async function buildPhotoColorsForPositions(positions, fallback, snapshots, yOffset = 0) {
+export async function buildPhotoColorsForPositions(positions, fallback, snapshots, yOffset = 0, options = {}) {
   const n = (positions.length / 3) | 0
   if (n === 0 || !snapshots?.length) return null
   // Assemble a fake PointCloudBuffer row layout: [x, y_arkit, z, r, g, b]
@@ -244,7 +263,7 @@ export async function buildPhotoColorsForPositions(positions, fallback, snapshot
     data[i*6+4] = fallback[i*3+1]
     data[i*6+5] = fallback[i*3+2]
   }
-  return buildPhotoColors({ _data: data, pointCount: n }, snapshots)
+  return buildPhotoColors({ _data: data, pointCount: n }, snapshots, options)
 }
 
 /**
@@ -255,7 +274,7 @@ export async function buildPhotoColorsForPositions(positions, fallback, snapshot
  * @param {{ dataUrl?:string, jpegB64?:string, transform:number[], intrinsics:number[] }[]} snapshots
  * @returns {Promise<Float32Array | null>}
  */
-export async function buildPhotoColors(buf, snapshots) {
+export async function buildPhotoColors(buf, snapshots, options = {}) {
   if (!snapshots?.length) return null
 
   const n = buf.pointCount
@@ -284,6 +303,19 @@ export async function buildPhotoColors(buf, snapshots) {
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
 
+  const stats = options?.onDiagnostics ? {
+    points: n,
+    behindCamera: 0,
+    outsideFrame: 0,
+    depthRejected: 0,
+    scoreRejected: 0,
+    withProjection: 0,
+    accepted: 0,
+    fallback: 0,
+    singleView: 0,
+    multiView: 0,
+  } : null
+
   for (let i = 0; i < n; i++) {
     // Yield to browser to keep UI responsive
     if (i > 0 && i % YIELD_EVERY === 0) {
@@ -297,14 +329,34 @@ export async function buildPhotoColors(buf, snapshots) {
     const candidates = []
 
     for (let si = 0; si < S; si++) {
-      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
-      if (!proj) continue
+      let proj
+      if (stats) {
+        const verbose = projectToSnapshotVerbose(wx, wy, wz, views[si], intrs[si])
+        if (!verbose.ok) {
+          if (verbose.reason === 'behind') stats.behindCamera++
+          else stats.outsideFrame++
+          continue
+        }
+        proj = verbose
+      } else {
+        proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
+        if (!proj) continue
+      }
+      if (stats) stats.withProjection++
 
       const atlas = atlases[si]
       const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
       const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
       const idx = ay * atlas.width + ax
-      if (!isDepthVisible(proj.depth, atlas.depth[idx])) continue
+      if (!isDepthVisible(proj.depth, atlas.depth[idx])) {
+        if (stats) stats.depthRejected++
+        continue
+      }
+
+      if (proj.score < MIN_PROJECTION_SCORE) {
+        if (stats) stats.scoreRejected++
+        continue
+      }
 
       const px = pixMaps[si]
       const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
@@ -320,12 +372,36 @@ export async function buildPhotoColors(buf, snapshots) {
       newColors[i*3] = fused[0]
       newColors[i*3+1] = fused[1]
       newColors[i*3+2] = fused[2]
+      if (stats) {
+        stats.accepted++
+        if (candidates.length === 1) stats.singleView++
+        else stats.multiView++
+      }
     } else {
       // No snapshot covers this point — keep original depth-sensor colour
       newColors[i*3]   = or
       newColors[i*3+1] = og
       newColors[i*3+2] = ob
+      if (stats) stats.fallback++
     }
+  }
+
+  if (stats) {
+    const pct = (value, denom = stats.points) => denom > 0 ? (100 * value / denom) : 0
+    options.onDiagnostics({
+      points: stats.points,
+      acceptedPoints: stats.accepted,
+      fallbackPoints: stats.fallback,
+      acceptedPct: pct(stats.accepted),
+      fallbackPct: pct(stats.fallback),
+      depthRejected: stats.depthRejected,
+      scoreRejected: stats.scoreRejected,
+      behindCamera: stats.behindCamera,
+      outsideFrame: stats.outsideFrame,
+      singleViewPoints: stats.singleView,
+      multiViewPoints: stats.multiView,
+      multiViewPct: stats.accepted > 0 ? (100 * stats.multiView / stats.accepted) : 0,
+    })
   }
 
   return newColors

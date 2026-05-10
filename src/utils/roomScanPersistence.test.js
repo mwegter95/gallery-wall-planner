@@ -26,11 +26,15 @@ describe('roomScanPersistence', () => {
         data: 'abc',
         url: '/uploads/walls/pc.bin',
       },
-      snapshots: [{ dataUrl: 'data:image/jpeg;base64,abc' }],
+      snapshots: [{
+        dataUrl: 'data:image/jpeg;base64,abc',
+        transform: new Array(16).fill(0),
+        intrinsics: [10, 10, 5, 5, 100, 100],
+      }],
     }
 
     const meta = toRoomScanMeta(roomScan)
     expect(meta.pointCloud).toEqual({ pointCount: 42, url: '/uploads/walls/pc.bin' })
-    expect(meta.snapshots).toEqual([])
+    expect(meta.snapshots).toHaveLength(1)
   })
 })
