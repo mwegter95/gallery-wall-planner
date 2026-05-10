@@ -1431,6 +1431,7 @@ export default function SpaceBuilderCanvas({
           <div>Depth reject: {projectionDiag.depthRejected.toLocaleString()}</div>
           <div>Score reject: {projectionDiag.scoreRejected.toLocaleString()}</div>
           <div>Edge reject: {(projectionDiag.edgeRejected || 0).toLocaleString()}</div>
+          <div>Plane reject: {(projectionDiag.planeRejected || 0).toLocaleString()}</div>
           <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
           <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
         </div>

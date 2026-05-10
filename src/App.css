@@ -5359,6 +5359,12 @@ kbd {
 .sb-save-progress-label {
   font-size: 11px; color: rgba(226,236,255,0.45); margin: 4px 0 0; text-align: center;
 }
+.sb-save-error {
+  margin-top: 8px;
+  color: #fda4af;
+  font-size: 12px;
+  text-align: center;
+}
 
 /* Save progress bar — under toolbar save button */
 .sb-toolbar-progress {

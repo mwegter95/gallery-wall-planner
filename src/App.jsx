@@ -508,10 +508,23 @@ export default function App() {
     // The blob is uploaded separately below with real XHR progress.
     const pc = space.roomScan?.pointCloud
     const hasBinary = pc && (pc._buffer || pc.data)  // in-memory scan OR legacy base64
-    const previousUrl = pc?.url || rooms[space.id]?.roomScan?.pointCloud?.url || null
+    const previousUrl = pc?.url || null
     let pointCloudUrl = previousUrl
 
+    const initialRoomMeta = space.roomScan
+      ? {
+          ...toRoomScanMeta(space.roomScan),
+          pointCloud: {
+            pointCount: pc?.pointCount ?? space.roomScan.pointCloud?.pointCount ?? 0,
+            url: pointCloudUrl,
+          },
+        }
+      : null
+
     report(5)
+    // Ensure the room exists before binary upload (required for fresh room IDs).
+    await api.putRoom(initialRoomMeta ? { ...space, roomScan: initialRoomMeta } : space)
+    setRooms(prev => ({ ...prev, [space.id]: { ...space, roomScan: initialRoomMeta } }))
     report(12)
 
     // ── Upload binary point cloud separately (12% → 68%) ──────────────────────
@@ -529,10 +542,23 @@ export default function App() {
           for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
           arrayBuffer = bytes.buffer
         }
-        const { url } = await api.uploadPointCloud(space.id, arrayBuffer, (frac) => {
-          report(12 + Math.round(frac * 56))   // 12% → 68%
-        })
-        pointCloudUrl = url || pointCloudUrl
+        let uploadError = null
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const { url } = await api.uploadPointCloud(space.id, arrayBuffer, (frac) => {
+              // Keep progress moving even before first server bytes arrive.
+              const floor = 12 + (attempt - 1) * 2
+              report(Math.max(floor, 12 + Math.round(frac * 56)))   // 12% → 68%
+            })
+            pointCloudUrl = url || pointCloudUrl
+            uploadError = null
+            break
+          } catch (err) {
+            uploadError = err
+            console.warn(`[handleSaveSpace] point cloud upload attempt ${attempt}/3 failed`, err)
+          }
+        }
+        if (uploadError) throw uploadError
       } catch (err) {
         console.error('[handleSaveSpace] point cloud upload failed', err)
         if (!pointCloudUrl) {
@@ -551,6 +577,7 @@ export default function App() {
         }
       : null
 
+    // Patch final point-cloud URL (or keep previous URL when upload fails but prior URL exists).
     const spaceForMeta = roomMeta ? { ...space, roomScan: roomMeta } : space
     await api.putRoom(spaceForMeta)
     setRooms(prev => ({ ...prev, [space.id]: { ...space, roomScan: roomMeta } }))

@@ -116,6 +116,117 @@ const VIEW_EDGE_SIGMA = 0.85
 const VIEW_EDGE_HARD_RADIUS2 = 2.2
 const AMBIGUITY_SCORE_RATIO = 0.92
 const AMBIGUITY_COLOR_L1 = 0.26
+const PLANE_FACING_MIN = 0.22
+const PLANE_EDGE_SOFT = 0.12
+
+function estimateRoomFrame(buf) {
+  const D = buf._data
+  const n = buf.pointCount
+  if (!n) return null
+
+  let meanX = 0
+  let meanZ = 0
+  let minY = Infinity
+  let maxY = -Infinity
+  for (let i = 0, b = 0; i < n; i++, b += 6) {
+    const x = D[b]
+    const y = D[b + 1]
+    const z = D[b + 2]
+    meanX += x
+    meanZ += z
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  meanX /= n
+  meanZ /= n
+
+  let covXX = 0
+  let covXZ = 0
+  let covZZ = 0
+  for (let i = 0, b = 0; i < n; i++, b += 6) {
+    const dx = D[b] - meanX
+    const dz = D[b + 2] - meanZ
+    covXX += dx * dx
+    covXZ += dx * dz
+    covZZ += dz * dz
+  }
+  covXX /= n
+  covXZ /= n
+  covZZ /= n
+
+  const angle = 0.5 * Math.atan2(2 * covXZ, covXX - covZZ)
+  let axisU = [Math.cos(angle), 0, Math.sin(angle)]
+  let axisV = [-Math.sin(angle), 0, Math.cos(angle)]
+  if (axisU[0] < 0) {
+    axisU = [-axisU[0], 0, -axisU[2]]
+    axisV = [-axisV[0], 0, -axisV[2]]
+  }
+
+  let uMin = Infinity
+  let uMax = -Infinity
+  let vMin = Infinity
+  let vMax = -Infinity
+  for (let i = 0, b = 0; i < n; i++, b += 6) {
+    const dx = D[b] - meanX
+    const dz = D[b + 2] - meanZ
+    const u = dx * axisU[0] + dz * axisU[2]
+    const v = dx * axisV[0] + dz * axisV[2]
+    if (u < uMin) uMin = u
+    if (u > uMax) uMax = u
+    if (v < vMin) vMin = v
+    if (v > vMax) vMax = v
+  }
+
+  return { meanX, meanZ, axisU, axisV, uMin, uMax, vMin, vMax, minY, maxY }
+}
+
+function unitVector(x, y, z) {
+  const len = Math.hypot(x, y, z)
+  if (len <= 1e-9) return [0, 0, 0]
+  return [x / len, y / len, z / len]
+}
+
+function classifyPlaneNormal(wx, wy, wz, frame) {
+  if (!frame) return null
+  const dx = wx - frame.meanX
+  const dz = wz - frame.meanZ
+  const u = dx * frame.axisU[0] + dz * frame.axisU[2]
+  const v = dx * frame.axisV[0] + dz * frame.axisV[2]
+
+  const dFloor = Math.abs(wy - frame.minY)
+  const dCeil = Math.abs(wy - frame.maxY)
+  const dUmin = Math.abs(u - frame.uMin)
+  const dUmax = Math.abs(u - frame.uMax)
+  const dVmin = Math.abs(v - frame.vMin)
+  const dVmax = Math.abs(v - frame.vMax)
+
+  const distances = [dFloor, dCeil, dUmin, dUmax, dVmin, dVmax]
+  let bestIdx = 0
+  let best = distances[0]
+  let second = Infinity
+  for (let i = 1; i < distances.length; i++) {
+    const d = distances[i]
+    if (d < best) {
+      second = best
+      best = d
+      bestIdx = i
+    } else if (d < second) {
+      second = d
+    }
+  }
+
+  const normals = [
+    [0, 1, 0],
+    [0, -1, 0],
+    [-frame.axisU[0], 0, -frame.axisU[2]],
+    [frame.axisU[0], 0, frame.axisU[2]],
+    [-frame.axisV[0], 0, -frame.axisV[2]],
+    [frame.axisV[0], 0, frame.axisV[2]],
+  ]
+  const separation = second > 1e-6 ? (second - best) / (second + 1e-6) : 0
+  const confidence = Math.max(0, Math.min(1, separation / PLANE_EDGE_SOFT))
+  return { normal: normals[bestIdx], confidence }
+}
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   const longest = Math.max(width, height)
@@ -322,8 +433,10 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   // views[si]  = column-major 4×4 world→camera matrix (inverse of cam→world)
   // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
   const views = snapshots.map(s => invertRigid(s.transform))
+  const camPositions = snapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
+  const roomFrame = estimateRoomFrame(buf)
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -338,6 +451,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     multiView: 0,
     edgeRejected: 0,
     ambiguousRejected: 0,
+    planeRejected: 0,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -349,6 +463,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const b  = i * 6
     const wx = D[b],  wy = D[b+1], wz = D[b+2]   // original world coords (no yOffset)
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
+    const plane = classifyPlaneNormal(wx, wy, wz, roomFrame)
 
     let best = null
     let second = null
@@ -386,7 +501,19 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       }
 
       const depthResidual = Math.max(0, proj.depth - depthRef)
-      const weightedScore = proj.score * center.weight
+      const toCam = unitVector(
+        camPositions[si][0] - wx,
+        camPositions[si][1] - wy,
+        camPositions[si][2] - wz,
+      )
+      const planeFacing = plane
+        ? Math.max(0, -(plane.normal[0] * toCam[0] + plane.normal[1] * toCam[1] + plane.normal[2] * toCam[2]))
+        : 1
+      if (planeFacing < PLANE_FACING_MIN) {
+        if (stats) stats.planeRejected++
+        continue
+      }
+      const weightedScore = proj.score * center.weight * (0.35 + 0.65 * planeFacing) * (plane ? (0.5 + 0.5 * plane.confidence) : 1)
 
       if (weightedScore < MIN_PROJECTION_SCORE) {
         if (stats) stats.scoreRejected++
@@ -458,6 +585,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       multiViewPct: stats.accepted > 0 ? (100 * stats.multiView / stats.accepted) : 0,
       edgeRejected: stats.edgeRejected,
       ambiguousRejected: stats.ambiguousRejected,
+      planeRejected: stats.planeRejected,
     })
   }
 

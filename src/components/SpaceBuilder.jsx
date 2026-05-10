@@ -37,6 +37,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [stitchStatus,    setStitchStatus]    = useState('')
   const [isSaving,        setIsSaving]        = useState(false)
   const [saveProgress,    setSaveProgress]    = useState(0)    // 0-100 during save
+  const [saveErrorMsg,    setSaveErrorMsg]    = useState('')
   const [isDragOver,      setIsDragOver]      = useState(false)
   // Save Room popover
   const [showSaveMenu,    setShowSaveMenu]    = useState(false)
@@ -447,6 +448,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       : space
     setIsSaving(true)
     setSaveProgress(0)
+    setSaveErrorMsg('')
     setShowSaveMenu(false)
     setSaveAsName('')
     try {
@@ -456,6 +458,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       setScanSaveToast(false)
       // If saved as new, switch to that space
       if (overrideName) setSpace(spaceToSave)
+      return true
+    } catch (err) {
+      console.error('[SpaceBuilder] save failed:', err)
+      setSaveErrorMsg(err?.message || 'Save failed. Please try again.')
+      return false
     } finally {
       setIsSaving(false)
       setSaveProgress(0)
@@ -774,7 +781,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onChange={e => setPostScanName(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter' && postScanName.trim()) {
-                  handleSave(postScanName.trim()).then(() => setShowPostScanSave(false))
+                  handleSave(postScanName.trim()).then((ok) => { if (ok) setShowPostScanSave(false) })
                 }
               }}
               placeholder="Room name…"
@@ -787,11 +794,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               <button
                 className="sb-btn sb-btn--primary"
                 disabled={!postScanName.trim() || isSaving}
-                onClick={() => handleSave(postScanName.trim()).then(() => setShowPostScanSave(false))}
+                onClick={() => handleSave(postScanName.trim()).then((ok) => { if (ok) setShowPostScanSave(false) })}
               >
                 {isSaving ? <><span className="btn-spinner"/>Saving…</> : 'Save Room'}
               </button>
             </div>
+            {saveErrorMsg && <div className="sb-save-error">{saveErrorMsg}</div>}
             {isSaving && (
               <div className="sb-save-progress-wrap">
                 <div className="sb-save-progress-bar" style={{ width: `${saveProgress}%` }} />
@@ -839,15 +847,15 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                   Go Back
                 </button>
                 <button className="sb-guard-btn sb-guard-btn--save" onClick={async () => {
-                  await handleSave()
-                  doLoadRoom(pendingRoomId)
+                  const ok = await handleSave()
+                  if (ok) doLoadRoom(pendingRoomId)
                 }} disabled={isSaving}>
                   {isSaving ? 'Saving…' : 'Save Room'}
                 </button>
                 <button className="sb-guard-btn sb-guard-btn--saveas" onClick={() => {
                   // prompt for new name via saveAs flow then load
                   const name = window.prompt('Save current room as:', space.name + ' copy')
-                  if (name?.trim()) handleSave(name.trim()).then(() => doLoadRoom(pendingRoomId))
+                  if (name?.trim()) handleSave(name.trim()).then((ok) => { if (ok) doLoadRoom(pendingRoomId) })
                 }} disabled={isSaving}>
                   Save as New
                 </button>
