@@ -116,9 +116,15 @@ const VIEW_EDGE_SIGMA = 0.62
 const VIEW_EDGE_HARD_RADIUS2 = 1.35
 const AMBIGUITY_SCORE_RATIO = 0.92
 const AMBIGUITY_COLOR_L1 = 0.26
+const CONSENSUS_COLOR_L1 = 0.18
+const CONSENSUS_AMBIGUITY_RELIEF = 0.42
 const PLANE_FACING_MIN = 0.05
 const PLANE_CONFIDENT_MIN = 0.55
 const PLANE_EDGE_SOFT = 0.12
+const CORNER_DISTANCE_SOFT = 0.24
+const STRUCTURE_NEAR_M = 0.18
+const STRUCTURE_FAR_M = 0.95
+const STRUCTURE_MIN_WEIGHT = 0.58
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -226,7 +232,41 @@ function classifyPlaneNormal(wx, wy, wz, frame) {
   ]
   const separation = second > 1e-6 ? (second - best) / (second + 1e-6) : 0
   const confidence = Math.max(0, Math.min(1, separation / PLANE_EDGE_SOFT))
-  return { normal: normals[bestIdx], confidence }
+  const cornerStrength =
+    Math.max(0, Math.min(1, 1 - best / CORNER_DISTANCE_SOFT)) *
+    Math.max(0, Math.min(1, 1 - second / CORNER_DISTANCE_SOFT))
+  return { normal: normals[bestIdx], confidence, bestDistance: best, secondDistance: second, cornerStrength }
+}
+
+function structureWeightFromDistance(distanceToEnvelope) {
+  if (!Number.isFinite(distanceToEnvelope)) return 1
+  if (distanceToEnvelope <= STRUCTURE_NEAR_M) return 1
+  if (distanceToEnvelope >= STRUCTURE_FAR_M) return STRUCTURE_MIN_WEIGHT
+  const t = (distanceToEnvelope - STRUCTURE_NEAR_M) / (STRUCTURE_FAR_M - STRUCTURE_NEAR_M)
+  return 1 - (1 - STRUCTURE_MIN_WEIGHT) * t
+}
+
+function insertTopByScore(top, candidate, max = 6) {
+  top.push(candidate)
+  top.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score
+    return a.depthResidual - b.depthResidual
+  })
+  if (top.length > max) top.length = max
+}
+
+function consensusSupport(candidate, ranked) {
+  if (!candidate || !ranked?.length) return 0
+  let support = 0
+  for (const other of ranked) {
+    if (other === candidate) continue
+    const disagreement =
+      Math.abs(candidate.color[0] - other.color[0]) +
+      Math.abs(candidate.color[1] - other.color[1]) +
+      Math.abs(candidate.color[2] - other.color[2])
+    if (disagreement <= CONSENSUS_COLOR_L1) support += other.score
+  }
+  return support
 }
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
@@ -453,6 +493,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     edgeRejected: 0,
     ambiguousRejected: 0,
     planeRejected: 0,
+    structureDownWeighted: 0,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -468,6 +509,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
 
     let best = null
     let second = null
+    const ranked = []
 
     for (let si = 0; si < S; si++) {
       let proj
@@ -510,16 +552,21 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const planeFacing = plane
         ? Math.max(0, -(plane.normal[0] * toCam[0] + plane.normal[1] * toCam[1] + plane.normal[2] * toCam[2]))
         : 1
+      const cornerStrength = plane?.cornerStrength || 0
+      const confGate = PLANE_CONFIDENT_MIN + 0.33 * cornerStrength
+      const facingGate = Math.max(0.015, PLANE_FACING_MIN * (1 - 0.65 * cornerStrength))
       // Only hard-reject on plane-facing when plane classification is confident.
       // Low-confidence points near boundaries should still be projectable.
-      if (plane && plane.confidence >= PLANE_CONFIDENT_MIN && planeFacing < PLANE_FACING_MIN) {
+      if (plane && plane.confidence >= confGate && planeFacing < facingGate) {
         if (stats) stats.planeRejected++
         continue
       }
       const planeWeight = plane
-        ? (0.7 + 0.3 * plane.confidence) * (0.55 + 0.45 * planeFacing)
+        ? (0.7 + 0.3 * plane.confidence) * (0.55 + 0.45 * planeFacing) * (1 + 0.25 * cornerStrength)
         : 1
-      const weightedScore = proj.score * center.weight * planeWeight
+      const structureWeight = structureWeightFromDistance(plane?.bestDistance)
+      const weightedScore = proj.score * center.weight * planeWeight * structureWeight
+      if (stats && structureWeight < 0.9) stats.structureDownWeighted++
 
       if (weightedScore < MIN_PROJECTION_SCORE) {
         if (stats) stats.scoreRejected++
@@ -529,6 +576,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const px = pixMaps[si]
       const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
       const candidate = { si, score: weightedScore, depthResidual, proj, color }
+      insertTopByScore(ranked, candidate)
 
       if (!best || candidate.score > best.score || (Math.abs(candidate.score - best.score) < 1e-9 && candidate.depthResidual < best.depthResidual)) {
         second = best
@@ -539,15 +587,21 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     }
 
     if (best) {
+      const bestConsensus = consensusSupport(best, ranked)
+      const bestConsensusRel = bestConsensus / (best.score + 1e-6)
       // If two views are similarly plausible but disagree in colour, projection is ambiguous.
       // Keep fallback colour here to avoid duplicate/ghost overlays.
       if (second) {
+        const secondConsensus = consensusSupport(second, ranked)
         const ratio = second.score / (best.score + 1e-6)
+        const ratioGate = Math.max(0.84, AMBIGUITY_SCORE_RATIO - Math.min(0.08, bestConsensusRel * 0.05))
         const disagreement =
           Math.abs(best.color[0] - second.color[0]) +
           Math.abs(best.color[1] - second.color[1]) +
           Math.abs(best.color[2] - second.color[2])
-        if (ratio >= AMBIGUITY_SCORE_RATIO && disagreement >= AMBIGUITY_COLOR_L1) {
+        const consensusDelta = (bestConsensus - secondConsensus) / (best.score + second.score + 1e-6)
+        const canRelieveByConsensus = consensusDelta >= CONSENSUS_AMBIGUITY_RELIEF
+        if (ratio >= ratioGate && disagreement >= AMBIGUITY_COLOR_L1 && !canRelieveByConsensus) {
           newColors[i*3] = or
           newColors[i*3+1] = og
           newColors[i*3+2] = ob
@@ -592,6 +646,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       edgeRejected: stats.edgeRejected,
       ambiguousRejected: stats.ambiguousRejected,
       planeRejected: stats.planeRejected,
+      structureDownWeighted: stats.structureDownWeighted,
     })
   }
 

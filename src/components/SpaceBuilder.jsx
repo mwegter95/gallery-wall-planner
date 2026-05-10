@@ -51,6 +51,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [savedRoomScanAt,    setSavedRoomScanAt]    = useState(() =>
     existingSpace?.roomScan?.capturedAt ?? null
   )
+  const [scanLoadState,      setScanLoadState]      = useState(() => {
+    const hasScan = !!existingSpace?.roomScan?.pointCloud
+    return hasScan
+      ? { active: true, progress: 2, phase: 'Opening room scan…' }
+      : { active: false, progress: 0, phase: '' }
+  })
   // Post-scan save toast (replaced by modal below)
   const [scanSaveToast,      setScanSaveToast]      = useState(false)  // kept for compat
   const scanToastTimerRef = useRef(null)
@@ -473,6 +479,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const doLoadRoom = (roomId) => {
     const room = rooms[roomId]
     if (!room) return
+    const hasScan = !!room.roomScan?.pointCloud
+    setScanLoadState(
+      hasScan
+        ? { active: true, progress: 2, phase: 'Opening room scan…' }
+        : { active: false, progress: 0, phase: '' },
+    )
     setSpace(cloneRoomForEditing(room))
     setSavedSnapshot(JSON.stringify(room.surfaces))
     setSavedRoomScanAt(room.roomScan?.capturedAt ?? null)
@@ -485,6 +497,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     setCanRedo(false)
     setPendingRoomId(null)
   }
+
+  const handleRoomScanLoadProgress = useCallback(({ pct = 0, phase = 'Loading scan…', active = true }) => {
+    setScanLoadState(prev => {
+      const nextProgress = Math.max(0, Math.min(100, Math.round(pct)))
+      if (prev.active === active && prev.progress === nextProgress && prev.phase === phase) return prev
+      return { active, progress: nextProgress, phase }
+    })
+  }, [])
 
   const handleRoomSelect = (roomId) => {
     if (roomId === space.id) return
@@ -1087,6 +1107,18 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
             className="sb-canvas-area"
             onClick={() => showMobilePanel && setShowMobilePanel(false)}
           >
+            {scanLoadState.active && (
+              <div className="sb-scan-load-overlay" role="status" aria-live="polite">
+                <div className="sb-scan-load-card">
+                  <div className="sb-scan-load-title">Loading saved scan</div>
+                  <div className="sb-scan-load-phase">{scanLoadState.phase || 'Preparing…'}</div>
+                  <div className="sb-scan-load-bar-track">
+                    <div className="sb-scan-load-bar-fill" style={{ width: `${scanLoadState.progress}%` }} />
+                  </div>
+                  <div className="sb-scan-load-pct">{scanLoadState.progress}%</div>
+                </div>
+              </div>
+            )}
             {isDragOver && (
               <div className="sb-drop-overlay">
                 <div className="sb-drop-message">
@@ -1109,6 +1141,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               requestCropId={cropRequestId}
               roomScan={space.roomScan ?? null}
               onSurfaceFromView={handleSurfaceFromView}
+              onRoomScanLoadProgress={handleRoomScanLoadProgress}
             />
           </div>
 

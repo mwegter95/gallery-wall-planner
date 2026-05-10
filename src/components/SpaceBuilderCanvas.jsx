@@ -201,6 +201,7 @@ export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
   roomScan = null,
   onSurfaceFromView = null,
+  onRoomScanLoadProgress = null,
 }) {
   const mountRef = useRef(null)
   const threeRef  = useRef(null)
@@ -738,6 +739,19 @@ export default function SpaceBuilderCanvas({
   const reconstructionMeshesRef = useRef([])
   const snapshotMeshesRef = useRef([])
   const yOffsetRef        = useRef(0)
+  const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
+  const reportRoomLoad = useCallback((pct, phase, active = true) => {
+    if (!onRoomScanLoadProgress) return
+    const now = performance.now()
+    const clamped = Math.max(0, Math.min(100, Math.round(pct)))
+    const prev = roomLoadProgressRef.current
+    const enoughDelta = Math.abs(clamped - prev.pct) >= 2
+    const phaseChanged = phase !== prev.phase
+    const enoughTime = now - prev.ts >= 120
+    if (!phaseChanged && !enoughDelta && !enoughTime) return
+    roomLoadProgressRef.current = { pct: clamped, phase, ts: now }
+    try { onRoomScanLoadProgress({ pct: clamped, phase, active }) } catch {}
+  }, [onRoomScanLoadProgress])
   useEffect(() => {
     const t = threeRef.current
     if (!t) return
@@ -765,6 +779,7 @@ export default function SpaceBuilderCanvas({
 
     if (!roomScan) {
       setProjectionDiag(null)
+      reportRoomLoad(0, 'No scan loaded', false)
       return
     }
 
@@ -777,21 +792,53 @@ export default function SpaceBuilderCanvas({
     async function buildCloud() {
       let buf
       const pc = roomScan.pointCloud
+      reportRoomLoad(3, 'Preparing room scan')
       try {
         if (pc?._buffer) {
+          reportRoomLoad(24, 'Using cached scan data')
           buf = pc._buffer
         } else if (pc?.url) {
           const resp = await fetch(pc.url)
           if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
-          const ab = await resp.arrayBuffer()
+          const totalBytes = Number(resp.headers.get('content-length') || 0)
+          let ab
+          if (resp.body?.getReader && totalBytes > 0) {
+            const reader = resp.body.getReader()
+            const chunks = []
+            let received = 0
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              chunks.push(value)
+              received += value.byteLength
+              if (!cancelled) {
+                reportRoomLoad(4 + (34 * received / totalBytes), 'Downloading scan')
+              }
+            }
+            const merged = new Uint8Array(received)
+            let offset = 0
+            for (const chunk of chunks) {
+              merged.set(chunk, offset)
+              offset += chunk.byteLength
+            }
+            ab = merged.buffer
+          } else {
+            reportRoomLoad(14, 'Downloading scan')
+            ab = await resp.arrayBuffer()
+            reportRoomLoad(38, 'Download complete')
+          }
           buf = PointCloudBuffer.fromFloat32Array(new Float32Array(ab), pc.pointCount)
+          reportRoomLoad(42, 'Decoding point cloud')
         } else if (pc?.data) {
+          reportRoomLoad(22, 'Decoding legacy scan payload')
           buf = PointCloudBuffer.fromJSON(pc)
         } else {
+          reportRoomLoad(100, 'No point cloud payload', false)
           return
         }
       } catch (err) {
         console.warn('[SpaceBuilderCanvas] Could not load point cloud:', err)
+        reportRoomLoad(100, 'Scan load failed', false)
         return
       }
       if (cancelled) return
@@ -844,6 +891,10 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
+
+          if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
+            reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
+          }
         }
 
         const yOffset = isFinite(minY) ? -minY : 0
@@ -860,6 +911,7 @@ export default function SpaceBuilderCanvas({
         }
 
         const outlierKeys = new Set()
+        let singletonProcessed = 0
         for (const [key, b] of singletonOffset) {
           const ix = Math.floor(rawData[b]   * CELL_INV)
           const iy = Math.floor(rawData[b+1] * CELL_INV)
@@ -872,6 +924,10 @@ export default function SpaceBuilderCanvas({
                 if (nhTotal >= SOR_MIN) break outer
               }
           if (nhTotal < SOR_MIN) outlierKeys.add(key)
+          singletonProcessed++
+          if ((singletonProcessed & 0x1fff) === 0 && singletonOffset.size > 0 && !cancelled) {
+            reportRoomLoad(60 + (8 * singletonProcessed / singletonOffset.size), 'Filtering outliers')
+          }
         }
 
         const validCount  = n - outlierKeys.size
@@ -909,6 +965,10 @@ export default function SpaceBuilderCanvas({
           }
 
           vi++
+
+          if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
+            reportRoomLoad(68 + (18 * i / n), 'Building render buffers')
+          }
         }
 
         const geo = new THREE.BufferGeometry()
@@ -928,6 +988,7 @@ export default function SpaceBuilderCanvas({
         const points = new THREE.Points(geo, mat)
         t.scene.add(points)
         pointCloudMeshRef.current = points
+        reportRoomLoad(90, 'Rendering scan')
 
         const snapshots = selectPreviewSnapshots(
           roomScan.snapshots?.filter(s =>
@@ -944,6 +1005,7 @@ export default function SpaceBuilderCanvas({
         // The colAttr.array reference stays live in Three.js, so mutating it
         // and setting needsUpdate is sufficient — no geometry rebuild needed.
         if (snapshots?.length) {
+          reportRoomLoad(93, 'Projecting photo colors')
           ;(async () => {
             try {
               const newColors = await buildPhotoColorsForPositions(positions, colors, snapshots, yOffsetRef.current, {
@@ -955,10 +1017,14 @@ export default function SpaceBuilderCanvas({
               const colAttr = geo.getAttribute('color')
               colAttr.array.set(newColors)
               colAttr.needsUpdate = true
+              reportRoomLoad(100, 'Scan ready', false)
             } catch (err) {
               console.warn('[SpaceBuilderCanvas] Photo retexture failed:', err)
+              reportRoomLoad(100, 'Scan ready (base colors)', false)
             }
           })()
+        } else {
+          reportRoomLoad(100, 'Scan ready', false)
         }
 
         // Dedicated reconstruction is rendered as a separate mesh layer so the
@@ -980,6 +1046,7 @@ export default function SpaceBuilderCanvas({
         } catch { /* ignore framing errors */ }
       } catch (err) {
         console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
+        reportRoomLoad(100, 'Scan load failed', false)
       }
 
       if (ENABLE_RECONSTRUCTION_OVERLAY) {
@@ -1080,7 +1147,7 @@ export default function SpaceBuilderCanvas({
 
     buildCloud()
     return () => { cancelled = true }
-  }, [roomScan]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roomScan, reportRoomLoad]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Photorealistic snapshot planes (DISABLED) ────────────────────────────
   // Photo overlay approach parked — dense Gaussian splat point cloud used instead.
