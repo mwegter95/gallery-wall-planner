@@ -277,7 +277,7 @@ export default function App() {
       hasLoadedRef.current = true
       setIsLoading(false)
     }
-  }, [rooms])
+  }, [])
 
   /* ── Boot ──────────────────────────────────────────────── */
   useEffect(() => { loadAppState() }, [loadAppState])
