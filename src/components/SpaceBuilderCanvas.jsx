@@ -195,6 +195,7 @@ const JOY_THUMB  = 13   // thumb radius px
 const JOY_SPEED    = 0.014  // halved from 0.028 — was too sensitive
 const PAN_SPEED    = 0.04   // orbit.center translation per frame per unit joystick deflection
 const DOLLY_SPEED  = 0.04   // radius change per frame (same units as PAN_SPEED)
+const ENABLE_RECONSTRUCTION_OVERLAY = false
 
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
@@ -934,7 +935,7 @@ export default function SpaceBuilderCanvas({
             Array.isArray(s?.transform) && s.transform.length === 16 &&
             Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
           ),
-          72,
+          36,
         )
 
         // ── Photo retexture (async, after cloud is visible) ────────────────
@@ -981,45 +982,47 @@ export default function SpaceBuilderCanvas({
         console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
       }
 
-      try {
-        const reconstruction = await reconstructPlanarSurfaces(buf, {
-          snapshots: roomScan.snapshots || [],
-          yOffset: yOffsetRef.current,
-        })
+      if (ENABLE_RECONSTRUCTION_OVERLAY) {
+        try {
+          const reconstruction = await reconstructPlanarSurfaces(buf, {
+            snapshots: roomScan.snapshots || [],
+            yOffset: yOffsetRef.current,
+          })
 
-        if (!cancelled && reconstruction?.segments?.length) {
-          for (const segment of reconstruction.segments) {
-            const geo = new THREE.BufferGeometry()
-            geo.setAttribute('position', new THREE.BufferAttribute(segment.positions, 3))
-            const colors = segment.textureColors || segment.colors
-            if (colors?.length) {
-              geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+          if (!cancelled && reconstruction?.segments?.length) {
+            for (const segment of reconstruction.segments) {
+              const geo = new THREE.BufferGeometry()
+              geo.setAttribute('position', new THREE.BufferAttribute(segment.positions, 3))
+              const colors = segment.textureColors || segment.colors
+              if (colors?.length) {
+                geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+              }
+              geo.setAttribute('uv', new THREE.BufferAttribute(segment.uvs, 2))
+              geo.setIndex(new THREE.BufferAttribute(segment.indices, 1))
+              geo.computeVertexNormals()
+
+              const mat = new THREE.MeshBasicMaterial({
+                vertexColors: !!colors?.length,
+                transparent: true,
+                opacity: segment.classification === 'ceiling' ? 0.2 : 0.28,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+              })
+              const mesh = new THREE.Mesh(geo, mat)
+              mesh.renderOrder = 2
+
+              const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.18, transparent: true })
+              const wireGeo = new THREE.EdgesGeometry(geo)
+              const wire = new THREE.LineSegments(wireGeo, wireMat)
+              mesh.add(wire)
+
+              t.scene.add(mesh)
+              reconstructionMeshesRef.current.push(mesh)
             }
-            geo.setAttribute('uv', new THREE.BufferAttribute(segment.uvs, 2))
-            geo.setIndex(new THREE.BufferAttribute(segment.indices, 1))
-            geo.computeVertexNormals()
-
-            const mat = new THREE.MeshBasicMaterial({
-              vertexColors: !!colors?.length,
-              transparent: true,
-              opacity: segment.classification === 'ceiling' ? 0.2 : 0.28,
-              side: THREE.DoubleSide,
-              depthWrite: false,
-            })
-            const mesh = new THREE.Mesh(geo, mat)
-            mesh.renderOrder = 2
-
-            const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.18, transparent: true })
-            const wireGeo = new THREE.EdgesGeometry(geo)
-            const wire = new THREE.LineSegments(wireGeo, wireMat)
-            mesh.add(wire)
-
-            t.scene.add(mesh)
-            reconstructionMeshesRef.current.push(mesh)
           }
+        } catch (err) {
+          console.warn('[SpaceBuilderCanvas] Could not render reconstructed mesh:', err)
         }
-      } catch (err) {
-        console.warn('[SpaceBuilderCanvas] Could not render reconstructed mesh:', err)
       }
 
       // ── Build ghost plane meshes from detected planes ─────────────────

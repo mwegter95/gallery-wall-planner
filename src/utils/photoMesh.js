@@ -106,11 +106,11 @@ export function normalizeIntrinsicsForImage(intrinsics, width, height) {
 
 const VISIBILITY_TARGET_SAMPLES = 1_800_000
 const VISIBILITY_MAX_DIM = 768
-const VISIBILITY_REL_TOL = 0.03
-const VISIBILITY_ABS_TOL = 0.06
-const FUSION_MAX_CANDIDATES = 3
+const VISIBILITY_REL_TOL = 0.015
+const VISIBILITY_ABS_TOL = 0.03
+const FUSION_MAX_CANDIDATES = 1
 const COLOR_GATE_L1 = 0.33
-const MIN_PROJECTION_SCORE = 0.12
+const MIN_PROJECTION_SCORE = 0.2
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   const longest = Math.max(width, height)
@@ -165,7 +165,12 @@ export function isDepthVisible(sampleDepth, mapDepth, relTol = VISIBILITY_REL_TO
 
 function updateBestCandidates(candidates, candidate, maxCount = FUSION_MAX_CANDIDATES) {
   candidates.push(candidate)
-  candidates.sort((a, b) => b.score - a.score)
+  candidates.sort((a, b) => {
+    // Prefer lower depth residual first (closer to camera-visible surface),
+    // then higher angular/proximity score as tie-breaker.
+    if (a.depthResidual !== b.depthResidual) return a.depthResidual - b.depthResidual
+    return b.score - a.score
+  })
   if (candidates.length > maxCount) candidates.length = maxCount
 }
 
@@ -175,6 +180,7 @@ function scoreToWeight(score) {
 
 export function fuseVisibleCandidates(candidates) {
   if (!candidates?.length) return null
+  if (FUSION_MAX_CANDIDATES <= 1) return candidates[0].color
   if (candidates.length === 1) return candidates[0].color
 
   const ref = candidates[0].color
@@ -348,7 +354,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
       const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
       const idx = ay * atlas.width + ax
-      if (!isDepthVisible(proj.depth, atlas.depth[idx])) {
+      const depthRef = atlas.depth[idx]
+      if (!isDepthVisible(proj.depth, depthRef)) {
         if (stats) stats.depthRejected++
         continue
       }
@@ -363,6 +370,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       updateBestCandidates(candidates, {
         si,
         score: proj.score,
+        depthResidual: Math.max(0, proj.depth - depthRef),
         color,
       })
     }
