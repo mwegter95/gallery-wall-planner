@@ -111,11 +111,11 @@ const VISIBILITY_REL_TOL = 0.015
 const VISIBILITY_ABS_TOL = 0.03
 const FUSION_MAX_CANDIDATES = 1
 const COLOR_GATE_L1 = 0.33
-const MIN_PROJECTION_SCORE = 0.2
+const MIN_PROJECTION_SCORE = 0.16
 const VIEW_EDGE_SIGMA = 0.62
 const VIEW_EDGE_HARD_RADIUS2 = 1.35
-const AMBIGUITY_SCORE_RATIO = 0.92
-const AMBIGUITY_COLOR_L1 = 0.26
+const AMBIGUITY_SCORE_RATIO = 0.96
+const AMBIGUITY_COLOR_L1 = 0.31
 const CONSENSUS_COLOR_L1 = 0.18
 const CONSENSUS_AMBIGUITY_RELIEF = 0.42
 const PLANE_FACING_MIN = 0.05
@@ -553,8 +553,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         ? Math.max(0, -(plane.normal[0] * toCam[0] + plane.normal[1] * toCam[1] + plane.normal[2] * toCam[2]))
         : 1
       const cornerStrength = plane?.cornerStrength || 0
-      const confGate = PLANE_CONFIDENT_MIN + 0.33 * cornerStrength
-      const facingGate = Math.max(0.015, PLANE_FACING_MIN * (1 - 0.65 * cornerStrength))
+      const confGate = 0.82 + 0.14 * cornerStrength
+      const facingGate = Math.max(0.01, PLANE_FACING_MIN * (1 - 0.75 * cornerStrength))
       // Only hard-reject on plane-facing when plane classification is confident.
       // Low-confidence points near boundaries should still be projectable.
       if (plane && plane.confidence >= confGate && planeFacing < facingGate) {
@@ -562,7 +562,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         continue
       }
       const planeWeight = plane
-        ? (0.7 + 0.3 * plane.confidence) * (0.55 + 0.45 * planeFacing) * (1 + 0.25 * cornerStrength)
+        ? (0.76 + 0.24 * plane.confidence) * (0.6 + 0.4 * planeFacing) * (1 + 0.3 * cornerStrength)
         : 1
       const structureWeight = structureWeightFromDistance(plane?.bestDistance)
       const weightedScore = proj.score * center.weight * planeWeight * structureWeight
@@ -594,7 +594,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       if (second) {
         const secondConsensus = consensusSupport(second, ranked)
         const ratio = second.score / (best.score + 1e-6)
-        const ratioGate = Math.max(0.84, AMBIGUITY_SCORE_RATIO - Math.min(0.08, bestConsensusRel * 0.05))
+        const ratioGate = Math.max(0.9, AMBIGUITY_SCORE_RATIO - Math.min(0.05, bestConsensusRel * 0.03))
         const disagreement =
           Math.abs(best.color[0] - second.color[0]) +
           Math.abs(best.color[1] - second.color[1]) +

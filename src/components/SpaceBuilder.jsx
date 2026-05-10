@@ -38,11 +38,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [isSaving,        setIsSaving]        = useState(false)
   const [saveProgress,    setSaveProgress]    = useState(0)    // 0-100 during save
   const [saveErrorMsg,    setSaveErrorMsg]    = useState('')
+  const [saveSuccessMsg,  setSaveSuccessMsg]  = useState('')
   const [isDragOver,      setIsDragOver]      = useState(false)
   // Save Room popover
   const [showSaveMenu,    setShowSaveMenu]    = useState(false)
   const [saveAsName,      setSaveAsName]      = useState('')
+  const [saveMenuAlign,   setSaveMenuAlign]   = useState('right')
   const saveMenuRef = useRef(null)
+  const saveMenuPanelRef = useRef(null)
   // Room selector + unsaved-changes guard
   const [pendingRoomId,      setPendingRoomId]      = useState(null) // room to switch to (null = none pending)
   const [savedSnapshot,      setSavedSnapshot]      = useState(() =>
@@ -60,6 +63,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   // Post-scan save toast (replaced by modal below)
   const [scanSaveToast,      setScanSaveToast]      = useState(false)  // kept for compat
   const scanToastTimerRef = useRef(null)
+  const postScanCloseTimerRef = useRef(null)
   // Post-scan save modal
   const [showPostScanSave, setShowPostScanSave] = useState(false)
   const [postScanName,     setPostScanName]     = useState('')
@@ -150,6 +154,28 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     document.addEventListener('mousedown', onOutside)
     return () => document.removeEventListener('mousedown', onOutside)
   }, [])
+
+  useEffect(() => {
+    return () => {
+      if (postScanCloseTimerRef.current) clearTimeout(postScanCloseTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!showSaveMenu) return
+    const id = requestAnimationFrame(() => {
+      const panel = saveMenuPanelRef.current
+      if (!panel) return
+      const rect = panel.getBoundingClientRect()
+      const gutter = 8
+      if (rect.right > window.innerWidth - gutter) {
+        setSaveMenuAlign('left')
+      } else if (rect.left < gutter) {
+        setSaveMenuAlign('right')
+      }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [showSaveMenu])
 
   const activeSurface = space.surfaces.find(s => s.id === activeSurfaceId)
 
@@ -455,15 +481,19 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     setIsSaving(true)
     setSaveProgress(0)
     setSaveErrorMsg('')
+    setSaveSuccessMsg('')
     setShowSaveMenu(false)
     setSaveAsName('')
+    let ok = false
     try {
       await onSave(spaceToSave, (pct) => setSaveProgress(Math.round(pct)))
+      setSaveProgress(100)
       setSavedSnapshot(JSON.stringify(spaceToSave.surfaces))
       setSavedRoomScanAt(spaceToSave.roomScan?.capturedAt ?? null)
       setScanSaveToast(false)
       // If saved as new, switch to that space
       if (overrideName) setSpace(spaceToSave)
+      ok = true
       return true
     } catch (err) {
       console.error('[SpaceBuilder] save failed:', err)
@@ -471,9 +501,26 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       return false
     } finally {
       setIsSaving(false)
-      setSaveProgress(0)
+      if (!ok) setSaveProgress(0)
     }
   }
+
+  const handlePostScanSave = useCallback(async () => {
+    const name = postScanName.trim()
+    if (!name || isSaving) return
+    if (postScanCloseTimerRef.current) {
+      clearTimeout(postScanCloseTimerRef.current)
+      postScanCloseTimerRef.current = null
+    }
+    const ok = await handleSave(name)
+    if (!ok) return
+    setSaveSuccessMsg('Saved successfully')
+    postScanCloseTimerRef.current = setTimeout(() => {
+      setShowPostScanSave(false)
+      setSaveSuccessMsg('')
+      setSaveProgress(0)
+    }, 1800)
+  }, [postScanName, isSaving, handleSave])
 
   // ── Load a different room ────────────────────────────────────────────────
   const doLoadRoom = (roomId) => {
@@ -801,25 +848,46 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               onChange={e => setPostScanName(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter' && postScanName.trim()) {
-                  handleSave(postScanName.trim()).then((ok) => { if (ok) setShowPostScanSave(false) })
+                  handlePostScanSave()
                 }
               }}
               placeholder="Room name…"
               autoFocus
             />
             <div className="sb-post-scan-actions">
-              <button className="sb-btn sb-btn--ghost" onClick={() => setShowPostScanSave(false)}>
+              <button className="sb-btn sb-btn--ghost" onClick={() => {
+                if (postScanCloseTimerRef.current) {
+                  clearTimeout(postScanCloseTimerRef.current)
+                  postScanCloseTimerRef.current = null
+                }
+                setSaveSuccessMsg('')
+                setSaveProgress(0)
+                setShowPostScanSave(false)
+              }}>
                 Not now
               </button>
               <button
                 className="sb-btn sb-btn--primary"
                 disabled={!postScanName.trim() || isSaving}
-                onClick={() => handleSave(postScanName.trim()).then((ok) => { if (ok) setShowPostScanSave(false) })}
+                onClick={handlePostScanSave}
               >
                 {isSaving ? <><span className="btn-spinner"/>Saving…</> : 'Save Room'}
               </button>
             </div>
-            {saveErrorMsg && <div className="sb-save-error">{saveErrorMsg}</div>}
+                onClick={() => {
+                  if (isSaving) return
+                  setSaveMenuAlign('right')
+                  setShowSaveMenu(v => !v)
+                }}
+            {saveSuccessMsg && (
+              <div className="sb-save-success" role="status" aria-live="polite">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.4"/>
+                  <path d="M4.1 7.2l1.8 1.9 4-4.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span>{saveSuccessMsg}</span>
+              </div>
+            )}
             {isSaving && (
               <div className="sb-save-progress-wrap">
                 <div className="sb-save-progress-bar" style={{ width: `${saveProgress}%` }} />
@@ -1048,7 +1116,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 </div>
               )}
               {showSaveMenu && (
-                <div className="sb-save-menu">
+                <div ref={saveMenuPanelRef} className={`sb-save-menu sb-save-menu--${saveMenuAlign}`}>
                   {/* Overwrite existing */}
                   {rooms[space.id] && (
                     <button className="sb-save-menu-item sb-save-menu-overwrite"
