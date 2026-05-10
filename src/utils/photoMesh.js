@@ -122,9 +122,9 @@ const PLANE_FACING_MIN = 0.05
 const PLANE_CONFIDENT_MIN = 0.55
 const PLANE_EDGE_SOFT = 0.12
 const CORNER_DISTANCE_SOFT = 0.24
-const STRUCTURE_NEAR_M = 0.18
-const STRUCTURE_FAR_M = 0.95
-const STRUCTURE_MIN_WEIGHT = 0.58
+const STRUCTURE_NEAR_M = 0.12
+const STRUCTURE_FAR_M = 1.6
+const STRUCTURE_MIN_WEIGHT = 0.82
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -243,7 +243,8 @@ function structureWeightFromDistance(distanceToEnvelope) {
   if (distanceToEnvelope <= STRUCTURE_NEAR_M) return 1
   if (distanceToEnvelope >= STRUCTURE_FAR_M) return STRUCTURE_MIN_WEIGHT
   const t = (distanceToEnvelope - STRUCTURE_NEAR_M) / (STRUCTURE_FAR_M - STRUCTURE_NEAR_M)
-  return 1 - (1 - STRUCTURE_MIN_WEIGHT) * t
+  const s = t * t * (3 - 2 * t)
+  return 1 - (1 - STRUCTURE_MIN_WEIGHT) * s
 }
 
 function insertTopByScore(top, candidate, max = 6) {
@@ -555,17 +556,17 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const cornerStrength = plane?.cornerStrength || 0
       const confGate = 0.82 + 0.14 * cornerStrength
       const facingGate = Math.max(0.01, PLANE_FACING_MIN * (1 - 0.75 * cornerStrength))
-      // Only hard-reject on plane-facing when plane classification is confident.
-      // Low-confidence points near boundaries should still be projectable.
-      if (plane && plane.confidence >= confGate && planeFacing < facingGate) {
-        if (stats) stats.planeRejected++
-        continue
-      }
+      const planeHardRejected = plane && plane.confidence >= confGate && planeFacing < facingGate
+      if (planeHardRejected && stats) stats.planeRejected++
+      const facingSoft = plane
+        ? Math.max(0.25, 0.48 + 0.52 * planeFacing)
+        : 1
+      const depthResidualWeight = 1 / (1 + 4.5 * depthResidual)
       const planeWeight = plane
-        ? (0.76 + 0.24 * plane.confidence) * (0.6 + 0.4 * planeFacing) * (1 + 0.3 * cornerStrength)
+        ? (0.82 + 0.18 * plane.confidence) * facingSoft * (1 + 0.14 * cornerStrength)
         : 1
       const structureWeight = structureWeightFromDistance(plane?.bestDistance)
-      const weightedScore = proj.score * center.weight * planeWeight * structureWeight
+      const weightedScore = proj.score * center.weight * planeWeight * structureWeight * depthResidualWeight
       if (stats && structureWeight < 0.9) stats.structureDownWeighted++
 
       if (weightedScore < MIN_PROJECTION_SCORE) {
