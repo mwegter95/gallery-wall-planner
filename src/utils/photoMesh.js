@@ -9,8 +9,8 @@
  *   1. Transform P into each snapshot's camera space: cp = V * P  (V = inverse(transform))
  *   2. Skip if cp.z ≥ 0 (behind camera) or projected UV is outside image bounds.
  *   3. Score = cosine of angle from camera axis = (-cp.z) / |cp| (want ≈ 1 = dead-on).
- *   4. Pick the snapshot with the highest score (most directly facing the point).
- *   5. Sample that JPEG at the projected pixel; replace the depth-sensor colour.
+ *   4. Pick the best view per point, then enforce local voxel-level view coherence.
+ *   5. Sample the selected JPEG at the projected pixel; replace depth-sensor colour.
  *
  * Coordinate system (ARKit):
  *   - Camera looks along –Z in camera space.
@@ -111,6 +111,10 @@ const VISIBILITY_ABS_TOL = 0.03
 const FUSION_MAX_CANDIDATES = 1
 const COLOR_GATE_L1 = 0.33
 const MIN_PROJECTION_SCORE = 0.2
+const VIEW_EDGE_SIGMA = 0.85
+const VIEW_EDGE_HARD_RADIUS2 = 2.2
+const VIEW_COHERENCE_VOXEL_SIZE = 0.18
+const VIEW_COHERENCE_MIN_CONFIDENCE = 0.14
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   const longest = Math.max(width, height)
@@ -137,6 +141,56 @@ function projectToSnapshot(wx, wy, wz, view, intr) {
   const proximity = 1 / (1 + 0.08 * depth)
   const score = facing * proximity
   return { u, v, depth, score }
+}
+
+function edgeCentralityWeight(intr, u, v) {
+  const fx = Math.max(1e-6, intr[0])
+  const fy = Math.max(1e-6, intr[1])
+  const nx = (u - intr[2]) / fx
+  const ny = (v - intr[3]) / fy
+  const r2 = nx * nx + ny * ny
+  if (r2 > VIEW_EDGE_HARD_RADIUS2) return { weight: 0, r2 }
+  const weight = Math.exp(-r2 / (2 * VIEW_EDGE_SIGMA * VIEW_EDGE_SIGMA))
+  return { weight, r2 }
+}
+
+function voxelKey(wx, wy, wz, size = VIEW_COHERENCE_VOXEL_SIZE) {
+  const ix = Math.floor(wx / size)
+  const iy = Math.floor(wy / size)
+  const iz = Math.floor(wz / size)
+  return `${ix}|${iy}|${iz}`
+}
+
+function updateVoxelVote(vote, si, weight) {
+  if (!vote) return { aSi: si, aW: weight, bSi: -1, bW: 0 }
+
+  if (vote.aSi === si) {
+    vote.aW += weight
+    return vote
+  }
+  if (vote.bSi === si) {
+    vote.bW += weight
+    return vote
+  }
+
+  if (vote.aW <= vote.bW) {
+    vote.aSi = si
+    vote.aW = weight
+  } else {
+    vote.bSi = si
+    vote.bW = weight
+  }
+  return vote
+}
+
+function getVoxelDominant(vote) {
+  if (!vote) return null
+  const maxW = Math.max(vote.aW, vote.bW)
+  const minW = Math.min(vote.aW, vote.bW)
+  const si = vote.aW >= vote.bW ? vote.aSi : vote.bSi
+  if (!Number.isFinite(maxW) || maxW <= 0 || si < 0) return null
+  const confidence = (maxW - minW) / (maxW + minW + 1e-6)
+  return { si, confidence }
 }
 
 function projectToSnapshotVerbose(wx, wy, wz, view, intr) {
@@ -308,6 +362,9 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const views = snapshots.map(s => invertRigid(s.transform))
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
+  const bestSnapshotByPoint = new Int16Array(n)
+  bestSnapshotByPoint.fill(-1)
+  const voxelVotes = new Map()
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -320,10 +377,14 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     fallback: 0,
     singleView: 0,
     multiView: 0,
+    edgeRejected: 0,
+    voxelCoherent: 0,
+    voxelOverride: 0,
+    dominantFallback: 0,
   } : null
 
+  // Pass 1: per-point candidate search + voxel-level dominant view voting.
   for (let i = 0; i < n; i++) {
-    // Yield to browser to keep UI responsive
     if (i > 0 && i % YIELD_EVERY === 0) {
       await new Promise(r => setTimeout(r, 0))
     }
@@ -332,7 +393,9 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const wx = D[b],  wy = D[b+1], wz = D[b+2]   // original world coords (no yOffset)
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
 
-    const candidates = []
+    let bestSi = -1
+    let bestScore = -Infinity
+    let bestResidual = Infinity
 
     for (let si = 0; si < S; si++) {
       let proj
@@ -350,6 +413,12 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       }
       if (stats) stats.withProjection++
 
+      const center = edgeCentralityWeight(intrs[si], proj.u, proj.v)
+      if (center.weight <= 0) {
+        if (stats) stats.edgeRejected++
+        continue
+      }
+
       const atlas = atlases[si]
       const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
       const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
@@ -360,34 +429,94 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         continue
       }
 
-      if (proj.score < MIN_PROJECTION_SCORE) {
+      const depthResidual = Math.max(0, proj.depth - depthRef)
+      const weightedScore = proj.score * center.weight
+
+      if (weightedScore < MIN_PROJECTION_SCORE) {
         if (stats) stats.scoreRejected++
         continue
       }
 
-      const px = pixMaps[si]
-      const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
-      updateBestCandidates(candidates, {
-        si,
-        score: proj.score,
-        depthResidual: Math.max(0, proj.depth - depthRef),
-        color,
-      })
+      if (weightedScore > bestScore || (Math.abs(weightedScore - bestScore) < 1e-9 && depthResidual < bestResidual)) {
+        bestScore = weightedScore
+        bestResidual = depthResidual
+        bestSi = si
+      }
     }
 
-    if (candidates.length > 0) {
-      const fused = fuseVisibleCandidates(candidates)
-      newColors[i*3] = fused[0]
-      newColors[i*3+1] = fused[1]
-      newColors[i*3+2] = fused[2]
+    bestSnapshotByPoint[i] = bestSi
+    if (bestSi >= 0) {
+      const key = voxelKey(wx, wy, wz)
+      voxelVotes.set(key, updateVoxelVote(voxelVotes.get(key), bestSi, Math.max(1e-5, bestScore)))
+    }
+  }
+
+  // Pass 2: enforce voxel-coherent dominant view, then sample color.
+  for (let i = 0; i < n; i++) {
+    if (i > 0 && i % YIELD_EVERY === 0) {
+      await new Promise(r => setTimeout(r, 0))
+    }
+
+    const b = i * 6
+    const wx = D[b], wy = D[b + 1], wz = D[b + 2]
+    const or = D[b + 3], og = D[b + 4], ob = D[b + 5]
+    const bestSi = bestSnapshotByPoint[i]
+    const dom = getVoxelDominant(voxelVotes.get(voxelKey(wx, wy, wz)))
+
+    let chosenSi = -1
+    let chosenProj = null
+
+    const tryUseSnapshot = (si) => {
+      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
+      if (!proj) return null
+
+      const center = edgeCentralityWeight(intrs[si], proj.u, proj.v)
+      if (center.weight <= 0) return null
+
+      const atlas = atlases[si]
+      const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
+      const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
+      const idx = ay * atlas.width + ax
+      if (!isDepthVisible(proj.depth, atlas.depth[idx])) return null
+
+      const weightedScore = proj.score * center.weight
+      if (weightedScore < MIN_PROJECTION_SCORE) return null
+      return proj
+    }
+
+    if (dom && dom.confidence >= VIEW_COHERENCE_MIN_CONFIDENCE) {
+      const proj = tryUseSnapshot(dom.si)
+      if (proj) {
+        chosenSi = dom.si
+        chosenProj = proj
+        if (stats) {
+          stats.voxelCoherent++
+          if (bestSi >= 0 && dom.si !== bestSi) stats.voxelOverride++
+        }
+      }
+    }
+
+    if (chosenSi < 0 && bestSi >= 0) {
+      const proj = tryUseSnapshot(bestSi)
+      if (proj) {
+        chosenSi = bestSi
+        chosenProj = proj
+        if (stats && dom && dom.confidence >= VIEW_COHERENCE_MIN_CONFIDENCE) stats.dominantFallback++
+      }
+    }
+
+    if (chosenSi >= 0 && chosenProj) {
+      const px = pixMaps[chosenSi]
+      const color = bilinearSampleRGBA(px.data, px.width, px.height, chosenProj.u, chosenProj.v)
+      newColors[i*3] = color[0]
+      newColors[i*3+1] = color[1]
+      newColors[i*3+2] = color[2]
       if (stats) {
         stats.accepted++
-        if (candidates.length === 1) stats.singleView++
-        else stats.multiView++
+        stats.singleView++
       }
     } else {
-      // No snapshot covers this point — keep original depth-sensor colour
-      newColors[i*3]   = or
+      newColors[i*3] = or
       newColors[i*3+1] = og
       newColors[i*3+2] = ob
       if (stats) stats.fallback++
@@ -409,6 +538,10 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       singleViewPoints: stats.singleView,
       multiViewPoints: stats.multiView,
       multiViewPct: stats.accepted > 0 ? (100 * stats.multiView / stats.accepted) : 0,
+      edgeRejected: stats.edgeRejected,
+      voxelCoherentPoints: stats.voxelCoherent,
+      voxelOverridePoints: stats.voxelOverride,
+      dominantFallbackPoints: stats.dominantFallback,
     })
   }
 
