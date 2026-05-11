@@ -100,24 +100,26 @@ const SPLAT_VERT = /* glsl */`
   attribute float splatScale;    // density-based size boost
   attribute vec3  aNormal;       // estimated surface normal (floor/ceiling/wall heuristic)
   varying   vec3  vColor;
+  varying   float vAngleFactor;  // view-dependent stretch amount
+  varying   vec2  vNormalScreen; // surface normal projected into screen space (unit vec2)
 
   void main() {
     vColor = color;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
 
-    // ── View-dependent disc enlargement ──────────────────────────────────────
-    // Transform estimated surface normal into camera space, then check how
-    // edge-on the surface is to the camera (small |mvN.z| = grazing angle).
-    // Enlarging discs at grazing angles fills coverage gaps that would otherwise
-    // show as thin gaps between dots on walls viewed edge-on.
-    // angleFactor is clamped so head-on surfaces (mvN.z≈1) stay crisp.
+    // ── View-dependent ellipse enlargement ───────────────────────────────────
+    // Surface normal in camera (view) space.
     vec3  mvN       = normalize(normalMatrix * aNormal);
     float cosView   = max(0.28, abs(mvN.z));
-    float angleFactor = min(2.2, 1.0 / cosView);   // cap grazing boost to avoid bubble artifacts
+    float angleFactor = min(2.2, 1.0 / cosView);   // cap grazing boost
+    vAngleFactor = angleFactor;
 
-    // Soft alpha edges + a modestly larger base size reduce visible dotting
-    // while the angle factor still fills grazing-view gaps.
-    // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizes consistent across FOV presets.
+    // Project the view-space normal onto the screen plane (XY), normalise.
+    // This unit vector tells the fragment shader which way the surface tilts
+    // on screen — the perpendicular (tangent) direction is where we stretch.
+    float sLen = length(mvN.xy);
+    vNormalScreen = sLen > 0.001 ? mvN.xy / sLen : vec2(1.0, 0.0);
+
     gl_PointSize = clamp(5.4 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.3, 22.0);
     gl_Position  = projectionMatrix * mvPos;
   }
@@ -125,17 +127,30 @@ const SPLAT_VERT = /* glsl */`
 
 const SPLAT_FRAG = /* glsl */`
   varying vec3  vColor;
+  varying float vAngleFactor;
+  varying vec2  vNormalScreen;
 
   void main() {
-    // Hard circular clip — discard the corners of the GL_POINT square.
-    // The alpha falloff is kept for alpha-to-coverage smoothing.
     vec2 uv = gl_PointCoord - 0.5;
-    float r2 = dot(uv, uv);
+
+    // ── Oriented elliptical splat ─────────────────────────────────────────────
+    // Decompose uv into screen-normal and screen-tangent directions so we can
+    // stretch the splat footprint along the surface tangent at grazing angles.
+    // At face-on (angleFactor=1): perfect circle.
+    // At edge-on (angleFactor=2.2): ellipse 2.2× wider along the tangent,
+    //   which fills the coverage gaps that make walls look dotty from the side.
+    vec2  tangentDir = vec2(-vNormalScreen.y, vNormalScreen.x);
+    float nComp = dot(uv, vNormalScreen);  // along screen-projected surface normal
+    float tComp = dot(uv, tangentDir);     // along surface tangent in screen space
+
+    // Ellipse equation: stretch tangent axis by angleFactor.
+    float r2 = nComp * nComp + (tComp / vAngleFactor) * (tComp / vAngleFactor);
     if (r2 > 0.25) discard;
 
-    // Gentle gamma lift keeps the scan readable without introducing blur.
-    vec3 col = pow(clamp(vColor, 0.0, 1.0), vec3(0.96));
-    float alpha = smoothstep(0.25, 0.18, r2);
+    // Gaussian-style smooth falloff — reduces harsh dot edges and makes the
+    // rendered surface feel continuous rather than a field of visible circles.
+    vec3  col   = pow(clamp(vColor, 0.0, 1.0), vec3(0.95));
+    float alpha = smoothstep(0.25, 0.04, r2);
     gl_FragColor = vec4(col, alpha);
   }
 `
@@ -170,20 +185,43 @@ const SSDD_FRAG = /* glsl */`
     vec2  uv = gl_FragCoord.xy / uRes;
     float d  = texture2D(tDepth, uv).r;
 
-    // Occupied pixel — pass through unchanged
+    // Occupied pixel — pass through unchanged.
     if (d < 0.9999) { gl_FragColor = texture2D(tColor, uv); return; }
 
-    // Gap pixel — find closest (min depth) occupied neighbour in an 11×11 window
+    // ── Two-pass spatially-weighted depth-gated fill ──────────────────────────
+    // Pass 1: find the minimum depth (closest surface) in the neighbourhood.
+    //   This identifies which surface should fill this gap pixel — preventing
+    //   a background wall from bleeding into a foreground-surface gap.
     float bestD = 2.0;
-    vec4  bestC = vec4(uBg, 1.0);
+    for (int xi = -5; xi <= 5; xi++) {
+      for (int yi = -5; yi <= 5; yi++) {
+        float nd = texture2D(tDepth, uv + vec2(float(xi), float(yi)) / uRes).r;
+        if (nd < bestD) bestD = nd;
+      }
+    }
+    if (bestD >= 0.9999) { gl_FragColor = vec4(uBg, 1.0); return; }
+
+    // Pass 2: Gaussian-weighted average of all occupied neighbours on the same
+    //   surface (depth within tolerance of bestD).  Using a weighted average
+    //   instead of the single nearest pixel produces smooth continuous fills
+    //   rather than hard-edged colour patches.
+    //   depthTol: ~0.003 NDC depth ≈ 10-15 cm at typical room depth — enough
+    //   to accept all points belonging to the same wall surface.
+    float depthTol = 0.003;
+    float totalW   = 0.0;
+    vec4  sumC     = vec4(0.0);
     for (int xi = -5; xi <= 5; xi++) {
       for (int yi = -5; yi <= 5; yi++) {
         vec2  suv = uv + vec2(float(xi), float(yi)) / uRes;
         float nd  = texture2D(tDepth, suv).r;
-        if (nd < bestD) { bestD = nd; bestC = texture2D(tColor, suv); }
+        if (nd >= 0.9999 || nd > bestD + depthTol) continue;
+        // Gaussian spatial weight: sigma ≈ 3.5 px — smooth but localised.
+        float w = exp(-float(xi*xi + yi*yi) * 0.082);
+        totalW += w;
+        sumC   += texture2D(tColor, suv) * w;
       }
     }
-    gl_FragColor = (bestD < 0.9999) ? bestC : vec4(uBg, 1.0);
+    gl_FragColor = totalW > 0.0 ? sumC / totalW : vec4(uBg, 1.0);
   }
 `
 
@@ -863,9 +901,8 @@ export default function SpaceBuilderCanvas({
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
-        const voxelCounts    = new Map()
-        const voxelColorSums = new Map()
-        const voxelKeys      = new Int32Array(n)
+        const voxelCounts = new Map()
+        const voxelKeys   = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
         let   minZ = Infinity, maxZ = -Infinity
@@ -882,14 +919,6 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
-          const colorSums = voxelColorSums.get(key)
-          if (colorSums) {
-            colorSums[0] += rawData[b+3]
-            colorSums[1] += rawData[b+4]
-            colorSums[2] += rawData[b+5]
-          } else {
-            voxelColorSums.set(key, [rawData[b+3], rawData[b+4], rawData[b+5]])
-          }
 
           if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
             reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
@@ -950,11 +979,12 @@ export default function SpaceBuilderCanvas({
           positions[vi*3]   = sx
           positions[vi*3+1] = sy + yOffset
           positions[vi*3+2] = sz
-          const sum = voxelColorSums.get(key)
-          const inv = sum ? 1 / cnt : 1
-          colors[vi*3]      = sum ? sum[0] * inv : rawData[b+3]
-          colors[vi*3+1]    = sum ? sum[1] * inv : rawData[b+4]
-          colors[vi*3+2]    = sum ? sum[2] * inv : rawData[b+5]
+          // Raw per-point colour — never average across the voxel cell.
+          // Voxel averaging was the primary cause of the blocky mosaic look;
+          // each 10 cm cell got a single flat colour visible as a large patch.
+          colors[vi*3]   = rawData[b+3]
+          colors[vi*3+1] = rawData[b+4]
+          colors[vi*3+2] = rawData[b+5]
           splatScales[vi] = cnt >= 6 ? 1.08 : cnt >= 3 ? 1.03 : 1.0
 
           if (sy <= floorTop) {

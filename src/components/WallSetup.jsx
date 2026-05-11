@@ -441,6 +441,38 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   style={{ pointerEvents: 'none' }}
                 />
 
+                {/* LiDAR measurement cross — automatic, always at edge midpoints.
+                    Width  = horizontal line: left-edge centre → right-edge centre.
+                    Height = vertical line:   top-edge centre  → bottom-edge centre.
+                    The cross is not draggable; the user positions it by moving
+                    the four corner handles. */}
+                {(() => {
+                  const lx = ((corners[0][0] + corners[3][0]) / 2) * WARP_SVG_W
+                  const ly = ((corners[0][1] + corners[3][1]) / 2) * SVG_H
+                  const rx = ((corners[1][0] + corners[2][0]) / 2) * WARP_SVG_W
+                  const ry = ((corners[1][1] + corners[2][1]) / 2) * SVG_H
+                  const tx = ((corners[0][0] + corners[1][0]) / 2) * WARP_SVG_W
+                  const ty = ((corners[0][1] + corners[1][1]) / 2) * SVG_H
+                  const bx = ((corners[2][0] + corners[3][0]) / 2) * WARP_SVG_W
+                  const by = ((corners[2][1] + corners[3][1]) / 2) * SVG_H
+                  const CL = '#22d3ee'  // cyan accent
+                  return (
+                    <g clipPath="url(#ws-photo-clip)" style={{ pointerEvents: 'none' }}>
+                      {/* Shadow lines for legibility over any background */}
+                      <line x1={lx} y1={ly} x2={rx} y2={ry} stroke="rgba(0,0,0,0.55)" strokeWidth="3" />
+                      <line x1={tx} y1={ty} x2={bx} y2={by} stroke="rgba(0,0,0,0.55)" strokeWidth="3" />
+                      {/* Cyan measurement lines */}
+                      <line x1={lx} y1={ly} x2={rx} y2={ry} stroke={CL} strokeWidth="1.5" strokeDasharray="5 3" />
+                      <line x1={tx} y1={ty} x2={bx} y2={by} stroke={CL} strokeWidth="1.5" strokeDasharray="5 3" />
+                      {/* Endpoint dots */}
+                      <circle cx={lx} cy={ly} r="3.5" fill={CL} stroke="rgba(0,0,0,0.5)" strokeWidth="1" />
+                      <circle cx={rx} cy={ry} r="3.5" fill={CL} stroke="rgba(0,0,0,0.5)" strokeWidth="1" />
+                      <circle cx={tx} cy={ty} r="3.5" fill={CL} stroke="rgba(0,0,0,0.5)" strokeWidth="1" />
+                      <circle cx={bx} cy={by} r="3.5" fill={CL} stroke="rgba(0,0,0,0.5)" strokeWidth="1" />
+                    </g>
+                  )
+                })()}
+
                 {/* Edge labels */}
                 {edgeLabels.map((el, i) => (
                   <text
@@ -565,7 +597,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
               ) : lidarBannerState === 'unavailable' ? (
                 <>
                   <span className="ws-scan-measure__icon">⌖</span>
-                  <span className="ws-scan-measure__label">No scan match yet. Move the cross over the wall surface.</span>
+                  <span className="ws-scan-measure__label">No scan match — drag the corner handles onto the wall surface.</span>
                 </>
               ) : (
                 <span className="ws-scan-measure__label">Ready to measure from LiDAR scan.</span>

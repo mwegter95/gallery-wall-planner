@@ -96,10 +96,10 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
   const midpoint = (a, b) => [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
   const [tl, tr, br, bl] = corners
 
-  const cornerAnchors = corners
-
-  // Cross through the picture: use the center of each wall edge as a fallback
-  // when corner matches are too noisy or occluded in the scan.
+  // Measurement cross: always anchor at the center of each wall edge.
+  // Width  = 3-D distance between left-edge midpoint and right-edge midpoint.
+  // Height = 3-D distance between top-edge midpoint and bottom-edge midpoint.
+  // This is automatic — it does not depend on the user dragging extra handles.
   const edgeAnchors = [
     midpoint(tl, tr),   // top edge center
     midpoint(tr, br),   // right edge center
@@ -159,5 +159,5 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
 
   // Subsample to ~40 000 points for real-time performance without missing wall clusters
   const step = Math.max(1, Math.floor(n / 40_000))
-  return measure(cornerAnchors, 'corners') ?? measure(edgeAnchors, 'edges')
+  return measure(edgeAnchors, 'edges')
 }

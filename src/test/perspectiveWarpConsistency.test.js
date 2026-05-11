@@ -160,19 +160,20 @@ describe('computeLidarDims', () => {
 
   it('returns { widthIn, heightIn } with positive values when all corners matched', () => {
     // Build a synthetic 2×1 m wall at z=-5.
-    // With view=identity and f=1, points at (±1, ±0.5, -5) project to NDC (±0.2, ±0.1).
-    // Fractional corners: ndcX ∈ [-1,1] → frac = (ndcX+1)/2
-    //   TL (-1, 0.5, -5) → ndc (-0.2, 0.1) → frac (0.4, 0.45)
-    //   TR ( 1, 0.5, -5) → ndc ( 0.2, 0.1) → frac (0.6, 0.45)
-    //   BR ( 1,-0.5, -5) → ndc ( 0.2,-0.1) → frac (0.6, 0.55)
-    //   BL (-1,-0.5, -5) → ndc (-0.2,-0.1) → frac (0.4, 0.55)
+    // The algorithm now always uses edge-center anchors (cross through the image),
+    // so we place dense clusters at the four edge midpoints of the wall:
+    //   Top edge centre:    ( 0,  0.5, -5) → NDC ( 0.0,  0.1) → frac (0.5, 0.45)
+    //   Right edge centre:  ( 1,  0.0, -5) → NDC ( 0.2,  0.0) → frac (0.6, 0.50)
+    //   Bottom edge centre: ( 0, -0.5, -5) → NDC ( 0.0, -0.1) → frac (0.5, 0.55)
+    //   Left edge centre:   (-1,  0.0, -5) → NDC (-0.2,  0.0) → frac (0.4, 0.50)
+    // These are derived from the corners [TL,TR,BR,BL] = [(0.4,0.45),(0.6,0.45),(0.6,0.55),(0.4,0.55)]
     const pc = new PointCloudBuffer(400)
     const spread = 0.02
     for (let i = 0; i < 100; i++) {
-      pc.addPoint(-1 + i*spread*0.1, 0.5 + i*spread*0.05, -5, 1,0,0)  // TL cluster
-      pc.addPoint( 1 - i*spread*0.1, 0.5 + i*spread*0.05, -5, 0,1,0)  // TR cluster
-      pc.addPoint( 1 - i*spread*0.1,-0.5 - i*spread*0.05, -5, 0,0,1)  // BR cluster
-      pc.addPoint(-1 + i*spread*0.1,-0.5 - i*spread*0.05, -5, 1,1,0)  // BL cluster
+      pc.addPoint(  0 + i*spread*0.1,  0.5 + i*spread*0.05, -5, 1,0,0)  // top edge cluster
+      pc.addPoint(  1 - i*spread*0.1,  0   + i*spread*0.05, -5, 0,1,0)  // right edge cluster
+      pc.addPoint(  0 + i*spread*0.1, -0.5 - i*spread*0.05, -5, 0,0,1)  // bottom edge cluster
+      pc.addPoint( -1 + i*spread*0.1,  0   + i*spread*0.05, -5, 1,1,0)  // left edge cluster
     }
     const result = computeLidarDims(
       [[0.4, 0.45], [0.6, 0.45], [0.6, 0.55], [0.4, 0.55]],
