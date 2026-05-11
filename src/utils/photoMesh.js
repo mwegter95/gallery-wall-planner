@@ -133,6 +133,8 @@ const POSE_REFINEMENT_MIN_VISIBLE = 2000
 const DYNAMIC_OBJECT_EDGE_THRESHOLD = 0.12
 const DYNAMIC_OBJECT_COLOR_CLUSTER_MIN = 8
 const DYNAMIC_OBJECT_MIN_REGION = 120
+const FUSION_MIN_CONFIDENCE = 0.2
+const FUSION_CONFIDENCE_BLEND_FLOOR = 0.2
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -665,6 +667,16 @@ function robustWeightedMedianLab(candidates) {
   return { color: medianRgb, confidence }
 }
 
+function blendColorRGB(a, b, t) {
+  const w = Math.max(0, Math.min(1, t))
+  const iw = 1 - w
+  return [
+    a[0] * iw + b[0] * w,
+    a[1] * iw + b[1] * w,
+    a[2] * iw + b[2] * w,
+  ]
+}
+
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   const longest = Math.max(width, height)
   const scale = longest > maxDim ? (maxDim / longest) : 1
@@ -872,7 +884,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
   let views = snapshots.map(s => invertRigid(s.transform))
   let refinedSnapshots = snapshots
-  const camPositions = snapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
+  let camPositions = snapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   
   // ── Build initial atlases for pose refinement ──────────────────────────
@@ -883,7 +895,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const poseRefinement = await refineSnapshotPoses(buf, snapshots, views, intrs, atlases)
     refinedSnapshots = poseRefinement.snapshots
     views = poseRefinement.views
-    atlases = await buildVisibilityAtlases(buf, refinedSnapshots, intrs)
+    camPositions = refinedSnapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
+    atlases = await buildVisibilityAtlases(buf, views, intrs)
   } catch (err) {
     console.warn('[photoMesh] Pose refinement failed, using original poses:', err)
   }
@@ -917,6 +930,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     structureDownWeighted: 0,
     robustFusionPoints: 0,
     maskedRejected: 0,
+    lowConfidenceFallback: 0,
   } : null
 
   // ── STRATEGY 3: Per-point robust fusion with multiple candidates in Lab space ────
@@ -1013,15 +1027,30 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       // ─ STRATEGY 3: Robust weighted median fusion in Lab color space ───────
       const fusion = robustWeightedMedianLab(candidates)
       if (fusion) {
-        newColors[i*3] = fusion.color[0]
-        newColors[i*3+1] = fusion.color[1]
-        newColors[i*3+2] = fusion.color[2]
-        confidenceMap[i] = fusion.confidence
-        if (stats) {
-          stats.accepted++
-          stats.multiView += candidates.length > 1 ? 1 : 0
-          stats.singleView += candidates.length === 1 ? 1 : 0
-          if (candidates.length > 1) stats.robustFusionPoints++
+        if (fusion.confidence < FUSION_MIN_CONFIDENCE) {
+          newColors[i*3] = or
+          newColors[i*3+1] = og
+          newColors[i*3+2] = ob
+          if (stats) {
+            stats.fallback++
+            stats.lowConfidenceFallback++
+          }
+        } else {
+          const blended = blendColorRGB(
+            [or, og, ob],
+            fusion.color,
+            FUSION_CONFIDENCE_BLEND_FLOOR + (1 - FUSION_CONFIDENCE_BLEND_FLOOR) * fusion.confidence,
+          )
+          newColors[i*3] = blended[0]
+          newColors[i*3+1] = blended[1]
+          newColors[i*3+2] = blended[2]
+          confidenceMap[i] = fusion.confidence
+          if (stats) {
+            stats.accepted++
+            stats.multiView += candidates.length > 1 ? 1 : 0
+            stats.singleView += candidates.length === 1 ? 1 : 0
+            if (candidates.length > 1) stats.robustFusionPoints++
+          }
         }
       } else {
         // Fallback if fusion fails
@@ -1060,6 +1089,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       structureDownWeighted: stats.structureDownWeighted,
       robustFusionPoints: stats.robustFusionPoints,
       maskedRejected: stats.maskedRejected,
+      lowConfidenceFallback: stats.lowConfidenceFallback,
     })
   }
 
