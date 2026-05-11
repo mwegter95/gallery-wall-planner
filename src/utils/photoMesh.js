@@ -141,6 +141,7 @@ const AUTO_TUNE_MIN_PLANE_CONFIDENCE = 0.3
 const AUTO_TUNE_MAX_ENVELOPE_DISTANCE = 0.7
 const AUTO_TUNE_MIN_ENVELOPE_DISTANCE = 0.4
 const DEPTH_EDGE_GUARD_DEFAULT_M = 0.05
+const STRICT_PLANE_REJECTION = true
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -475,6 +476,7 @@ function localAtlasDepthSpread(atlas, ax, ay) {
 
 function buildAutoTunePolicy(snapshotReliability, planePreference) {
   const reliabilities = Array.from(snapshotReliability || [])
+  const p20 = computeQuantile(reliabilities, 0.2)
   const p35 = computeQuantile(reliabilities, 0.35)
   const p55 = computeQuantile(reliabilities, 0.55)
   const coverage = planePreference.sampledCells > 0
@@ -482,11 +484,11 @@ function buildAutoTunePolicy(snapshotReliability, planePreference) {
     : 0
 
   // Outer optimizer tunes inner projection gates based on scan-specific signal quality.
-  const reliabilityMin = Math.max(0.16, Math.min(0.52, Math.max(SNAPSHOT_RELIABILITY_MIN * 0.8, p35 * 0.95)))
-  const minPlaneConfidence = coverage >= 0.4 ? AUTO_TUNE_MIN_PLANE_CONFIDENCE : 0.4
-  const maxEnvelopeDistance = coverage >= 0.4 ? AUTO_TUNE_MAX_ENVELOPE_DISTANCE : AUTO_TUNE_MIN_ENVELOPE_DISTANCE
-  const depthEdgeGuard = coverage >= 0.4 ? (DEPTH_EDGE_GUARD_DEFAULT_M + 0.015) : DEPTH_EDGE_GUARD_DEFAULT_M
-  const ambiguityRatioBase = coverage >= 0.4 ? 0.8 : 0.86
+  const reliabilityMin = Math.max(0.28, Math.min(0.62, Math.max(0.32, p20 * 0.95, p35 * 0.9)))
+  const minPlaneConfidence = Math.max(0.42, Math.min(0.72, 0.52 - coverage * 0.18))
+  const maxEnvelopeDistance = Math.max(0.18, Math.min(0.34, 0.22 + 0.16 * coverage))
+  const depthEdgeGuard = Math.max(0.03, Math.min(0.05, DEPTH_EDGE_GUARD_DEFAULT_M - 0.012 + (1 - coverage) * 0.008))
+  const ambiguityRatioBase = coverage >= 0.5 ? 0.76 : 0.82
 
   return {
     reliabilityMin,
@@ -829,7 +831,10 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const confGate = 0.82 + 0.14 * cornerStrength
       const facingGate = Math.max(0.01, PLANE_FACING_MIN * (1 - 0.75 * cornerStrength))
       const planeHardRejected = plane && plane.confidence >= confGate && planeFacing < facingGate
-      if (planeHardRejected && stats) stats.planeRejected++
+      if (planeHardRejected) {
+        if (stats) stats.planeRejected++
+        if (STRICT_PLANE_REJECTION) continue
+      }
       const facingSoft = plane
         ? Math.max(0.25, 0.48 + 0.52 * planeFacing)
         : 1
