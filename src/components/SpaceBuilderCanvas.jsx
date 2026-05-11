@@ -123,9 +123,9 @@ const SPLAT_VERT = /* glsl */`
     float cosView   = max(0.30, abs(mvN.z));
     float angleFactor = min(2.0, 1.0 / cosView);
 
-    // CELL = 0.10 m, FILL = 1.15 (15% overlap) → disc world diameter = 0.115 m.
+    // RENDER_CELL = 0.025 m, FILL = 1.15 (15% overlap) → disc world diameter = 0.029 m.
     // multiply by 0.5 (radius) × 2 (proj NDC → half-screen): factor cancels to 1.
-    float worldDiam  = 0.115 * splatScale * angleFactor;
+    float worldDiam  = 0.029 * splatScale * angleFactor;
     gl_PointSize = clamp(worldDiam * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.5, 80.0);
     gl_Position  = projectionMatrix * mvPos;
   }
@@ -873,26 +873,32 @@ export default function SpaceBuilderCanvas({
 
         // ── 3-pass algorithm ─────────────────────────────────────────────────
         //
-        // Pass 1: build 10 cm voxel grid + precompute per-point hash key + find minY.
-        //   Each voxel accumulates the count of points inside it.
+        // Pass 1 (SOR, 10 cm grid): build coarse voxel map for outlier removal.
+        //   Floating noise blobs that have fewer than SOR_MIN neighbours in the
+        //   3×3×3 surrounding cells are tagged as outliers and skipped.
+        //   10 cm cells are intentionally coarse so each cell has enough points
+        //   for a reliable neighbourhood count; the SOR is insensitive to grid
+        //   resolution as long as it's large enough to aggregate returns.
         //
-        // Pass 2: Statistical Outlier Removal (SOR) for singleton voxels.
-        //   A singleton whose 3×3×3 neighbourhood has fewer than SOR_MIN total
-        //   points is a noisy LiDAR return (floating blob in air, specular ghost).
-        //   These are the source of the random giant splats — we remove them.
-        //   Only singletons are checked, so the 27-cell lookup runs on a tiny
-        //   fraction of the total point count.
+        // Pass 2 (Render dedup, 2.5 cm grid): deduplicate to one representative
+        //   point per 2.5 cm render-voxel.  2.5 cm gives fine enough granularity
+        //   that individual textural details (bricks, wood grain) are preserved,
+        //   while still reducing a 10 M-point scan to ~300 K–1 M render points.
+        //   Position = average centroid; colour = per-channel median (9 samples).
         //
-        // Pass 3: build typed arrays, skipping outliers, assigning splatScale
-        //   from local voxel density and smoothing colours per 10 cm cell.
+        // Yield points after each heavy phase let the browser repaint and show
+        // smooth progress instead of a sudden jump at the end.
         //
-        const CELL     = 0.10
-        const CELL_INV = 1 / CELL
-        const SOR_MIN  = 4
+        const CELL        = 0.10          // coarse grid for SOR
+        const CELL_INV    = 1 / CELL
+        const RENDER_CELL = 0.025         // fine grid for render dedup
+        const RENDER_INV  = 1 / RENDER_CELL
+        const SOR_MIN     = 4
 
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
+        // ─── Pass 1a: coarse voxel count + bounds ─────────────────────────
         const voxelCounts = new Map()
         const voxelKeys   = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
@@ -912,10 +918,12 @@ export default function SpaceBuilderCanvas({
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
 
-          if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
-            reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
+          if ((i & 0x1ffff) === 0 && i > 0 && !cancelled) {
+            reportRoomLoad(42 + (16 * i / n), 'Building voxel map')
           }
         }
+        if (cancelled) return
+        await new Promise(r => setTimeout(r, 0))  // yield → browser repaints progress
 
         const yOffset = isFinite(minY) ? -minY : 0
         yOffsetRef.current = yOffset
@@ -924,12 +932,17 @@ export default function SpaceBuilderCanvas({
         const roomCenterZ  = (minZ + maxZ) * 0.5
         const roomHeight   = isFinite(maxY) && isFinite(minY) ? (maxY - minY) : 1
 
+        // ─── Pass 1b: identify singletons ─────────────────────────────────
+        reportRoomLoad(58, 'Identifying outliers')
         const singletonOffset = new Map()
         for (let i = 0, b = 0; i < n; i++, b += 6) {
           const key = voxelKeys[i]
           if ((voxelCounts.get(key) || 0) === 1) singletonOffset.set(key, b)
         }
+        if (cancelled) return
+        await new Promise(r => setTimeout(r, 0))
 
+        // ─── Pass 1c: SOR on singletons ────────────────────────────────────
         const outlierKeys = new Set()
         let singletonProcessed = 0
         for (const [key, b] of singletonOffset) {
@@ -945,54 +958,63 @@ export default function SpaceBuilderCanvas({
               }
           if (nhTotal < SOR_MIN) outlierKeys.add(key)
           singletonProcessed++
-          if ((singletonProcessed & 0x1fff) === 0 && singletonOffset.size > 0 && !cancelled) {
+          if ((singletonProcessed & 0xfff) === 0 && singletonOffset.size > 0 && !cancelled) {
             reportRoomLoad(60 + (8 * singletonProcessed / singletonOffset.size), 'Filtering outliers')
           }
         }
+        if (cancelled) return
+        await new Promise(r => setTimeout(r, 0))
 
-        // ── Voxel deduplication ────────────────────────────────────────────
-        // Rather than rendering every raw LiDAR point (10M+), deduplicate to
-        // one representative point per 10 cm voxel cell.  This reduces the
-        // render count 20-100× and gives each splat a stable representative
-        // colour instead of one noisy raw sample.
+        // ─── Pass 2: fine-grid (2.5 cm) render deduplication ──────────────
+        // SOR used 10 cm voxelKeys to tag outliers; those tags are reused here.
+        // Render dedup uses a separate 2.5 cm hash, giving 64× more voxels than
+        // the SOR grid and preserving fine surface detail.
         //
-        // Position = voxel-average (smooth centroid, avoids jitter).
-        // Colour   = per-channel median of up to 9 samples.
-        //            Median rejects per-sample sensor noise without averaging
-        //            across different surfaces that share a boundary voxel.
+        // Colour = per-channel median of up to 9 samples per render-voxel.
+        // Median is more robust than mean because it discards outlier sensor
+        // readings (specular spikes, sky bleed) without blurring colour edges.
         const floorTop   = minY + roomHeight * 0.20
         const ceilBottom = maxY - roomHeight * 0.20
 
-        // Map: voxelKey → { sx, sy, sz, cnt, rs[], gs[], bs[] }
-        const voxelRep = new Map()
+        const renderVoxels = new Map()  // renderKey → { sx,sy,sz,cnt, rs[],gs[],bs[] }
         for (let i = 0, b = 0; i < n; i++, b += 6) {
-          const key = voxelKeys[i]
-          if (outlierKeys.has(key)) continue
-          let vd = voxelRep.get(key)
+          if (outlierKeys.has(voxelKeys[i])) continue
+
+          const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
+          const rix = Math.floor(px * RENDER_INV)
+          const riy = Math.floor(py * RENDER_INV)
+          const riz = Math.floor(pz * RENDER_INV)
+          const rk  = hashXYZ(rix, riy, riz)
+
+          let vd = renderVoxels.get(rk)
           if (!vd) {
             vd = { sx: 0, sy: 0, sz: 0, cnt: 0, rs: [], gs: [], bs: [] }
-            voxelRep.set(key, vd)
+            renderVoxels.set(rk, vd)
           }
-          vd.sx += rawData[b]; vd.sy += rawData[b+1]; vd.sz += rawData[b+2]; vd.cnt++
-          // Collect up to 9 colour samples per voxel for a robust median.
+          vd.sx += px; vd.sy += py; vd.sz += pz; vd.cnt++
           if (vd.rs.length < 9) {
             vd.rs.push(rawData[b+3])
             vd.gs.push(rawData[b+4])
             vd.bs.push(rawData[b+5])
           }
-          if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
-            reportRoomLoad(68 + (12 * i / n), 'Deduplicating voxels')
+          if ((i & 0x1ffff) === 0 && i > 0 && !cancelled) {
+            reportRoomLoad(68 + (16 * i / n), 'Deduplicating voxels')
           }
         }
+        if (cancelled) return
+        await new Promise(r => setTimeout(r, 0))
 
-        const validCount  = voxelRep.size
+        // ─── Pass 3: build geometry buffers ────────────────────────────────
+        reportRoomLoad(84, 'Building geometry')
+        const validCount  = renderVoxels.size
         const positions   = new Float32Array(validCount * 3)
         const colors      = new Float32Array(validCount * 3)
         const splatScales = new Float32Array(validCount)
         const normals     = new Float32Array(validCount * 3)
         let vi = 0
+        let voxIdx = 0
 
-        for (const [, vd] of voxelRep) {
+        for (const [, vd] of renderVoxels) {
           const avgX = vd.sx / vd.cnt
           const avgY = vd.sy / vd.cnt
           const avgZ = vd.sz / vd.cnt
@@ -1001,7 +1023,6 @@ export default function SpaceBuilderCanvas({
           positions[vi*3+1] = avgY + yOffset
           positions[vi*3+2] = avgZ
 
-          // Per-channel median — sort each array and pick the middle index.
           vd.rs.sort((a, b) => a - b)
           vd.gs.sort((a, b) => a - b)
           vd.bs.sort((a, b) => a - b)
@@ -1012,8 +1033,6 @@ export default function SpaceBuilderCanvas({
 
           splatScales[vi] = 1.0
 
-          // Normal heuristic: floor (bottom 20% of height) → up,
-          // ceiling (top 20%) → down, walls → outward from room center.
           if (avgY <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
           } else if (avgY >= ceilBottom) {
@@ -1024,14 +1043,25 @@ export default function SpaceBuilderCanvas({
             normals[vi*3] = nx/len;  normals[vi*3+1] = 0;  normals[vi*3+2] = nz/len
           }
           vi++
+
+          if ((voxIdx & 0x3fff) === 0 && validCount > 0 && !cancelled) {
+            reportRoomLoad(84 + (6 * voxIdx / validCount), 'Building geometry')
+          }
+          voxIdx++
         }
+        if (cancelled) return
 
         // Store diagnostic stats so the overlay can display them.
+        // Use t.renderer (threeRef.current.renderer) — this buildCloud() function
+        // is in a separate useEffect from the renderer, so `renderer` is out of
+        // scope; access it through the stable threeRef instead.
+        const fboW = t.renderer?.domElement?.width  ?? 0
+        const fboH = t.renderer?.domElement?.height ?? 0
         diagStatsRef.current = {
           rawPts: n,
           renderedPts: validCount,
-          fboW: renderer.domElement.width,
-          fboH: renderer.domElement.height,
+          fboW,
+          fboH,
           dpr: Math.min(window.devicePixelRatio, 2),
         }
 
@@ -1049,7 +1079,7 @@ export default function SpaceBuilderCanvas({
           vertexShader: SPLAT_VERT,
           fragmentShader: SPLAT_FRAG,
           uniforms: {
-            uViewH:    { value: renderer.domElement.height },
+            uViewH:    { value: fboH },
             uDiagMode: { value: 0 },
           },
         })
@@ -1584,7 +1614,7 @@ export default function SpaceBuilderCanvas({
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
                 <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
                 <tr><td>Splat px @ 3 m</td><td>{splatPx} fb-px <span className="sbc-diag-dim">({(splatPx / s.dpr).toFixed(1)} CSS px)</span></td></tr>
-                <tr><td>Voxel cell</td><td>10 cm</td></tr>
+                <tr><td>Voxel cell</td><td>2.5 cm (SOR: 10 cm)</td></tr>
                 <tr><td>Colour method</td><td>per-voxel median (9 samples)</td></tr>
               </tbody>
             </table>
