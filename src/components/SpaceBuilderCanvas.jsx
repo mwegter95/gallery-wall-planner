@@ -97,36 +97,47 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 //   points are still visible at maximum zoom-out.
 
 const SPLAT_VERT = /* glsl */`
-  attribute float splatScale;
-  attribute vec3  aNormal;
-  varying   vec3  vColor;
+  // No per-point attribute arrays for normals or scale — saves ~270 MB of RAM.
+  // Normals are computed procedurally in the vertex shader from world position
+  // and room-bounds uniforms.  Scale is a fixed constant.
+  uniform float uViewH;     // FBO height [px] — updated by ResizeObserver
+  uniform float uYOffset;   // floor-lift: raw_y + uYOffset = scene_y
+  uniform float uFloorY;    // raw-space Y below which points are floor
+  uniform float uCeilY;     // raw-space Y above which points are ceiling
+  uniform float uRoomCX;    // raw-space X centre of room
+  uniform float uRoomCZ;    // raw-space Z centre of room
 
-  // Physically correct splat sizing: one rendered disc per deduplicated voxel.
-  // Each voxel is CELL × CELL × CELL metres; the disc must cover its projected
-  // footprint so no gaps appear between adjacent voxels.
-  //
-  // Derivation: a world-space diameter D at view-space depth z_view projects to
-  //   px = D * proj[1][1] * (viewportHeight / 2) / (-z_view)   [framebuffer px]
-  // Setting D = CELL * FILL_FACTOR (e.g. 1.15 → 15% overlap prevents seams):
-  //   gl_PointSize = CELL * FILL * proj[1][1] * uViewH * 0.5 / -mvPos.z
-  // uViewH is the framebuffer height in pixels (set each frame from renderer).
-  uniform float uViewH;   // framebuffer height [px], updated by ResizeObserver
+  varying vec3 vColor;
 
   void main() {
     vColor = color;
-    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
 
-    // View-dependent disc enlargement for surfaces seen at grazing angles.
-    // Enlarging discs fills the perspective-stretched inter-voxel gaps on
-    // walls viewed edge-on, without over-inflating head-on surfaces.
-    vec3  mvN       = normalize(normalMatrix * aNormal);
+    // Apply Y-offset so floor lands at y=0 in scene space.
+    vec4 mvPos = modelViewMatrix * vec4(position.x, position.y + uYOffset, position.z, 1.0);
+
+    // Procedural surface normal: floor → up, ceiling → down, walls → outward.
+    vec3 norm;
+    if (position.y <= uFloorY) {
+      norm = vec3(0.0, 1.0, 0.0);
+    } else if (position.y >= uCeilY) {
+      norm = vec3(0.0, -1.0, 0.0);
+    } else {
+      float dx = position.x - uRoomCX;
+      float dz = position.z - uRoomCZ;
+      float len = max(length(vec2(dx, dz)), 0.001);
+      norm = vec3(dx / len, 0.0, dz / len);
+    }
+
+    // View-dependent disc enlargement — same math as before but now driven
+    // by the procedural normal rather than a per-vertex attribute.
+    vec3  mvN       = normalize(normalMatrix * norm);
     float cosView   = max(0.30, abs(mvN.z));
     float angleFactor = min(2.0, 1.0 / cosView);
 
-    // RENDER_CELL = 0.025 m, FILL = 1.15 (15% overlap) → disc world diameter = 0.029 m.
-    // multiply by 0.5 (radius) × 2 (proj NDC → half-screen): factor cancels to 1.
-    float worldDiam  = 0.029 * splatScale * angleFactor;
-    gl_PointSize = clamp(worldDiam * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.5, 80.0);
+    // 2 cm world diameter × angleFactor fills the ~1.2 cm LiDAR inter-point
+    // gap at 3 m.  21×21 SSDD covers any residual hairline seams beyond 3 m.
+    float worldDiam = 0.020 * angleFactor;
+    gl_PointSize = clamp(worldDiam * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 20.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -194,13 +205,13 @@ const SSDD_FRAG = /* glsl */`
     if (d < 0.9999) { gl_FragColor = texture2D(tColor, uv); return; }
 
     // Gap pixel — find the closest (min depth) occupied neighbour in a
-    // 13×13 window and fill with that exact pixel's colour.  Min-depth
-    // ensures foreground surfaces fill gaps; no averaging so sharp colour
-    // transitions between surfaces are preserved (no blurry mosaic artefacts).
+    // 21×21 window.  The larger window is needed because raw LiDAR points
+    // at 3–5 m have ~24 fb-px inter-point gaps; ±10 px reach + 2 cm disc
+    // radius guarantees full surface coverage at up to ~4 m depth.
     float bestD = 2.0;
     vec4  bestC = vec4(uBg, 1.0);
-    for (int xi = -6; xi <= 6; xi++) {
-      for (int yi = -6; yi <= 6; yi++) {
+    for (int xi = -10; xi <= 10; xi++) {
+      for (int yi = -10; yi <= 10; yi++) {
         vec2  suv = uv + vec2(float(xi), float(yi)) / uRes;
         float nd  = texture2D(tDepth, suv).r;
         if (nd < bestD) { bestD = nd; bestC = texture2D(tColor, suv); }
@@ -889,10 +900,8 @@ export default function SpaceBuilderCanvas({
         // Yield points after each heavy phase let the browser repaint and show
         // smooth progress instead of a sudden jump at the end.
         //
-        const CELL        = 0.10          // coarse grid for SOR
+        const CELL        = 0.10          // coarse grid for outlier removal only
         const CELL_INV    = 1 / CELL
-        const RENDER_CELL = 0.025         // fine grid for render dedup
-        const RENDER_INV  = 1 / RENDER_CELL
         const SOR_MIN     = 4
 
         const hashXYZ = (ix, iy, iz) =>
@@ -965,111 +974,56 @@ export default function SpaceBuilderCanvas({
         if (cancelled) return
         await new Promise(r => setTimeout(r, 0))
 
-        // ─── Pass 2: fine-grid (2.5 cm) render deduplication ──────────────
-        // SOR used 10 cm voxelKeys to tag outliers; those tags are reused here.
-        // Render dedup uses a separate 2.5 cm hash, giving 64× more voxels than
-        // the SOR grid and preserving fine surface detail.
+        // ─── Pass 2: build raw render arrays — NO voxelisation ────────────
+        // Render every non-outlier raw LiDAR point at its actual sensor position.
+        // No grid-snapping, no centroid, no colour averaging.  Raw positions
+        // preserve every surface detail; raw colours are the real RGB samples.
         //
-        // Colour = per-channel median of up to 9 samples per render-voxel.
-        // Median is more robust than mean because it discards outlier sensor
-        // readings (specular spikes, sky bleed) without blurring colour edges.
-        const floorTop   = minY + roomHeight * 0.20
-        const ceilBottom = maxY - roomHeight * 0.20
+        // Normals are computed procedurally in the vertex shader (uFloorY /
+        // uCeilY / uRoomCX / uRoomCZ uniforms) so we skip the normals array
+        // (~135 MB) and splatScales array (~45 MB) entirely.
+        //
+        // Memory: pre-allocate at full n, track vi, then slice.  subarray() is
+        // a zero-copy view so Three.js uploads exactly the filled region.
+        reportRoomLoad(68, 'Building render arrays')
+        const positions = new Float32Array(n * 3)
+        const colors    = new Float32Array(n * 3)
+        let vi = 0
 
-        const renderVoxels = new Map()  // renderKey → { sx,sy,sz,cnt, rs[],gs[],bs[] }
         for (let i = 0, b = 0; i < n; i++, b += 6) {
           if (outlierKeys.has(voxelKeys[i])) continue
-
-          const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
-          const rix = Math.floor(px * RENDER_INV)
-          const riy = Math.floor(py * RENDER_INV)
-          const riz = Math.floor(pz * RENDER_INV)
-          const rk  = hashXYZ(rix, riy, riz)
-
-          let vd = renderVoxels.get(rk)
-          if (!vd) {
-            vd = { sx: 0, sy: 0, sz: 0, cnt: 0, rs: [], gs: [], bs: [] }
-            renderVoxels.set(rk, vd)
-          }
-          vd.sx += px; vd.sy += py; vd.sz += pz; vd.cnt++
-          if (vd.rs.length < 9) {
-            vd.rs.push(rawData[b+3])
-            vd.gs.push(rawData[b+4])
-            vd.bs.push(rawData[b+5])
-          }
+          // Store raw y — vertex shader applies uYOffset to get scene-space y.
+          positions[vi*3]   = rawData[b]
+          positions[vi*3+1] = rawData[b+1]
+          positions[vi*3+2] = rawData[b+2]
+          colors[vi*3]   = rawData[b+3]
+          colors[vi*3+1] = rawData[b+4]
+          colors[vi*3+2] = rawData[b+5]
+          vi++
           if ((i & 0x1ffff) === 0 && i > 0 && !cancelled) {
-            reportRoomLoad(68 + (16 * i / n), 'Deduplicating voxels')
+            reportRoomLoad(68 + (22 * i / n), 'Building render arrays')
           }
         }
         if (cancelled) return
         await new Promise(r => setTimeout(r, 0))
 
-        // ─── Pass 3: build geometry buffers ────────────────────────────────
-        reportRoomLoad(84, 'Building geometry')
-        const validCount  = renderVoxels.size
-        const positions   = new Float32Array(validCount * 3)
-        const colors      = new Float32Array(validCount * 3)
-        const splatScales = new Float32Array(validCount)
-        const normals     = new Float32Array(validCount * 3)
-        let vi = 0
-        let voxIdx = 0
+        const floorY = minY + roomHeight * 0.20
+        const ceilY  = maxY - roomHeight * 0.20
 
-        for (const [, vd] of renderVoxels) {
-          const avgX = vd.sx / vd.cnt
-          const avgY = vd.sy / vd.cnt
-          const avgZ = vd.sz / vd.cnt
-
-          positions[vi*3]   = avgX
-          positions[vi*3+1] = avgY + yOffset
-          positions[vi*3+2] = avgZ
-
-          vd.rs.sort((a, b) => a - b)
-          vd.gs.sort((a, b) => a - b)
-          vd.bs.sort((a, b) => a - b)
-          const mi = vd.rs.length >> 1
-          colors[vi*3]   = vd.rs[mi]
-          colors[vi*3+1] = vd.gs[mi]
-          colors[vi*3+2] = vd.bs[mi]
-
-          splatScales[vi] = 1.0
-
-          if (avgY <= floorTop) {
-            normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
-          } else if (avgY >= ceilBottom) {
-            normals[vi*3] = 0;  normals[vi*3+1] = -1; normals[vi*3+2] = 0
-          } else {
-            let nx = avgX - roomCenterX, nz = avgZ - roomCenterZ
-            const len = Math.sqrt(nx*nx + nz*nz) || 1
-            normals[vi*3] = nx/len;  normals[vi*3+1] = 0;  normals[vi*3+2] = nz/len
-          }
-          vi++
-
-          if ((voxIdx & 0x3fff) === 0 && validCount > 0 && !cancelled) {
-            reportRoomLoad(84 + (6 * voxIdx / validCount), 'Building geometry')
-          }
-          voxIdx++
-        }
-        if (cancelled) return
-
-        // Store diagnostic stats so the overlay can display them.
-        // Use t.renderer (threeRef.current.renderer) — this buildCloud() function
-        // is in a separate useEffect from the renderer, so `renderer` is out of
-        // scope; access it through the stable threeRef instead.
         const fboW = t.renderer?.domElement?.width  ?? 0
         const fboH = t.renderer?.domElement?.height ?? 0
         diagStatsRef.current = {
           rawPts: n,
-          renderedPts: validCount,
+          renderedPts: vi,
           fboW,
           fboH,
           dpr: Math.min(window.devicePixelRatio, 2),
         }
 
+        // subarray() creates a zero-copy view — no extra 136 MB copy.
         const geo = new THREE.BufferGeometry()
-        geo.setAttribute('position',   new THREE.BufferAttribute(positions,  3))
-        geo.setAttribute('color',      new THREE.BufferAttribute(colors,     3))
-        geo.setAttribute('splatScale', new THREE.BufferAttribute(splatScales, 1))
-        geo.setAttribute('aNormal',    new THREE.BufferAttribute(normals,    3))
+        geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vi * 3), 3))
+        geo.setAttribute('color',    new THREE.BufferAttribute(colors.subarray(0, vi * 3),    3))
 
         const mat = new THREE.ShaderMaterial({
           vertexColors: true,
@@ -1081,6 +1035,11 @@ export default function SpaceBuilderCanvas({
           uniforms: {
             uViewH:    { value: fboH },
             uDiagMode: { value: 0 },
+            uYOffset:  { value: yOffset },
+            uFloorY:   { value: floorY },
+            uCeilY:    { value: ceilY },
+            uRoomCX:   { value: roomCenterX },
+            uRoomCZ:   { value: roomCenterZ },
           },
         })
 
@@ -1614,8 +1573,8 @@ export default function SpaceBuilderCanvas({
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
                 <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
                 <tr><td>Splat px @ 3 m</td><td>{splatPx} fb-px <span className="sbc-diag-dim">({(splatPx / s.dpr).toFixed(1)} CSS px)</span></td></tr>
-                <tr><td>Voxel cell</td><td>2.5 cm (SOR: 10 cm)</td></tr>
-                <tr><td>Colour method</td><td>per-voxel median (9 samples)</td></tr>
+                <tr><td>Voxel cell</td><td>none — raw sensor positions</td></tr>
+                <tr><td>Colour method</td><td>raw RGB sensor values</td></tr>
               </tbody>
             </table>
           </div>
