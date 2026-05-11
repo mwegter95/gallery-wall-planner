@@ -56,7 +56,8 @@ const M_TO_IN    = 39.3701
 /**
  * Max NDC distance to accept a corner match.  0.7 NDC = 35 % of screen —
  * generous enough that dragging a handle near a wall surface always finds a
- * match, but large enough to reject corners deliberately placed in empty space.
+ * match, but rejects anchors that land in pure empty space far from any scan
+ * geometry (corners dragged off the point cloud entirely).
  */
 const MAX_NDC_DIST = 0.7
 
@@ -139,6 +140,8 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
       }
     }
 
+    // Reject if any anchor has no match, or if its nearest point is farther
+    // than MAX_NDC_DIST away (corners dragged completely off the scan area).
     const maxAllowed = MAX_NDC_DIST ** 2
     if (bestPoints.some((p, c) => p === null || bestDists[c] > maxAllowed)) return null
 

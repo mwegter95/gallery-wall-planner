@@ -120,7 +120,10 @@ const SPLAT_VERT = /* glsl */`
     float sLen = length(mvN.xy);
     vNormalScreen = sLen > 0.001 ? mvN.xy / sLen : vec2(1.0, 0.0);
 
-    gl_PointSize = clamp(5.4 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.3, 22.0);
+    // Larger base (10.0 vs 5.4) makes splats ~10 px at typical viewing
+    // distances, filling inter-point gaps without requiring SSDD to cover
+    // large areas (which was the primary cause of the blocky mosaic look).
+    gl_PointSize = clamp(10.0 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.0, 40.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -771,6 +774,7 @@ export default function SpaceBuilderCanvas({
   const planeMeshesRef    = useRef([])
   const reconstructionMeshesRef = useRef([])
   const yOffsetRef        = useRef(0)
+  const rawBufferRef      = useRef(null)  // decoded PointCloudBuffer for LiDAR measurement
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
     if (!onRoomScanLoadProgress) return
@@ -1022,6 +1026,7 @@ export default function SpaceBuilderCanvas({
         const points = new THREE.Points(geo, mat)
         t.scene.add(points)
         pointCloudMeshRef.current = points
+        rawBufferRef.current = buf  // keep decoded buffer for Declare Surface measurement
         reportRoomLoad(90, 'Rendering scan')
         reportRoomLoad(100, 'Scan ready', false)
 
@@ -1492,6 +1497,7 @@ export default function SpaceBuilderCanvas({
               projectionMatrixElements: Array.from(cam.projectionMatrix.elements),
               viewMatrixElements:       Array.from(cam.matrixWorldInverse.elements),
               yOffset:                  yOffsetRef.current ?? 0,
+              pointCloudBuffer:         rawBufferRef.current ?? null,
             })
           }}
         >

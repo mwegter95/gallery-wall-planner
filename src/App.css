@@ -3244,12 +3244,25 @@ kbd {
   }
 
   /* Force the body to not overflow horizontally.  align-items:flex-start
-     prevents iOS's justify-content:center scroll-clipping bug. */
+     prevents iOS's justify-content:center scroll-clipping bug.
+     min-height:0 is required for flex children to actually shrink below their
+     content size — without it the body refuses to shrink when the footer grows
+     (e.g. when the LiDAR banner is visible), causing the SVG to overflow the
+     modal and the BL/BR handles to be clipped off the bottom of the screen. */
   .ws-body {
     padding: 10px 12px;
     align-items: flex-start;
     justify-content: flex-start;
     overflow: hidden;
+    min-height: 0;
+  }
+
+  /* On mobile the SVG must fill the body's actual available height, not a
+     fixed 96vh-240px calculation that doesn't account for the variable
+     footer (legend hidden, LiDAR banner visible, buttons wrapping).
+     100% resolves to the flex body's remaining height after header+footer. */
+  .ws-svg {
+    max-height: 100% !important;
   }
 
   /* Explicit width:100% breaks the circular inline-flex sizing where the

@@ -68,8 +68,9 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const [showPostScanSave, setShowPostScanSave] = useState(false)
   const [postScanName,     setPostScanName]     = useState('')
   // 'Add Surface from View' screenshot workflow
-  const [scanScreenshot,  setScanScreenshot]  = useState(null)
-  const [scanCameraData,  setScanCameraData]  = useState(null)
+  const [scanScreenshot,     setScanScreenshot]     = useState(null)
+  const [scanCameraData,     setScanCameraData]     = useState(null)
+  const [scanPointCloudBuf,  setScanPointCloudBuf]  = useState(null)
   // Stable ref so handleScanComplete closure can read current space name
   const spaceNameRef = useRef(space.name)
   useEffect(() => { spaceNameRef.current = space.name }, [space.name])
@@ -101,7 +102,9 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   /* ── Add Surface from 3D view (perspective-warp workflow) ─────────────── */
   const handleSurfaceFromView = useCallback((dataUrl, cameraData) => {
     setScanScreenshot(dataUrl)
-    setScanCameraData(cameraData ?? null)
+    const { pointCloudBuffer = null, ...rest } = cameraData ?? {}
+    setScanCameraData(Object.keys(rest).length ? rest : null)
+    setScanPointCloudBuf(pointCloudBuffer)
   }, [])
 
   const handleScanSurfaceApply = useCallback((warpedDataUrl, _corners, dims) => {
@@ -133,6 +136,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       setActiveSurfaceId(surfaceId)
       setScanScreenshot(null)
       setScanCameraData(null)
+      setScanPointCloudBuf(null)
     }
     img.src = src
   }, [scanScreenshot])
@@ -909,9 +913,9 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           wallHeight={96}
           existingImageUrl={scanScreenshot}
           cameraData={scanCameraData}
-          pointCloud={space.roomScan?.pointCloud ?? null}
+          pointCloud={scanPointCloudBuf ?? space.roomScan?.pointCloud ?? null}
           onApply={handleScanSurfaceApply}
-          onClose={() => { setScanScreenshot(null); setScanCameraData(null) }}
+          onClose={() => { setScanScreenshot(null); setScanCameraData(null); setScanPointCloudBuf(null) }}
         />
       )}
 
