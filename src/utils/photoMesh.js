@@ -134,6 +134,8 @@ const PLANE_PREF_DOMINANCE_RATIO = 1.06
 const PLANE_PREF_MATCH_BONUS = 1.2
 const PLANE_PREF_MISMATCH_PENALTY = 0.55
 const PLANE_PREF_HARD_GATING = true
+const PLANE_PREF_COLOR_DRIFT_WEIGHT = 2.8
+const PLANE_PREF_MAX_MEAN_DRIFT = 0.74
 const SNAPSHOT_RELIABILITY_MAX_SAMPLES = 380_000
 const SNAPSHOT_RELIABILITY_MIN = 0.3
 const SNAPSHOT_RELIABILITY_RESIDUAL_SCALE = 12
@@ -290,7 +292,7 @@ function planeCellKey(plane, cellSize = PLANE_CELL_SIZE_M) {
   return `${plane.planeIndex}:${qu}:${qv}`
 }
 
-async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame, {
+async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame, pixMaps, {
   maxSamples = PLANE_PREF_MAX_SAMPLES,
   yieldEvery = 120_000,
 } = {}) {
@@ -299,6 +301,8 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
   const S = views.length
   const stride = Math.max(1, Math.ceil(n / Math.max(1, maxSamples)))
   const scoresByCell = new Map()
+  const driftSumByCell = new Map()
+  const driftWeightByCell = new Map()
 
   for (let i = 0; i < n; i += stride) {
     if (i > 0 && i % yieldEvery === 0) await new Promise(r => setTimeout(r, 0))
@@ -316,7 +320,14 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
     if (!cellScores) {
       cellScores = new Float32Array(S)
       scoresByCell.set(key, cellScores)
+      driftSumByCell.set(key, new Float32Array(S))
+      driftWeightByCell.set(key, new Float32Array(S))
     }
+    const cellDriftSums = driftSumByCell.get(key)
+    const cellDriftWeights = driftWeightByCell.get(key)
+    const baseR = D[b + 3]
+    const baseG = D[b + 4]
+    const baseB = D[b + 5]
 
     for (let si = 0; si < S; si++) {
       const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
@@ -333,13 +344,24 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
       const depthResidual = Math.max(0, proj.depth - depthRef)
       if (depthResidual > MAX_DEPTH_RESIDUAL_REJECT) continue
 
+      const px = pixMaps?.[si]
+      if (!px) continue
+      const sampled = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
+      const drift = colorDriftL1ToBase(sampled, baseR, baseG, baseB)
+      const driftPenalty = Math.exp(-PLANE_PREF_COLOR_DRIFT_WEIGHT * drift)
+
       // Build a stable dominant-view map in plane-local cells.
-      cellScores[si] += proj.score * center.weight * (1 / (1 + 6 * depthResidual))
+      const contrib = proj.score * center.weight * (1 / (1 + 6 * depthResidual)) * driftPenalty
+      cellScores[si] += contrib
+      cellDriftSums[si] += drift * contrib
+      cellDriftWeights[si] += contrib
     }
   }
 
   const preferredByCell = new Map()
   for (const [key, scores] of scoresByCell.entries()) {
+    const cellDriftSums = driftSumByCell.get(key)
+    const cellDriftWeights = driftWeightByCell.get(key)
     let bestSi = -1
     let bestScore = 0
     let secondScore = 0
@@ -353,7 +375,15 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
         secondScore = s
       }
     }
-    if (bestSi >= 0 && bestScore > 0 && bestScore >= secondScore * PLANE_PREF_DOMINANCE_RATIO) {
+    const bestMeanDrift = (bestSi >= 0 && cellDriftWeights[bestSi] > 0)
+      ? (cellDriftSums[bestSi] / cellDriftWeights[bestSi])
+      : Infinity
+    if (
+      bestSi >= 0 &&
+      bestScore > 0 &&
+      bestScore >= secondScore * PLANE_PREF_DOMINANCE_RATIO &&
+      bestMeanDrift <= PLANE_PREF_MAX_MEAN_DRIFT
+    ) {
       preferredByCell.set(key, bestSi)
     }
   }
@@ -717,7 +747,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
   const roomFrame = estimateRoomFrame(buf)
-  const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame)
+  const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame, pixMaps)
   const preferredSnapshotByPlaneCell = planePreference.preferredByCell
   const snapshotReliability = await estimateSnapshotReliability(buf, views, intrs, atlases)
   const autoTunePolicy = buildAutoTunePolicy(snapshotReliability, planePreference)
