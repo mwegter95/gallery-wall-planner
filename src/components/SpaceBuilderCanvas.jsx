@@ -1512,6 +1512,9 @@ export default function SpaceBuilderCanvas({
           <div>Auto env-max: {Number(projectionDiag.autoMaxEnvelopeDistance || 0).toFixed(3)}m</div>
           <div>Auto depth-edge: {Number(projectionDiag.autoDepthEdgeGuard || 0).toFixed(3)}m</div>
           <div>Auto plane coverage: {(100 * Number(projectionDiag.autoPlaneCoverage || 0)).toFixed(1)}%</div>
+          <div>Relaxed recovery accepted: {(projectionDiag.relaxedRecoveryAccepted || 0).toLocaleString()}</div>
+          <div>Relaxed recovery fallback: {(projectionDiag.relaxedRecoveryFallback || 0).toLocaleString()}</div>
+          <div>Color drift reject: {(projectionDiag.colorDriftRejected || 0).toLocaleString()}</div>
           <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
           <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
         </div>

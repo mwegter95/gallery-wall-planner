@@ -142,6 +142,13 @@ const AUTO_TUNE_MAX_ENVELOPE_DISTANCE = 0.7
 const AUTO_TUNE_MIN_ENVELOPE_DISTANCE = 0.4
 const DEPTH_EDGE_GUARD_DEFAULT_M = 0.05
 const STRICT_PLANE_REJECTION = true
+const RELAXED_RECOVERY_CONFIDENCE_FACTOR = 0.62
+const RELAXED_RECOVERY_ENVELOPE_EXPAND_M = 0.26
+const RELAXED_RECOVERY_RELIABILITY_FACTOR = 0.72
+const RELAXED_RECOVERY_DEPTH_EDGE_EXPAND_M = 0.028
+const RELAXED_RECOVERY_SCORE_FACTOR = 0.72
+const COLOR_DRIFT_BASE_L1 = 0.78
+const COLOR_DRIFT_RELAXED_BONUS = 0.16
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -484,11 +491,11 @@ function buildAutoTunePolicy(snapshotReliability, planePreference) {
     : 0
 
   // Outer optimizer tunes inner projection gates based on scan-specific signal quality.
-  const reliabilityMin = Math.max(0.28, Math.min(0.62, Math.max(0.32, p20 * 0.95, p35 * 0.9)))
-  const minPlaneConfidence = Math.max(0.42, Math.min(0.72, 0.52 - coverage * 0.18))
-  const maxEnvelopeDistance = Math.max(0.18, Math.min(0.34, 0.22 + 0.16 * coverage))
-  const depthEdgeGuard = Math.max(0.03, Math.min(0.05, DEPTH_EDGE_GUARD_DEFAULT_M - 0.012 + (1 - coverage) * 0.008))
-  const ambiguityRatioBase = coverage >= 0.5 ? 0.76 : 0.82
+  const reliabilityMin = Math.max(0.22, Math.min(0.5, Math.max(0.24, p20 * 0.88, p35 * 0.84)))
+  const minPlaneConfidence = Math.max(0.28, Math.min(0.52, 0.44 - coverage * 0.12))
+  const maxEnvelopeDistance = Math.max(0.34, Math.min(0.72, 0.42 + 0.32 * coverage))
+  const depthEdgeGuard = Math.max(0.045, Math.min(0.075, DEPTH_EDGE_GUARD_DEFAULT_M + 0.02 - coverage * 0.01))
+  const ambiguityRatioBase = coverage >= 0.5 ? 0.8 : 0.86
 
   return {
     reliabilityMin,
@@ -518,6 +525,14 @@ function projectToSnapshot(wx, wy, wz, view, intr) {
   const proximity = 1 / (1 + 0.08 * depth)
   const score = facing * proximity
   return { u, v, depth, score }
+}
+
+function colorDriftL1ToBase(sampled, baseR, baseG, baseB) {
+  return (
+    Math.abs(sampled[0] - baseR) +
+    Math.abs(sampled[1] - baseG) +
+    Math.abs(sampled[2] - baseB)
+  )
 }
 
 function edgeCentralityWeight(intr, u, v) {
@@ -735,6 +750,9 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     autoMaxEnvelopeDistance: autoTunePolicy.maxEnvelopeDistance,
     autoDepthEdgeGuard: autoTunePolicy.depthEdgeGuard,
     autoPlaneCoverage: autoTunePolicy.planeCoverage,
+    relaxedRecoveryAccepted: 0,
+    relaxedRecoveryFallback: 0,
+    colorDriftRejected: 0,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -748,12 +766,20 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
     const plane = classifyPlaneNormal(wx, wy, wz, roomFrame)
 
-    const geometryEligible = !!(
+    const geometryEligibleStrict = !!(
       plane &&
       plane.confidence >= autoTunePolicy.minPlaneConfidence &&
       plane.bestDistance <= autoTunePolicy.maxEnvelopeDistance
     )
-    if (!geometryEligible) {
+    const relaxedMinPlaneConfidence = autoTunePolicy.minPlaneConfidence * RELAXED_RECOVERY_CONFIDENCE_FACTOR
+    const relaxedMaxEnvelopeDistance = autoTunePolicy.maxEnvelopeDistance + RELAXED_RECOVERY_ENVELOPE_EXPAND_M
+    const geometryEligibleRelaxed = !!(
+      plane &&
+      plane.confidence >= relaxedMinPlaneConfidence &&
+      plane.bestDistance <= relaxedMaxEnvelopeDistance
+    )
+    const useRelaxedRecovery = !geometryEligibleStrict && geometryEligibleRelaxed
+    if (!geometryEligibleStrict && !useRelaxedRecovery) {
       newColors[i*3] = or
       newColors[i*3+1] = og
       newColors[i*3+2] = ob
@@ -764,13 +790,23 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       continue
     }
 
+    const reliabilityMinGate = useRelaxedRecovery
+      ? Math.max(0.16, autoTunePolicy.reliabilityMin * RELAXED_RECOVERY_RELIABILITY_FACTOR)
+      : autoTunePolicy.reliabilityMin
+    const depthEdgeGuardGate = useRelaxedRecovery
+      ? (autoTunePolicy.depthEdgeGuard + RELAXED_RECOVERY_DEPTH_EDGE_EXPAND_M)
+      : autoTunePolicy.depthEdgeGuard
+    const scoreMinGate = useRelaxedRecovery
+      ? (MIN_PROJECTION_SCORE * RELAXED_RECOVERY_SCORE_FACTOR)
+      : MIN_PROJECTION_SCORE
+
     let best = null
     let second = null
     const ranked = []
     const preferredSiForPoint = plane ? preferredSnapshotByPlaneCell.get(planeCellKey(plane)) : null
 
     for (let si = 0; si < S; si++) {
-      if (snapshotReliability[si] < autoTunePolicy.reliabilityMin) {
+      if (snapshotReliability[si] < reliabilityMinGate) {
         if (stats) stats.unreliableSnapshotRejected++
         continue
       }
@@ -803,7 +839,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
       const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
       const depthSpread = localAtlasDepthSpread(atlas, ax, ay)
-      if (depthSpread > autoTunePolicy.depthEdgeGuard) {
+      if (depthSpread > depthEdgeGuardGate) {
         if (stats) stats.depthEdgeRejected++
         continue
       }
@@ -859,13 +895,18 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       }
       if (stats && structureWeight < 0.9) stats.structureDownWeighted++
 
-      if (weightedScore < MIN_PROJECTION_SCORE) {
+      if (weightedScore < scoreMinGate) {
         if (stats) stats.scoreRejected++
         continue
       }
 
       const px = pixMaps[si]
       const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
+      const maxColorDrift = COLOR_DRIFT_BASE_L1 + (1 - snapshotReliability[si]) * 0.24 + (useRelaxedRecovery ? COLOR_DRIFT_RELAXED_BONUS : 0)
+      if (colorDriftL1ToBase(color, or, og, ob) > maxColorDrift) {
+        if (stats) stats.colorDriftRejected++
+        continue
+      }
       const candidate = { si, score: weightedScore, depthResidual, proj, color }
       insertTopByScore(ranked, candidate)
 
@@ -910,12 +951,16 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       if (stats) {
         stats.accepted++
         stats.singleView++
+        if (useRelaxedRecovery) stats.relaxedRecoveryAccepted++
       }
     } else {
       newColors[i*3] = or
       newColors[i*3+1] = og
       newColors[i*3+2] = ob
-      if (stats) stats.fallback++
+      if (stats) {
+        stats.fallback++
+        if (useRelaxedRecovery) stats.relaxedRecoveryFallback++
+      }
     }
   }
 
@@ -951,6 +996,9 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       autoMaxEnvelopeDistance: stats.autoMaxEnvelopeDistance,
       autoDepthEdgeGuard: stats.autoDepthEdgeGuard,
       autoPlaneCoverage: stats.autoPlaneCoverage,
+      relaxedRecoveryAccepted: stats.relaxedRecoveryAccepted,
+      relaxedRecoveryFallback: stats.relaxedRecoveryFallback,
+      colorDriftRejected: stats.colorDriftRejected,
     })
   }
 
