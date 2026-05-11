@@ -86,7 +86,7 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 // so the point cloud reads as a solid coloured surface rather than a cloud of
 // semi-transparent halos.
 //
-// splatScale is still computed from 10 cm voxel density and drives disc size
+// splatScale is computed from a fine 5 mm voxel density and drives disc size
 // so dense regions stay smooth while sparse areas stay readable.
 //
 // Sizing math (solid discs need ~10–20 % less radius than Gaussian blobs):
@@ -115,11 +115,10 @@ const SPLAT_VERT = /* glsl */`
     float cosView   = max(0.28, abs(mvN.z));
     float angleFactor = min(2.2, 1.0 / cosView);   // cap grazing boost to avoid bubble artifacts
 
-    // Factor 8 × angleFactor: for a dead-on wall (cosView≈1) this is 8,
-    // giving ≈1.5 device-px for dense surfaces.  At 75° (cosView≈0.26) it's ≈30,
-    // which fills the elongated inter-point gaps without overdrawing.
+    // Slightly larger base size reduces visible dotting while the angle factor
+    // still fills grazing-view gaps without letting splats balloon excessively.
     // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizes consistent across FOV presets.
-    gl_PointSize = clamp(5.2 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.2, 22.0);
+    gl_PointSize = clamp(6.1 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.3, 24.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -133,7 +132,9 @@ const SPLAT_FRAG = /* glsl */`
     vec2 uv = gl_PointCoord - 0.5;
     if (dot(uv, uv) > 0.25) discard;
 
-    gl_FragColor = vec4(vColor, 1.0);
+    // Gentle gamma lift keeps the scan readable without introducing blur.
+    vec3 col = pow(clamp(vColor, 0.0, 1.0), vec3(0.94));
+    gl_FragColor = vec4(col, 1.0);
   }
 `
 
@@ -170,11 +171,11 @@ const SSDD_FRAG = /* glsl */`
     // Occupied pixel — pass through unchanged
     if (d < 0.9999) { gl_FragColor = texture2D(tColor, uv); return; }
 
-    // Gap pixel — find closest (min depth) occupied neighbour in a 9×9 window
+    // Gap pixel — find closest (min depth) occupied neighbour in an 11×11 window
     float bestD = 2.0;
     vec4  bestC = vec4(uBg, 1.0);
-    for (int xi = -4; xi <= 4; xi++) {
-      for (int yi = -4; yi <= 4; yi++) {
+    for (int xi = -5; xi <= 5; xi++) {
+      for (int yi = -5; yi <= 5; yi++) {
         vec2  suv = uv + vec2(float(xi), float(yi)) / uRes;
         float nd  = texture2D(tDepth, suv).r;
         if (nd < bestD) { bestD = nd; bestC = texture2D(tColor, suv); }
@@ -840,7 +841,7 @@ export default function SpaceBuilderCanvas({
 
         // ── 3-pass algorithm ─────────────────────────────────────────────────
         //
-        // Pass 1: build 10 cm voxel grid + precompute per-point hash key + find minY.
+        // Pass 1: build 5 mm voxel grid + precompute per-point hash key + find minY.
         //   Each voxel accumulates the count of points inside it.
         //
         // Pass 2: Statistical Outlier Removal (SOR) for singleton voxels.
@@ -851,18 +852,18 @@ export default function SpaceBuilderCanvas({
         //   fraction of the total point count.
         //
         // Pass 3: build typed arrays, skipping outliers, assigning splatScale
-        //   from local voxel density.  splatScale is capped at 1.5 because SOR
-        //   ensures no truly isolated point remains.
+        //   from local voxel density and smoothing colours per 5 mm cell.
         //
-        const CELL     = 0.10
+        const CELL     = 0.005
         const CELL_INV = 1 / CELL
         const SOR_MIN  = 4
 
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
-        const voxelCounts = new Map()
-        const voxelKeys   = new Int32Array(n)
+        const voxelCounts    = new Map()
+        const voxelColorSums = new Map()
+        const voxelKeys      = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
         let   minZ = Infinity, maxZ = -Infinity
@@ -879,6 +880,14 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
+          const colorSums = voxelColorSums.get(key)
+          if (colorSums) {
+            colorSums[0] += rawData[b+3]
+            colorSums[1] += rawData[b+4]
+            colorSums[2] += rawData[b+5]
+          } else {
+            voxelColorSums.set(key, [rawData[b+3], rawData[b+4], rawData[b+5]])
+          }
 
           if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
             reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
@@ -939,10 +948,12 @@ export default function SpaceBuilderCanvas({
           positions[vi*3]   = sx
           positions[vi*3+1] = sy + yOffset
           positions[vi*3+2] = sz
-          colors[vi*3]      = rawData[b+3]
-          colors[vi*3+1]    = rawData[b+4]
-          colors[vi*3+2]    = rawData[b+5]
-          splatScales[vi] = cnt >= 8 ? 1.12 : cnt >= 4 ? 1.05 : 1.0
+          const sum = voxelColorSums.get(key)
+          const inv = sum ? 1 / cnt : 1
+          colors[vi*3]      = sum ? sum[0] * inv : rawData[b+3]
+          colors[vi*3+1]    = sum ? sum[1] * inv : rawData[b+4]
+          colors[vi*3+2]    = sum ? sum[2] * inv : rawData[b+5]
+          splatScales[vi] = cnt >= 6 ? 1.16 : cnt >= 3 ? 1.08 : 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0

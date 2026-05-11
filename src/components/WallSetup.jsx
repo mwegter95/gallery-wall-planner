@@ -191,6 +191,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
     const pointCount = lidarCloud?._len ?? lidarCloud?.pointCount ?? 0
     if (!cameraData || !lidarCloud || pointCount === 0 || !rawPhoto) return
     const tid = setTimeout(() => {
+      setLidarMeasured(false)
       const dims = computeLidarDims(corners, cameraData, pointCloud)
       if (dims) {
         if (unitSystem === 'metric') {

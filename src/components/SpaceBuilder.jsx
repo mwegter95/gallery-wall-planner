@@ -99,8 +99,9 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   }, [])
 
   /* ── Add Surface from 3D view (perspective-warp workflow) ─────────────── */
-  const handleSurfaceFromView = useCallback((dataUrl) => {
+  const handleSurfaceFromView = useCallback((dataUrl, cameraData) => {
     setScanScreenshot(dataUrl)
+    setScanCameraData(cameraData ?? null)
   }, [])
 
   const handleScanSurfaceApply = useCallback((warpedDataUrl, _corners, dims) => {
