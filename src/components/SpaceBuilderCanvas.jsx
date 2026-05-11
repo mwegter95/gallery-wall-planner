@@ -10,7 +10,7 @@ import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
-import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
+import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
 
 const IN_TO_M   = 0.0254
@@ -86,8 +86,8 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 // so the point cloud reads as a solid coloured surface rather than a cloud of
 // semi-transparent halos.
 //
-// splatScale (0.25–1.5) is still computed from 10 cm voxel density and drives
-// disc size so dense regions stay crisp while sparse gap areas fill in slightly.
+// splatScale is still computed from 10 cm voxel density and drives disc size
+// so dense regions stay smooth while sparse areas stay readable.
 //
 // Sizing math (solid discs need ~10–20 % less radius than Gaussian blobs):
 //   projectionMatrix[1][1] = cot(halfFOV_y) in column-major GLSL mat4.
@@ -97,7 +97,7 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 //   points are still visible at maximum zoom-out.
 
 const SPLAT_VERT = /* glsl */`
-  attribute float splatScale;    // 0.25 (dense) → 1.5 (sparse)
+  attribute float splatScale;    // density-based size boost
   attribute vec3  aNormal;       // estimated surface normal (floor/ceiling/wall heuristic)
   varying   vec3  vColor;
 
@@ -133,13 +133,7 @@ const SPLAT_FRAG = /* glsl */`
     vec2 uv = gl_PointCoord - 0.5;
     if (dot(uv, uv) > 0.25) discard;
 
-    // Colour grading: boost saturation 20 % and apply a gentle gamma lift
-    // so LiDAR colours look richer and more picture-like without blurring.
-    vec3 col  = vColor;
-    float luma = dot(col, vec3(0.299, 0.587, 0.114));
-    col = mix(vec3(luma), col, 1.2);                    // +20 % saturation
-    col = pow(clamp(col, 0.0, 1.0), vec3(0.88));        // mild gamma lift
-    gl_FragColor = vec4(col, 1.0);
+    gl_FragColor = vec4(vColor, 1.0);
   }
 `
 
@@ -747,7 +741,7 @@ export default function SpaceBuilderCanvas({
     const enoughTime = now - prev.ts >= 120
     if (!phaseChanged && !enoughDelta && !enoughTime) return
     roomLoadProgressRef.current = { pct: clamped, phase, ts: now }
-    try { onRoomScanLoadProgress({ pct: clamped, phase, active }) } catch {}
+    try { onRoomScanLoadProgress({ pct: clamped, phase, active }) } catch (err) { void err }
   }, [onRoomScanLoadProgress])
   useEffect(() => {
     const t = threeRef.current
@@ -948,7 +942,7 @@ export default function SpaceBuilderCanvas({
           colors[vi*3]      = rawData[b+3]
           colors[vi*3+1]    = rawData[b+4]
           colors[vi*3+2]    = rawData[b+5]
-          splatScales[vi] = 1.0
+          splatScales[vi] = cnt >= 8 ? 1.12 : cnt >= 4 ? 1.05 : 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
@@ -1241,16 +1235,6 @@ export default function SpaceBuilderCanvas({
   const handleFwdJoyDown = fwdJoy.onDown
   const handleFwdJoyMove = fwdJoy.onMove
   const handleFwdJoyUp   = fwdJoy.onUp
-
-  // Zoom slider — logarithmic so drag feels linear in perceptual space
-  // slider value 0–100 maps to orbit.radius 0.1–80 via log scale
-
-  function handleZoomSlider(e) {
-    const r = sliderToRadius(Number(e.target.value), ZOOM_MIN, ZOOM_MAX)
-    setZoomRadius(r)
-    const t = threeRef.current
-    if (t) { t.orbit.radius = r; t.applyOrbit() }
-  }
 
   return (
     <div ref={mountRef} className="sbc-3d-viewport">

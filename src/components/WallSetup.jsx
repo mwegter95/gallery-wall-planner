@@ -80,7 +80,9 @@ async function anyImageToJpeg(file) {
     canvas.getContext('2d').drawImage(bitmap, 0, 0)
     bitmap.close()
     return scaleDataUrl(canvas.toDataURL('image/jpeg', 0.92))
-  } catch (_) { /* fall through */ }
+  } catch {
+    // fall through
+  }
 
   // ── Strategy 2: heic2any WASM ──
   if (isHeic(file)) {
@@ -112,7 +114,9 @@ async function anyImageToJpeg(file) {
       img.src = objUrl
     })
     return scaleDataUrl(jpeg)
-  } catch (_) { /* fall through */ }
+  } catch {
+    // fall through
+  }
 
   throw new Error('Could not decode image')
 }
@@ -166,7 +170,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
       setCorners(DEFAULT_CORNERS)   // reset corners for new photo
       setShowPreview(false)
       setPreviewUrl(null)
-    } catch (err) {
+    } catch {
       setPhotoError('Could not load that image. Try a JPEG, PNG, or HEIC file.')
     } finally {
       setLoadingPhoto(false)
@@ -175,7 +179,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
   /* ── Natural image dimensions (drive SVG viewBox height) ── */
   useEffect(() => {
-    if (!rawPhoto) { setImgNaturalSize({ w: 0, h: 0 }); return }
+    if (!rawPhoto) return
     const img = new Image()
     img.onload = () => setImgNaturalSize({ w: img.naturalWidth, h: img.naturalHeight })
     img.src = rawPhoto
@@ -183,7 +187,9 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
   /* ── LiDAR-based live dimension update ──────────────── */
   useEffect(() => {
-    if (!cameraData || !pointCloud || pointCloud._len === 0 || !rawPhoto) return
+    const lidarCloud = pointCloud?._buffer ?? pointCloud
+    const pointCount = lidarCloud?._len ?? lidarCloud?.pointCount ?? 0
+    if (!cameraData || !lidarCloud || pointCount === 0 || !rawPhoto) return
     const tid = setTimeout(() => {
       const dims = computeLidarDims(corners, cameraData, pointCloud)
       if (dims) {
@@ -291,7 +297,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
       setIsProcessing(false)
       setErrorMsg('Warp failed: ' + (err.message || String(err)))
     }
-  }, [corners, rawPhoto, wallWidth, wallHeight])
+  }, [corners, editHeight, editWidth, rawPhoto])
 
   /* ── SVG coordinate space ───────────────────────────── */
   const SVG_H = imgNaturalSize.h > 0 ? Math.round(WARP_SVG_W * imgNaturalSize.h / imgNaturalSize.w) : 360

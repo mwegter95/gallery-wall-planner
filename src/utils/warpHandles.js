@@ -84,12 +84,14 @@ const roundHalf = (v) => Math.round(v * 2) / 2
  * @returns {{ widthIn: number, heightIn: number } | null}
  */
 export function computeLidarDims(corners, cameraData, pointCloud) {
-  if (!cameraData || !pointCloud || pointCloud._len === 0) return null
+  if (!cameraData || !pointCloud) return null
   const { projectionMatrixElements: projE, viewMatrixElements: viewE, yOffset = 0 } = cameraData
   if (!projE || !viewE) return null
 
-  const data = pointCloud._data
-  const n    = pointCloud._len
+  const source = pointCloud._buffer ?? pointCloud
+  const data = source._data
+  const n    = source._len ?? source.pointCount ?? 0
+  if (!data || n === 0) return null
 
   // Fractional [0,1] corners → NDC: x left→right, y bottom→top
   const cornerNDC = corners.map(([fx, fy]) => [fx * 2 - 1, 1 - fy * 2])
