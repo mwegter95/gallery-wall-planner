@@ -814,24 +814,22 @@ export default function SpaceBuilderCanvas({
           let ab
           if (resp.body?.getReader && totalBytes > 0) {
             const reader = resp.body.getReader()
-            const chunks = []
+            const merged = new Uint8Array(totalBytes)
             let received = 0
             while (true) {
               const { done, value } = await reader.read()
               if (done) break
-              chunks.push(value)
+              if (!value) continue
+              const end = Math.min(totalBytes, received + value.byteLength)
+              merged.set(value.subarray(0, end - received), received)
               received += value.byteLength
               if (!cancelled) {
                 reportRoomLoad(4 + (34 * received / totalBytes), 'Downloading scan')
               }
             }
-            const merged = new Uint8Array(received)
-            let offset = 0
-            for (const chunk of chunks) {
-              merged.set(chunk, offset)
-              offset += chunk.byteLength
-            }
-            ab = merged.buffer
+            ab = received === totalBytes
+              ? merged.buffer
+              : merged.subarray(0, Math.max(0, Math.min(received, totalBytes))).buffer
           } else {
             reportRoomLoad(14, 'Downloading scan')
             ab = await resp.arrayBuffer()
@@ -876,9 +874,10 @@ export default function SpaceBuilderCanvas({
         //   from local voxel density.  splatScale is capped at 1.5 because SOR
         //   ensures no truly isolated point remains.
         //
-        const CELL     = 0.075
+        const CELL     = 0.10
         const CELL_INV = 1 / CELL
         const SOR_MIN  = 4
+        const ALIGN_MAX_SHIFT = 0.012
 
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
@@ -969,12 +968,23 @@ export default function SpaceBuilderCanvas({
           const cy = sums ? sums.y * inv : py
           const cz = sums ? sums.z * inv : pz
 
-          // Temporal alignment: pull repeated same-cell samples toward a stable centroid.
-          // Keeps high point density while reducing same-place/different-time jitter.
-          const align = Math.min(0.82, 0.34 + 0.12 * Math.log2(1 + cnt))
-          const sx = px + (cx - px) * align
-          const sy = py + (cy - py) * align
-          const sz = pz + (cz - pz) * align
+          // Temporal alignment: tiny capped pull toward local centroid to reduce jitter
+          // without snapping points onto a visible voxel lattice.
+          let sx = px, sy = py, sz = pz
+          if (cnt >= 5) {
+            const dx = cx - px
+            const dy = cy - py
+            const dz = cz - pz
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+            if (dist > 1e-6) {
+              const pull = Math.min(0.26, 0.08 + 0.05 * Math.log2(1 + cnt))
+              const shift = Math.min(ALIGN_MAX_SHIFT, dist * pull)
+              const invDist = 1 / dist
+              sx = px + dx * invDist * shift
+              sy = py + dy * invDist * shift
+              sz = pz + dz * invDist * shift
+            }
+          }
 
           positions[vi*3]   = sx
           positions[vi*3+1] = sy + yOffset

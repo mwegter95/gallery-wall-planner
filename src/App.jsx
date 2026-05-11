@@ -530,22 +530,22 @@ export default function App() {
     // ── Upload binary point cloud separately (12% → 68%) ──────────────────────
     if (hasBinary) {
       try {
-        let arrayBuffer
+        let binaryPayload
         if (pc._buffer) {
-          // Live scan: buffer already decoded in memory — zero copy
-          const arr = pc._buffer.toFloat32Array()
-          arrayBuffer = arr.buffer.slice(0, arr.byteLength)
+          // Live scan: upload only the filled region via a typed-array view (no full copy).
+          const usedFloats = (pc._buffer.pointCount || 0) * 6
+          binaryPayload = pc._buffer._data.subarray(0, usedFloats)
         } else {
           // Legacy base64 path: decode to binary
           const raw = atob(pc.data)
           const bytes = new Uint8Array(raw.length)
           for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
-          arrayBuffer = bytes.buffer.slice(0)
+          binaryPayload = bytes
         }
         let uploadError = null
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            const { url } = await api.uploadPointCloudChunked(space.id, arrayBuffer, (frac) => {
+            const { url } = await api.uploadPointCloudChunked(space.id, binaryPayload, (frac) => {
               // Keep progress moving even before first server bytes arrive.
               const floor = 12 + (attempt - 1) * 2
               report(Math.max(floor, 12 + Math.round(frac * 56)))   // 12% → 68%

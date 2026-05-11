@@ -30,7 +30,8 @@ const SAMPLES_PER_FRAME_BASE = 1200
 const SAMPLES_PER_FRAME_FAST = 650
 const MAX_LINEAR_SPEED = 1.1
 const MAX_ANGULAR_SPEED = 3.2
-const VOXEL_ALIGN_CELL = 0.03
+const VOXEL_ALIGN_CELL = 0.02
+const ALIGN_MAX_SHIFT = 0.008
 
 // Minimum depth (m) to accept — filters out noise from very close surfaces
 const MIN_DEPTH = 0.15
@@ -394,10 +395,20 @@ export default function LidarScanner({ onComplete, onCancel }) {
                 const cy = (prev.y * prev.n + wy) / n
                 const cz = (prev.z * prev.n + wz) / n
                 alignMap.set(vKey, { x: cx, y: cy, z: cz, n })
-                const pull = Math.min(0.82, 0.36 + 0.11 * Math.log2(n + 1))
-                wx += (cx - wx) * pull
-                wy += (cy - wy) * pull
-                wz += (cz - wz) * pull
+                if (n >= 4) {
+                  const dx = cx - wx
+                  const dy = cy - wy
+                  const dz = cz - wz
+                  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+                  if (dist > 1e-6) {
+                    const pull = Math.min(0.3, 0.08 + 0.05 * Math.log2(n + 1))
+                    const shift = Math.min(ALIGN_MAX_SHIFT, dist * pull)
+                    const invDist = 1 / dist
+                    wx += dx * invDist * shift
+                    wy += dy * invDist * shift
+                    wz += dz * invDist * shift
+                  }
+                }
               } else {
                 alignMap.set(vKey, { x: wx, y: wy, z: wz, n: 1 })
               }

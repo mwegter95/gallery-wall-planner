@@ -270,16 +270,25 @@ export async function putRoom(room) {
   })
 }
 
+function toByteView(binary) {
+  if (binary instanceof ArrayBuffer) return new Uint8Array(binary)
+  if (ArrayBuffer.isView(binary)) {
+    return new Uint8Array(binary.buffer, binary.byteOffset, binary.byteLength)
+  }
+  throw new Error('Point cloud upload: unsupported binary payload')
+}
+
 /**
  * Upload a raw Float32 binary point cloud blob and return the server URL.
  * Uses XMLHttpRequest so upload.onprogress is available for real progress.
  * @param {string}      roomId
- * @param {ArrayBuffer} arrayBuffer — raw bytes of the interleaved Float32 array
+ * @param {ArrayBuffer|ArrayBufferView} binaryPayload — raw point cloud bytes
  * @param {function}    [onProgress] — called with fraction 0-1 during upload
  */
-export function uploadPointCloud(roomId, arrayBuffer, onProgress) {
+export function uploadPointCloud(roomId, binaryPayload, onProgress) {
   const jwt    = getJwt()
   const device = getDeviceToken()
+  const bytes = toByteView(binaryPayload)
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     if (onProgress) {
@@ -304,7 +313,7 @@ export function uploadPointCloud(roomId, arrayBuffer, onProgress) {
       xhr.setRequestHeader('Authorization', `Bearer ${jwt}`)
       xhr.setRequestHeader('X-Auth-Token', jwt)
     }
-    xhr.send(arrayBuffer)
+    xhr.send(bytes)
   })
 }
 
@@ -312,13 +321,14 @@ export function uploadPointCloud(roomId, arrayBuffer, onProgress) {
  * Upload a raw point cloud using chunked transfer to improve reliability on large files.
  * Falls back to the legacy single-request upload if the backend chunk endpoint is unavailable.
  */
-export async function uploadPointCloudChunked(roomId, arrayBuffer, onProgress, options = {}) {
-  const totalBytes = arrayBuffer?.byteLength || 0
+export async function uploadPointCloudChunked(roomId, binaryPayload, onProgress, options = {}) {
+  const bytes = toByteView(binaryPayload)
+  const totalBytes = bytes.byteLength || 0
   if (totalBytes <= 0) throw new Error('Point cloud upload: empty payload')
 
   const chunkSize = Math.max(512 * 1024, options.chunkSize || (4 * 1024 * 1024))
   if (totalBytes <= chunkSize) {
-    return uploadPointCloud(roomId, arrayBuffer, onProgress)
+    return uploadPointCloud(roomId, bytes, onProgress)
   }
 
   const jwt = getJwt()
@@ -369,7 +379,7 @@ export async function uploadPointCloudChunked(roomId, arrayBuffer, onProgress, o
     for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
       const start = chunkIndex * chunkSize
       const end = Math.min(totalBytes, start + chunkSize)
-      const chunk = arrayBuffer.slice(start, end)
+      const chunk = bytes.subarray(start, end)
       const body = await sendChunk(chunk, chunkIndex)
       completedBytes = end
       if (onProgress) onProgress(Math.min(1, completedBytes / totalBytes))
@@ -380,7 +390,7 @@ export async function uploadPointCloudChunked(roomId, arrayBuffer, onProgress, o
   } catch (err) {
     // Backward compatibility: if server does not expose chunk endpoint yet, use legacy upload.
     if (err?.status === 404 || err?.status === 405) {
-      return uploadPointCloud(roomId, arrayBuffer, onProgress)
+      return uploadPointCloud(roomId, bytes, onProgress)
     }
     throw err
   }
