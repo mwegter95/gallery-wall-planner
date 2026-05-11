@@ -9,10 +9,8 @@ import * as THREE from 'three'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
-import { buildPhotoColorsForPositions } from '../utils/photoMesh'
 import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
-import { selectPreviewSnapshots } from '../utils/scanPreview'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -214,24 +212,6 @@ export default function SpaceBuilderCanvas({
   const [cropSurfaceId, setCropSurfaceId] = useState(null)
   const [fov,           setFov]           = useState(55)
   const [zoomRadius,    setZoomRadius]    = useState(8)   // mirrors orbit.radius for slider UI
-  const [projectionDiag, setProjectionDiag] = useState(null)
-  const [showProjectionDiag, setShowProjectionDiag] = useState(() => {
-    try {
-      return localStorage.getItem('gwp-projection-diag') === '1'
-    } catch {
-      return false
-    }
-  })
-  const [photoOverlayEnabled, setPhotoOverlayEnabled] = useState(() => {
-    try {
-      const raw = localStorage.getItem('gwp-photo-overlay-enabled')
-      return raw == null ? false : raw === '1'
-    } catch {
-      return false
-    }
-  })
-  const projectionTaskVersionRef = useRef(0)
-  const scanProjectionRef = useRef(null)
   const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
   setZoomRef.current = setZoomRadius
   // When a room scan is loaded, orbit switches to FPS mode (camera rotates in
@@ -747,7 +727,6 @@ export default function SpaceBuilderCanvas({
   const pointCloudMeshRef = useRef(null)
   const planeMeshesRef    = useRef([])
   const reconstructionMeshesRef = useRef([])
-  const snapshotMeshesRef = useRef([])
   const yOffsetRef        = useRef(0)
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
@@ -788,7 +767,6 @@ export default function SpaceBuilderCanvas({
     cameraFPSRef.current = !!roomScan
 
     if (!roomScan) {
-      setProjectionDiag(null)
       reportRoomLoad(0, 'No scan loaded', false)
       return
     }
@@ -877,13 +855,11 @@ export default function SpaceBuilderCanvas({
         const CELL     = 0.10
         const CELL_INV = 1 / CELL
         const SOR_MIN  = 4
-        const ALIGN_MAX_SHIFT = 0.012
 
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
         const voxelCounts = new Map()
-        const voxelSums   = new Map()
         const voxelKeys   = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
@@ -901,12 +877,6 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
-          const sums = voxelSums.get(key)
-          if (sums) {
-            sums.x += x; sums.y += y; sums.z += z
-          } else {
-            voxelSums.set(key, { x, y, z })
-          }
 
           if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
             reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
@@ -962,29 +932,7 @@ export default function SpaceBuilderCanvas({
 
           const cnt = voxelCounts.get(key) || 1
           const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
-          const sums = voxelSums.get(key)
-          const inv = sums ? (1 / Math.max(1, cnt)) : 1
-          const cx = sums ? sums.x * inv : px
-          const cy = sums ? sums.y * inv : py
-          const cz = sums ? sums.z * inv : pz
-
-          // Temporal alignment: tiny capped pull toward local centroid to reduce jitter
-          // without snapping points onto a visible voxel lattice.
-          let sx = px, sy = py, sz = pz
-          if (cnt >= 5) {
-            const dx = cx - px
-            const dy = cy - py
-            const dz = cz - pz
-            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-            if (dist > 1e-6) {
-              const pull = Math.min(0.26, 0.08 + 0.05 * Math.log2(1 + cnt))
-              const shift = Math.min(ALIGN_MAX_SHIFT, dist * pull)
-              const invDist = 1 / dist
-              sx = px + dx * invDist * shift
-              sy = py + dy * invDist * shift
-              sz = pz + dz * invDist * shift
-            }
-          }
+          const sx = px, sy = py, sz = pz
 
           positions[vi*3]   = sx
           positions[vi*3+1] = sy + yOffset
@@ -992,7 +940,7 @@ export default function SpaceBuilderCanvas({
           colors[vi*3]      = rawData[b+3]
           colors[vi*3+1]    = rawData[b+4]
           colors[vi*3+2]    = rawData[b+5]
-          splatScales[vi] = Math.max(0.25, Math.min(1.5, 2.0 / Math.sqrt(cnt)))
+          splatScales[vi] = 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
@@ -1029,66 +977,7 @@ export default function SpaceBuilderCanvas({
         t.scene.add(points)
         pointCloudMeshRef.current = points
         reportRoomLoad(90, 'Rendering scan')
-
-        const snapshots = selectPreviewSnapshots(
-          roomScan.snapshots?.filter(s =>
-            (s?.dataUrl || s?.jpegB64) &&
-            Array.isArray(s?.transform) && s.transform.length === 16 &&
-            Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
-          ),
-          36,
-        )
-
-        // ── Photo retexture (async, after cloud is visible) ────────────────
-        // If snapshots with camera intrinsics were captured during the scan,
-        // replace the low-res depth-sensor colours with high-res JPEG samples.
-        // The colAttr.array reference stays live in Three.js, so mutating it
-        // and setting needsUpdate is sufficient — no geometry rebuild needed.
-        if (snapshots?.length) {
-          const baseColors = new Float32Array(colors)
-          scanProjectionRef.current = {
-            geo,
-            positions,
-            baseColors,
-            snapshots,
-            yOffset: yOffsetRef.current,
-            projected: null,
-          }
-
-          const runProjection = async () => {
-            if (!scanProjectionRef.current) return
-            const taskVersion = ++projectionTaskVersionRef.current
-            if (!photoOverlayEnabled) {
-              const colAttr = geo.getAttribute('color')
-              colAttr.array.set(baseColors)
-              colAttr.needsUpdate = true
-              setProjectionDiag(null)
-              reportRoomLoad(100, 'Scan ready (point cloud only)', false)
-              return
-            }
-            reportRoomLoad(93, 'Projecting photo colors')
-            try {
-              const newColors = await buildPhotoColorsForPositions(positions, baseColors, snapshots, yOffsetRef.current, {
-                onDiagnostics: (diag) => {
-                  if (!cancelled && taskVersion === projectionTaskVersionRef.current) setProjectionDiag(diag)
-                },
-              })
-              if (cancelled || taskVersion !== projectionTaskVersionRef.current || !newColors) return
-              const colAttr = geo.getAttribute('color')
-              colAttr.array.set(newColors)
-              colAttr.needsUpdate = true
-              if (scanProjectionRef.current) scanProjectionRef.current.projected = newColors
-              reportRoomLoad(100, 'Scan ready', false)
-            } catch (err) {
-              console.warn('[SpaceBuilderCanvas] Photo retexture failed:', err)
-              reportRoomLoad(100, 'Scan ready (base colors)', false)
-            }
-          }
-
-          await runProjection()
-        } else {
-          reportRoomLoad(100, 'Scan ready', false)
-        }
+        reportRoomLoad(100, 'Scan ready', false)
 
         // Dedicated reconstruction is rendered as a separate mesh layer so the
         // room shape stays faithful without replacing the point cloud preview.
@@ -1115,7 +1004,6 @@ export default function SpaceBuilderCanvas({
       if (ENABLE_RECONSTRUCTION_OVERLAY) {
         try {
           const reconstruction = await reconstructPlanarSurfaces(buf, {
-            snapshots: roomScan.snapshots || [],
             yOffset: yOffsetRef.current,
           })
 
@@ -1211,56 +1099,6 @@ export default function SpaceBuilderCanvas({
     buildCloud()
     return () => { cancelled = true }
   }, [roomScan, reportRoomLoad]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Photorealistic snapshot planes (DISABLED) ────────────────────────────
-  // Photo overlay approach parked — dense Gaussian splat point cloud used instead.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { /* disabled */ }, [roomScan])
-
-  useEffect(() => {
-    try { localStorage.setItem('gwp-photo-overlay-enabled', photoOverlayEnabled ? '1' : '0') } catch {}
-
-    const state = scanProjectionRef.current
-    if (!state?.geo) return
-    const colAttr = state.geo.getAttribute('color')
-    if (!colAttr) return
-
-    if (!photoOverlayEnabled) {
-      colAttr.array.set(state.baseColors)
-      colAttr.needsUpdate = true
-      setProjectionDiag(null)
-      return
-    }
-
-    if (state.projected) {
-      colAttr.array.set(state.projected)
-      colAttr.needsUpdate = true
-      return
-    }
-
-    const taskVersion = ++projectionTaskVersionRef.current
-    ;(async () => {
-      try {
-        const newColors = await buildPhotoColorsForPositions(
-          state.positions,
-          state.baseColors,
-          state.snapshots,
-          state.yOffset,
-          {
-            onDiagnostics: (diag) => {
-              if (taskVersion === projectionTaskVersionRef.current) setProjectionDiag(diag)
-            },
-          },
-        )
-        if (taskVersion !== projectionTaskVersionRef.current || !newColors) return
-        state.projected = newColors
-        colAttr.array.set(newColors)
-        colAttr.needsUpdate = true
-      } catch (err) {
-        console.warn('[SpaceBuilderCanvas] On-demand photo overlay failed:', err)
-      }
-    })()
-  }, [photoOverlayEnabled])
 
   // ── Composite piece overlays onto surface textures ───────────────────────
   useEffect(() => {
@@ -1581,106 +1419,6 @@ export default function SpaceBuilderCanvas({
         <span>Dbl-click: crop corners</span>
         <span>Scroll: zoom in/out</span>
       </div>
-      {roomScan && projectionDiag && showProjectionDiag && (
-        <div
-          style={{
-            position: 'absolute',
-            right: 14,
-            bottom: 180,
-            zIndex: 8,
-            background: 'rgba(9,12,18,0.74)',
-            border: '1px solid rgba(90,150,255,0.35)',
-            borderRadius: 10,
-            color: '#cfe2ff',
-            fontSize: 12,
-            lineHeight: 1.35,
-            padding: '8px 10px',
-            minWidth: 180,
-            backdropFilter: 'blur(4px)',
-          }}
-        >
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Projection Diagnostics</div>
-          <div>Accepted: {projectionDiag.acceptedPct.toFixed(1)}%</div>
-          <div>Fallback: {projectionDiag.fallbackPct.toFixed(1)}%</div>
-          <div>Multi-view: {projectionDiag.multiViewPct.toFixed(1)}%</div>
-          <div>Depth reject: {projectionDiag.depthRejected.toLocaleString()}</div>
-          <div>Depth residual reject: {(projectionDiag.depthResidualRejected || 0).toLocaleString()}</div>
-          <div>Score reject: {projectionDiag.scoreRejected.toLocaleString()}</div>
-          <div>Edge reject: {(projectionDiag.edgeRejected || 0).toLocaleString()}</div>
-          <div>Plane reject: {(projectionDiag.planeRejected || 0).toLocaleString()}</div>
-          <div>Plane-cell penalty: {(projectionDiag.planeCellPenaltyApplied || 0).toLocaleString()}</div>
-          <div>Plane cells sampled: {(projectionDiag.planeCellSampled || 0).toLocaleString()}</div>
-          <div>Plane cells preferred: {(projectionDiag.planeCellPreferred || 0).toLocaleString()}</div>
-          <div>Global planes preferred: {(projectionDiag.planePreferredGlobal || 0).toLocaleString()}</div>
-          <div>Hard plane-cell blocked: {(projectionDiag.hardPlaneCellBlocked || 0).toLocaleString()}</div>
-          <div>Unreliable snapshot reject: {(projectionDiag.unreliableSnapshotRejected || 0).toLocaleString()}</div>
-          <div>Geometry-guard fallback: {(projectionDiag.geometryGuardedFallback || 0).toLocaleString()}</div>
-          <div>Depth-edge reject: {(projectionDiag.depthEdgeRejected || 0).toLocaleString()}</div>
-          <div>Auto rel-min: {Number(projectionDiag.autoReliabilityMin || 0).toFixed(3)}</div>
-          <div>Auto plane-min-conf: {Number(projectionDiag.autoPlaneMinConfidence || 0).toFixed(3)}</div>
-          <div>Auto env-max: {Number(projectionDiag.autoMaxEnvelopeDistance || 0).toFixed(3)}m</div>
-          <div>Auto depth-edge: {Number(projectionDiag.autoDepthEdgeGuard || 0).toFixed(3)}m</div>
-          <div>Auto plane coverage: {(100 * Number(projectionDiag.autoPlaneCoverage || 0)).toFixed(1)}%</div>
-          <div>Pose refined snapshots: {(projectionDiag.poseRefinedSnapshots || 0).toLocaleString()}</div>
-          <div>Pose avg shift: {Number(projectionDiag.poseAvgShiftDeg || 0).toFixed(2)}deg</div>
-          <div>Relaxed recovery accepted: {(projectionDiag.relaxedRecoveryAccepted || 0).toLocaleString()}</div>
-          <div>Relaxed recovery fallback: {(projectionDiag.relaxedRecoveryFallback || 0).toLocaleString()}</div>
-          <div>Color drift reject: {(projectionDiag.colorDriftRejected || 0).toLocaleString()}</div>
-          <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
-          <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
-        </div>
-      )}
-
-      {roomScan && (
-        <button
-          type="button"
-          onClick={() => {
-            setShowProjectionDiag(prev => {
-              const next = !prev
-              try { localStorage.setItem('gwp-projection-diag', next ? '1' : '0') } catch {}
-              return next
-            })
-          }}
-          style={{
-            position: 'absolute',
-            right: 14,
-            bottom: 146,
-            zIndex: 8,
-            border: '1px solid rgba(120,160,230,0.45)',
-            background: 'rgba(16,20,30,0.66)',
-            color: '#c7d9ff',
-            borderRadius: 8,
-            padding: '4px 8px',
-            fontSize: 11,
-            cursor: 'pointer',
-          }}
-        >
-          {showProjectionDiag ? 'Hide Projection Stats' : 'Show Projection Stats'}
-        </button>
-      )}
-
-      {roomScan && (
-        <button
-          type="button"
-          onClick={() => setPhotoOverlayEnabled(prev => !prev)}
-          style={{
-            position: 'absolute',
-            right: 14,
-            bottom: 112,
-            zIndex: 8,
-            border: '1px solid rgba(120,160,230,0.45)',
-            background: photoOverlayEnabled ? 'rgba(24,36,58,0.8)' : 'rgba(16,20,30,0.66)',
-            color: photoOverlayEnabled ? '#e6f0ff' : '#c7d9ff',
-            borderRadius: 8,
-            padding: '4px 8px',
-            fontSize: 11,
-            cursor: 'pointer',
-          }}
-        >
-          {photoOverlayEnabled ? 'Photo Overlay: On' : 'Photo Overlay: Off'}
-        </button>
-      )}
-
       {space.surfaces.length === 0 && !roomScan && (
         <div className="sbc-3d-empty">
           <svg width="56" height="56" viewBox="0 0 56 56" fill="none">

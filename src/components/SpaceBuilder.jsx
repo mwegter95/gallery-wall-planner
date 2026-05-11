@@ -89,8 +89,8 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const warpQueueRef  = useRef(new Set())
 
   /* ── LiDAR scan complete ───────────────────────────────────────────────── */
-  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
-    setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt, snapshots: snapshots ?? [] } }))
+  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt }) => {
+    setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt } }))
     setShowLidarScanner(false)
     // Prompt to save with a name — pre-fill current space name
     setPostScanName(spaceNameRef.current?.trim() || 'Scanned Room')

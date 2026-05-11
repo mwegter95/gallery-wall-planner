@@ -18,7 +18,7 @@ export function cloneRoomForEditing(room) {
 
 /**
  * Build a compact roomScan payload for persistence.
- * Keeps a compact keyframe snapshot set for reprojection and drops raw point-cloud binary fields.
+ * Drops raw point-cloud binary fields and keeps only point-count + URL metadata.
  */
 export function toRoomScanMeta(roomScan) {
   if (!roomScan) return roomScan
@@ -27,30 +27,13 @@ export function toRoomScanMeta(roomScan) {
     ? { pointCount: pc.pointCount, url: pc.url ?? null }
     : pc
 
-  const snapshots = Array.isArray(roomScan.snapshots)
-    ? roomScan.snapshots
-        .filter(s =>
-          (s?.dataUrl || s?.jpegB64) &&
-          Array.isArray(s?.transform) && s.transform.length === 16 &&
-          Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
-        )
-        // Keep a compact but useful keyframe set for post-reload reprojection.
-        .slice(-36)
-        .map(s => ({
-          ...(s.dataUrl ? { dataUrl: s.dataUrl } : { jpegB64: s.jpegB64 }),
-          transform: s.transform,
-          intrinsics: s.intrinsics,
-        }))
-    : []
-
   return {
     ...roomScan,
     pointCloud,
-    snapshots,
   }
 }
 
-/** Build a localStorage-safe rooms map (drops live binary payloads but keeps scan URLs/snapshots). */
+/** Build a localStorage-safe rooms map (drops live binary payloads, keeps scan URLs). */
 export function toRoomsSnapshot(rooms) {
   const out = {}
   for (const [roomId, room] of Object.entries(rooms || {})) {
@@ -62,7 +45,7 @@ export function toRoomsSnapshot(rooms) {
   return out
 }
 
-/** Normalize loaded rooms by fixing relative URLs and filtering invalid snapshots. */
+/** Normalize loaded rooms by fixing relative URLs. */
 export function normalizeLoadedRooms(rooms, fixUrl) {
   const out = {}
   const applyFixUrl = typeof fixUrl === 'function' ? fixUrl : (url) => url
@@ -77,13 +60,6 @@ export function normalizeLoadedRooms(rooms, fixUrl) {
           url: applyFixUrl(next.roomScan.pointCloud.url),
         },
       }
-    }
-    if (Array.isArray(next.roomScan?.snapshots)) {
-      next.roomScan.snapshots = next.roomScan.snapshots.filter(s =>
-        (s?.dataUrl || s?.jpegB64) &&
-        Array.isArray(s?.transform) && s.transform.length === 16 &&
-        Array.isArray(s?.intrinsics) && s.intrinsics.length === 6,
-      )
     }
     for (const surface of Object.values(next.surfaces || {})) {
       if (surface.warpedImageUrl?.startsWith('/')) {

@@ -30,8 +30,6 @@ const SAMPLES_PER_FRAME_BASE = 1200
 const SAMPLES_PER_FRAME_FAST = 650
 const MAX_LINEAR_SPEED = 1.1
 const MAX_ANGULAR_SPEED = 3.2
-const VOXEL_ALIGN_CELL = 0.02
-const ALIGN_MAX_SHIFT = 0.008
 
 // Minimum depth (m) to accept — filters out noise from very close surfaces
 const MIN_DEPTH = 0.15
@@ -52,12 +50,10 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const bufferRef     = useRef(null)
   const nativeBufRef  = useRef(null)  // accumulates streaming chunks from native bridge
   const planesRef     = useRef([])
-  const snapshotsRef  = useRef([])  // accumulated photo snapshots from native bridge
   const camCtxRef     = useRef(null)  // 2D canvas ctx for sampling camera color
   const glRef         = useRef(null)  // WebGL context
   const refSpaceRef   = useRef(null)
   const motionRef     = useRef({ t: 0, x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1 })
-  const alignMapRef   = useRef(new Map())
 
   /* ── Check availability (native bridge OR WebXR) ─────────────────────── */
   useEffect(() => {
@@ -79,18 +75,6 @@ export default function LidarScanner({ onComplete, onCancel }) {
         if (result.status === 'scanning') {
           setStatus('scanning')
           nativeBufRef.current = new PointCloudBuffer(2_000_000)  // reduce expensive growth copies on long scans
-          snapshotsRef.current = []
-          return
-        }
-        if (result.status === 'snapshot') {
-          // Accumulate high-res reference photos during the scan.
-          // intrinsics = [fx, fy, cx, cy, imageWidth, imageHeight] at JPEG resolution.
-          if (!result.dataUrl && !result.jpegB64) return
-          snapshotsRef.current.push({
-            ...(result.jpegB64 ? { jpegB64: result.jpegB64 } : { dataUrl: result.dataUrl }),
-            transform:  result.transform,   // column-major 4×4 camera→world (16 floats)
-            intrinsics: result.intrinsics,  // [fx, fy, cx, cy, w, h]
-          })
           return
         }
         // ── Real-time chunk from Swift ──────────────────────────────────────
@@ -126,9 +110,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
             // can render it without any serialization overhead.
             setProgress(100)
             const pointCloud = { pointCount: buf.pointCount, _buffer: buf }
-            const snapshots  = snapshotsRef.current.slice()
             nativeBufRef.current = null
-            onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
+            onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
 
           } else if (result.data) {
             // ── Fallback: old Swift build sent full blob in 'done' ────────────
@@ -149,8 +132,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
                 const fallback = PointCloudBuffer.fromFloat32Array(arr, result.pointCount)
                 setProgress(100)
                 const pointCloud = { pointCount: result.pointCount, _buffer: fallback }
-                const snapshots  = snapshotsRef.current.slice()
-                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt, snapshots })
+                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
               }
             }
             setTimeout(decodeStep, 0)
@@ -305,7 +287,6 @@ export default function LidarScanner({ onComplete, onCancel }) {
       bufferRef.current = new PointCloudBuffer(2_000_000)
       planesRef.current = []
       motionRef.current = { t: 0, x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1 }
-      alignMapRef.current = new Map()
 
       session.addEventListener('end', () => {
         document.body.removeChild(canvas)
@@ -381,38 +362,7 @@ export default function LidarScanner({ onComplete, onCancel }) {
               const depth = depthInfo.getDepthInMeters(u, v)
               if (depth < MIN_DEPTH || depth > MAX_DEPTH) continue
 
-              let [wx, wy, wz] = unprojectDepthSample(u, v, depth, view)
-
-              const ix = Math.floor(wx / VOXEL_ALIGN_CELL)
-              const iy = Math.floor(wy / VOXEL_ALIGN_CELL)
-              const iz = Math.floor(wz / VOXEL_ALIGN_CELL)
-              const vKey = `${ix}:${iy}:${iz}`
-              const alignMap = alignMapRef.current
-              const prev = alignMap.get(vKey)
-              if (prev) {
-                const n = prev.n + 1
-                const cx = (prev.x * prev.n + wx) / n
-                const cy = (prev.y * prev.n + wy) / n
-                const cz = (prev.z * prev.n + wz) / n
-                alignMap.set(vKey, { x: cx, y: cy, z: cz, n })
-                if (n >= 4) {
-                  const dx = cx - wx
-                  const dy = cy - wy
-                  const dz = cz - wz
-                  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-                  if (dist > 1e-6) {
-                    const pull = Math.min(0.3, 0.08 + 0.05 * Math.log2(n + 1))
-                    const shift = Math.min(ALIGN_MAX_SHIFT, dist * pull)
-                    const invDist = 1 / dist
-                    wx += dx * invDist * shift
-                    wy += dy * invDist * shift
-                    wz += dz * invDist * shift
-                  }
-                }
-              } else {
-                alignMap.set(vKey, { x: wx, y: wy, z: wz, n: 1 })
-              }
-              if (alignMap.size > 350000) alignMap.clear()
+              const [wx, wy, wz] = unprojectDepthSample(u, v, depth, view)
 
               let r = 0.4, g = 0.7, b = 1.0  // default blue-ish
               if (hasCameraColor && camData) {

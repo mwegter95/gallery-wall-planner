@@ -1,5 +1,3 @@
-import { buildPhotoColorsForPositions } from './photoMesh'
-
 const EPSILON = 1e-6
 
 function dot(a, b) {
@@ -478,7 +476,6 @@ export function segmentReconstructedMesh(mesh, {
 }
 
 export async function reconstructPlanarSurfaces(buf, {
-  snapshots = [],
   yOffset = 0,
   segmentation,
 } = {}) {
@@ -490,21 +487,9 @@ export async function reconstructPlanarSurfaces(buf, {
     return true
   }) : room.segments
 
-  if (!snapshots.length) {
-    return {
-      mesh: combineSegments(segments),
-      segments,
-    }
-  }
-
-  const texturedSegments = await Promise.all(segments.map(async (segment) => ({
-    ...segment,
-    textureColors: await buildPhotoColorsForPositions(segment.positions, segment.colors, snapshots, room.yOffset) || segment.colors,
-  })))
-
   return {
-    mesh: combineSegments(texturedSegments),
-    segments: texturedSegments,
+    mesh: combineSegments(segments),
+    segments,
   }
 }
 
