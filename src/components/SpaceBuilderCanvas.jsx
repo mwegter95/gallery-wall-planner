@@ -6,6 +6,7 @@
  */
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
@@ -858,9 +859,116 @@ export default function SpaceBuilderCanvas({
     //   { url }          — loaded from server, fetch the binary blob
     //   { data }         — legacy base64 JSON format
     async function buildCloud() {
-      let buf
       const pc = roomScan.pointCloud
       reportRoomLoad(3, 'Preparing room scan')
+
+      // ── Try server-built Poisson GLB first ──────────────────────────────
+      // The server builds a Poisson mesh in a background thread after upload.
+      // If it's ready, load it with GLTFLoader — zero JS processing, full
+      // Poisson fidelity.  If still processing or unavailable, fall through to
+      // the spherical triangulation pipeline.
+      const roomId = roomScan.id
+      if (roomId) {
+        try {
+          reportRoomLoad(5, 'Checking for pre-built mesh…')
+          const meshResp = await fetch(`/api/rooms/${roomId}/mesh`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('mw_token') || ''}` },
+          })
+          if (meshResp.ok) {
+            const meshMeta = await meshResp.json()
+            if (meshMeta.status === 'ready' && meshMeta.url) {
+              reportRoomLoad(20, 'Loading Poisson mesh…')
+              const loader = new GLTFLoader()
+              const gltf   = await new Promise((resolve, reject) => {
+                loader.load(
+                  meshMeta.url,
+                  resolve,
+                  xhr => { if (!cancelled) reportRoomLoad(20 + (70 * xhr.loaded / (xhr.total || 1)), 'Loading mesh…') },
+                  reject,
+                )
+              })
+              if (cancelled) return
+
+              // Apply colour grading via vertex shader to match point-cloud look
+              const yOffset = (() => {
+                let minY = Infinity
+                gltf.scene.traverse(obj => {
+                  if (obj.isMesh) {
+                    const pos = obj.geometry.attributes.position
+                    for (let i = 0; i < pos.count; i++) {
+                      const y = pos.getY(i)
+                      if (y < minY) minY = y
+                    }
+                  }
+                })
+                return isFinite(minY) ? -minY : 0
+              })()
+              yOffsetRef.current = yOffset
+
+              gltf.scene.traverse(obj => {
+                if (!obj.isMesh) return
+                obj.material = new THREE.ShaderMaterial({
+                  vertexColors: true,
+                  side: THREE.DoubleSide,
+                  vertexShader: MESH_VERT,
+                  fragmentShader: MESH_FRAG,
+                  uniforms: {
+                    uYOffset:  { value: yOffset },
+                    uDiagMode: { value: 0 },
+                  },
+                })
+              })
+
+              t.scene.add(gltf.scene)
+              pointCloudMeshRef.current = gltf.scene
+
+              // Keep rawBufferRef null — no point cloud buffer loaded
+              rawBufferRef.current = null
+
+              // Count total triangles for diagnostics
+              let totalVerts = 0, totalTris = 0
+              gltf.scene.traverse(obj => {
+                if (obj.isMesh) {
+                  totalVerts += obj.geometry.attributes.position.count
+                  totalTris  += (obj.geometry.index?.count ?? 0) / 3
+                }
+              })
+              const fboW = t.renderer?.domElement?.width  ?? 0
+              const fboH = t.renderer?.domElement?.height ?? 0
+              diagStatsRef.current = {
+                rawPts: totalVerts,
+                renderedPts: totalVerts,
+                triCount: totalTris,
+                fboW, fboH,
+                dpr: Math.min(window.devicePixelRatio, 2),
+                meshSource: 'poisson-glb',
+              }
+
+              // Auto-frame
+              try {
+                const box = new THREE.Box3().setFromObject(gltf.scene)
+                const center = new THREE.Vector3()
+                box.getCenter(center)
+                t.orbit.center.set(center.x, 1.6, center.z)
+                t.orbit.phi   = Math.PI / 2
+                t.orbit.theta = 0.4
+                t.applyOrbit()
+              } catch { /* ignore */ }
+
+              reportRoomLoad(100, 'Scan ready', false)
+              return  // ← done, skip the JS triangulation entirely
+            } else if (meshMeta.status === 'processing') {
+              reportRoomLoad(8, 'Mesh building on server… loading point cloud')
+            }
+          }
+        } catch (e) {
+          // Non-fatal — fall through to JS pipeline
+          console.info('[SpaceBuilderCanvas] Mesh check failed, using JS pipeline:', e.message)
+        }
+      }
+
+      // ── Fall back: load raw point cloud + JS spherical triangulation ────
+      let buf
       try {
         if (pc?._buffer) {
           reportRoomLoad(24, 'Using cached scan data')
@@ -1706,6 +1814,8 @@ export default function SpaceBuilderCanvas({
                 <tr><td>Raw points</td><td>{s.rawPts.toLocaleString()}</td></tr>
                 <tr><td>Vertices</td><td>{s.renderedPts.toLocaleString()} <span className="sbc-diag-dim">({pct}% / {dedupX}× reduction)</span></td></tr>
                 <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
+                <tr><td>Mesh source</td><td>{s.meshSource === 'poisson-glb' ? 'Poisson (server)' : 'spherical grid (JS)'}</td></tr>
+                <tr><td>Mesh source</td><td>{s.meshSource === 'poisson-glb' ? 'Poisson (server)' : 'spherical grid (JS)'}</td></tr>
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
                 <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
                 <tr><td>Colour method</td><td>raw RGB sensor values</td></tr>
