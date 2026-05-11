@@ -86,7 +86,7 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 // so the point cloud reads as a solid coloured surface rather than a cloud of
 // semi-transparent halos.
 //
-// splatScale is computed from a fine 5 mm voxel density and drives disc size
+// splatScale is computed from a 10 cm voxel density and drives disc size
 // so dense regions stay smooth while sparse areas stay readable.
 //
 // Sizing math (solid discs need ~10–20 % less radius than Gaussian blobs):
@@ -115,10 +115,10 @@ const SPLAT_VERT = /* glsl */`
     float cosView   = max(0.28, abs(mvN.z));
     float angleFactor = min(2.2, 1.0 / cosView);   // cap grazing boost to avoid bubble artifacts
 
-    // Slightly larger base size reduces visible dotting while the angle factor
-    // still fills grazing-view gaps without letting splats balloon excessively.
+    // Soft alpha edges + a modestly larger base size reduce visible dotting
+    // while the angle factor still fills grazing-view gaps.
     // projectionMatrix[1][1] = cot(halfFOV_y) keeps sizes consistent across FOV presets.
-    gl_PointSize = clamp(6.1 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.3, 24.0);
+    gl_PointSize = clamp(5.4 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.3, 22.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -128,13 +128,15 @@ const SPLAT_FRAG = /* glsl */`
 
   void main() {
     // Hard circular clip — discard the corners of the GL_POINT square.
-    // This gives clean circular discs with no semi-transparent halos.
+    // The alpha falloff is kept for alpha-to-coverage smoothing.
     vec2 uv = gl_PointCoord - 0.5;
-    if (dot(uv, uv) > 0.25) discard;
+    float r2 = dot(uv, uv);
+    if (r2 > 0.25) discard;
 
     // Gentle gamma lift keeps the scan readable without introducing blur.
-    vec3 col = pow(clamp(vColor, 0.0, 1.0), vec3(0.94));
-    gl_FragColor = vec4(col, 1.0);
+    vec3 col = pow(clamp(vColor, 0.0, 1.0), vec3(0.96));
+    float alpha = smoothstep(0.25, 0.18, r2);
+    gl_FragColor = vec4(col, alpha);
   }
 `
 
@@ -841,7 +843,7 @@ export default function SpaceBuilderCanvas({
 
         // ── 3-pass algorithm ─────────────────────────────────────────────────
         //
-        // Pass 1: build 5 mm voxel grid + precompute per-point hash key + find minY.
+        // Pass 1: build 10 cm voxel grid + precompute per-point hash key + find minY.
         //   Each voxel accumulates the count of points inside it.
         //
         // Pass 2: Statistical Outlier Removal (SOR) for singleton voxels.
@@ -852,9 +854,9 @@ export default function SpaceBuilderCanvas({
         //   fraction of the total point count.
         //
         // Pass 3: build typed arrays, skipping outliers, assigning splatScale
-        //   from local voxel density and smoothing colours per 5 mm cell.
+        //   from local voxel density and smoothing colours per 10 cm cell.
         //
-        const CELL     = 0.005
+        const CELL     = 0.10
         const CELL_INV = 1 / CELL
         const SOR_MIN  = 4
 
@@ -953,7 +955,7 @@ export default function SpaceBuilderCanvas({
           colors[vi*3]      = sum ? sum[0] * inv : rawData[b+3]
           colors[vi*3+1]    = sum ? sum[1] * inv : rawData[b+4]
           colors[vi*3+2]    = sum ? sum[2] * inv : rawData[b+5]
-          splatScales[vi] = cnt >= 6 ? 1.16 : cnt >= 3 ? 1.08 : 1.0
+          splatScales[vi] = cnt >= 6 ? 1.08 : cnt >= 3 ? 1.03 : 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
@@ -982,6 +984,7 @@ export default function SpaceBuilderCanvas({
           vertexColors: true,
           transparent: false,   // solid discs — no alpha blending halos
           depthWrite: true,     // correct depth occlusion between discs
+          alphaToCoverage: true,
           vertexShader: SPLAT_VERT,
           fragmentShader: SPLAT_FRAG,
         })

@@ -93,54 +93,71 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
   const n    = source._len ?? source.pointCount ?? 0
   if (!data || n === 0) return null
 
-  // Fractional [0,1] corners → NDC: x left→right, y bottom→top
-  const cornerNDC = corners.map(([fx, fy]) => [fx * 2 - 1, 1 - fy * 2])
+  const midpoint = (a, b) => [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+  const [tl, tr, br, bl] = corners
 
-  const bestPoints = [null, null, null, null]
-  const bestDists  = [Infinity, Infinity, Infinity, Infinity]
+  const cornerAnchors = corners
 
-  // Subsample to ~40 000 points for real-time performance without missing wall clusters
-  const step = Math.max(1, Math.floor(n / 40_000))
+  // Cross through the picture: use the center of each wall edge as a fallback
+  // when corner matches are too noisy or occluded in the scan.
+  const edgeAnchors = [
+    midpoint(tl, tr),   // top edge center
+    midpoint(tr, br),   // right edge center
+    midpoint(br, bl),   // bottom edge center
+    midpoint(bl, tl),   // left edge center
+  ]
 
-  for (let i = 0; i < n; i += step) {
-    const b  = i * 6
-    const wx = data[b]
-    const wy = data[b + 1] + yOffset   // apply scene floor-offset to match camera space
-    const wz = data[b + 2]
+  const toNDC = ([fx, fy]) => [fx * 2 - 1, 1 - fy * 2]
 
-    // World → camera space via view matrix (matrixWorldInverse)
-    const [vx, vy, vz] = m4v(viewE, wx, wy, wz)
-    if (vz >= 0) continue   // behind camera (Three.js looks down −Z)
+  const measure = (anchorSet, mode) => {
+    const anchorNDC = anchorSet.map(toNDC)
+    const bestPoints = [null, null, null, null]
+    const bestDists  = [Infinity, Infinity, Infinity, Infinity]
 
-    // Camera space → clip / NDC via projection matrix
-    const [cx, cy, , cw] = m4v(projE, vx, vy, vz)
-    if (cw <= 0) continue
-    const nx = cx / cw
-    const ny = cy / cw
-    if (nx < -1.1 || nx > 1.1 || ny < -1.1 || ny > 1.1) continue
+    for (let i = 0; i < n; i += step) {
+      const b  = i * 6
+      const wx = data[b]
+      const wy = data[b + 1] + yOffset
+      const wz = data[b + 2]
 
-    for (let c = 0; c < 4; c++) {
-      const [cnx, cny] = cornerNDC[c]
-      const d2 = (nx - cnx) ** 2 + (ny - cny) ** 2
-      if (d2 < bestDists[c]) {
-        bestDists[c]  = d2
-        bestPoints[c] = [wx, wy, wz]   // world-space (yOffset already applied to wy)
+      const [vx, vy, vz] = m4v(viewE, wx, wy, wz)
+      if (vz >= 0) continue
+
+      const [cx, cy, , cw] = m4v(projE, vx, vy, vz)
+      if (cw <= 0) continue
+      const nx = cx / cw
+      const ny = cy / cw
+      if (nx < -1.1 || nx > 1.1 || ny < -1.1 || ny > 1.1) continue
+
+      for (let c = 0; c < 4; c++) {
+        const [cnx, cny] = anchorNDC[c]
+        const d2 = (nx - cnx) ** 2 + (ny - cny) ** 2
+        if (d2 < bestDists[c]) {
+          bestDists[c]  = d2
+          bestPoints[c] = [wx, wy, wz]
+        }
       }
+    }
+
+    const maxAllowed = MAX_NDC_DIST ** 2
+    if (bestPoints.some((p, c) => p === null || bestDists[c] > maxAllowed)) return null
+
+    const [a0, a1, a2, a3] = bestPoints
+    const dist3 = (a, b) => Math.hypot(b[0]-a[0], b[1]-a[1], b[2]-a[2])
+    const widthM  = mode === 'edges'
+      ? dist3(a3, a1)
+      : (dist3(a0, a1) + dist3(a3, a2)) / 2
+    const heightM = mode === 'edges'
+      ? dist3(a0, a2)
+      : (dist3(a0, a3) + dist3(a1, a2)) / 2
+
+    return {
+      widthIn:  Math.max(6, roundHalf(widthM  * M_TO_IN)),
+      heightIn: Math.max(6, roundHalf(heightM * M_TO_IN)),
     }
   }
 
-  // Reject if any corner has no match or is placed far off the point cloud
-  const maxAllowed = MAX_NDC_DIST ** 2
-  if (bestPoints.some((p, c) => p === null || bestDists[c] > maxAllowed)) return null
-
-  const [tl, tr, br, bl] = bestPoints
-  const dist3 = (a, b) => Math.hypot(b[0]-a[0], b[1]-a[1], b[2]-a[2])
-
-  const widthM  = (dist3(tl, tr) + dist3(bl, br)) / 2
-  const heightM = (dist3(tl, bl) + dist3(tr, br)) / 2
-
-  return {
-    widthIn:  Math.max(6, roundHalf(widthM  * M_TO_IN)),
-    heightIn: Math.max(6, roundHalf(heightM * M_TO_IN)),
-  }
+  // Subsample to ~40 000 points for real-time performance without missing wall clusters
+  const step = Math.max(1, Math.floor(n / 40_000))
+  return measure(cornerAnchors, 'corners') ?? measure(edgeAnchors, 'edges')
 }

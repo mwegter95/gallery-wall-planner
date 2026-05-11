@@ -130,7 +130,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
   const [loadingPhoto,    setLoadingPhoto]    = useState(false)
   const [photoError,      setPhotoError]      = useState('')
   const [imgNaturalSize,  setImgNaturalSize]  = useState({ w: 0, h: 0 })
-  const [lidarMeasured,   setLidarMeasured]   = useState(false)
+  const [lidarMeasureState, setLidarMeasureState] = useState('idle')
   const [corners,         setCorners]         = useState(DEFAULT_CORNERS)
   const [progress,        setProgress]        = useState(0)
   const [isProcessing,    setIsProcessing]    = useState(false)
@@ -191,7 +191,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
     const pointCount = lidarCloud?._len ?? lidarCloud?.pointCount ?? 0
     if (!cameraData || !lidarCloud || pointCount === 0 || !rawPhoto) return
     const tid = setTimeout(() => {
-      setLidarMeasured(false)
+      setLidarMeasureState('measuring')
       const dims = computeLidarDims(corners, cameraData, pointCloud)
       if (dims) {
         if (unitSystem === 'metric') {
@@ -201,11 +201,19 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
           setEditWidth(dims.widthIn)
           setEditHeight(dims.heightIn)
         }
-        setLidarMeasured(true)
+        setLidarMeasureState('measured')
+      } else {
+        setLidarMeasureState('unavailable')
       }
     }, 120)
     return () => clearTimeout(tid)
   }, [corners, cameraData, pointCloud, rawPhoto, unitSystem])
+
+  const lidarCloudForBanner = pointCloud?._buffer ?? pointCloud
+  const lidarPointCount = lidarCloudForBanner?._len ?? lidarCloudForBanner?.pointCount ?? 0
+  const lidarBannerState = cameraData && rawPhoto && lidarPointCount > 0
+    ? lidarMeasureState
+    : 'idle'
 
   /* ── SVG pointer-capture drag ───────────────────────── */
   const startDrag = useCallback((idx, e) => {
@@ -537,8 +545,8 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
           {/* Live LiDAR scan measurement banner */}
           {cameraData && (
-            <div className={`ws-scan-measure ${lidarMeasured ? 'ws-scan-measure--ready' : ''}`}>
-              {lidarMeasured ? (
+            <div className={`ws-scan-measure ${lidarBannerState === 'measured' ? 'ws-scan-measure--ready' : ''}`}>
+              {lidarBannerState === 'measured' ? (
                 <>
                   <span className="ws-scan-measure__icon">⌖</span>
                   <span className="ws-scan-measure__dims">
@@ -549,11 +557,18 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
                   </span>
                   <span className="ws-scan-measure__label">from LiDAR scan</span>
                 </>
-              ) : (
+              ) : lidarBannerState === 'measuring' ? (
                 <>
                   <span className="ws-scan-measure__spinner" />
                   <span className="ws-scan-measure__label">Measuring from LiDAR scan…</span>
                 </>
+              ) : lidarBannerState === 'unavailable' ? (
+                <>
+                  <span className="ws-scan-measure__icon">⌖</span>
+                  <span className="ws-scan-measure__label">No scan match yet. Move the cross over the wall surface.</span>
+                </>
+              ) : (
+                <span className="ws-scan-measure__label">Ready to measure from LiDAR scan.</span>
               )}
             </div>
           )}
