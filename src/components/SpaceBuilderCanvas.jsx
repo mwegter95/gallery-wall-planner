@@ -1505,6 +1505,13 @@ export default function SpaceBuilderCanvas({
           <div>Plane cells preferred: {(projectionDiag.planeCellPreferred || 0).toLocaleString()}</div>
           <div>Hard plane-cell blocked: {(projectionDiag.hardPlaneCellBlocked || 0).toLocaleString()}</div>
           <div>Unreliable snapshot reject: {(projectionDiag.unreliableSnapshotRejected || 0).toLocaleString()}</div>
+          <div>Geometry-guard fallback: {(projectionDiag.geometryGuardedFallback || 0).toLocaleString()}</div>
+          <div>Depth-edge reject: {(projectionDiag.depthEdgeRejected || 0).toLocaleString()}</div>
+          <div>Auto rel-min: {Number(projectionDiag.autoReliabilityMin || 0).toFixed(3)}</div>
+          <div>Auto plane-min-conf: {Number(projectionDiag.autoPlaneMinConfidence || 0).toFixed(3)}</div>
+          <div>Auto env-max: {Number(projectionDiag.autoMaxEnvelopeDistance || 0).toFixed(3)}m</div>
+          <div>Auto depth-edge: {Number(projectionDiag.autoDepthEdgeGuard || 0).toFixed(3)}m</div>
+          <div>Auto plane coverage: {(100 * Number(projectionDiag.autoPlaneCoverage || 0)).toFixed(1)}%</div>
           <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
           <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
         </div>

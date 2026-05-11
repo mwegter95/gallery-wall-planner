@@ -137,6 +137,10 @@ const PLANE_PREF_HARD_GATING = true
 const SNAPSHOT_RELIABILITY_MAX_SAMPLES = 380_000
 const SNAPSHOT_RELIABILITY_MIN = 0.3
 const SNAPSHOT_RELIABILITY_RESIDUAL_SCALE = 12
+const AUTO_TUNE_MIN_PLANE_CONFIDENCE = 0.3
+const AUTO_TUNE_MAX_ENVELOPE_DISTANCE = 0.7
+const AUTO_TUNE_MIN_ENVELOPE_DISTANCE = 0.4
+const DEPTH_EDGE_GUARD_DEFAULT_M = 0.05
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -445,6 +449,57 @@ function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
   }
 }
 
+function computeQuantile(values, q) {
+  if (!values?.length) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.round((sorted.length - 1) * q)))
+  return sorted[idx]
+}
+
+function localAtlasDepthSpread(atlas, ax, ay) {
+  let dMin = Infinity
+  let dMax = -Infinity
+  for (let dy = -1; dy <= 1; dy++) {
+    const y = Math.max(0, Math.min(atlas.height - 1, ay + dy))
+    for (let dx = -1; dx <= 1; dx++) {
+      const x = Math.max(0, Math.min(atlas.width - 1, ax + dx))
+      const d = atlas.depth[y * atlas.width + x]
+      if (!Number.isFinite(d) || d === Infinity) continue
+      if (d < dMin) dMin = d
+      if (d > dMax) dMax = d
+    }
+  }
+  if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) return 0
+  return Math.max(0, dMax - dMin)
+}
+
+function buildAutoTunePolicy(snapshotReliability, planePreference) {
+  const reliabilities = Array.from(snapshotReliability || [])
+  const p35 = computeQuantile(reliabilities, 0.35)
+  const p55 = computeQuantile(reliabilities, 0.55)
+  const coverage = planePreference.sampledCells > 0
+    ? (planePreference.preferredCells / planePreference.sampledCells)
+    : 0
+
+  // Outer optimizer tunes inner projection gates based on scan-specific signal quality.
+  const reliabilityMin = Math.max(0.16, Math.min(0.52, Math.max(SNAPSHOT_RELIABILITY_MIN * 0.8, p35 * 0.95)))
+  const minPlaneConfidence = coverage >= 0.4 ? AUTO_TUNE_MIN_PLANE_CONFIDENCE : 0.4
+  const maxEnvelopeDistance = coverage >= 0.4 ? AUTO_TUNE_MAX_ENVELOPE_DISTANCE : AUTO_TUNE_MIN_ENVELOPE_DISTANCE
+  const depthEdgeGuard = coverage >= 0.4 ? (DEPTH_EDGE_GUARD_DEFAULT_M + 0.015) : DEPTH_EDGE_GUARD_DEFAULT_M
+  const ambiguityRatioBase = coverage >= 0.4 ? 0.8 : 0.86
+
+  return {
+    reliabilityMin,
+    minPlaneConfidence,
+    maxEnvelopeDistance,
+    depthEdgeGuard,
+    ambiguityRatioBase,
+    reliabilityP35: p35,
+    reliabilityP55: p55,
+    planeCoverage: coverage,
+  }
+}
+
 function projectToSnapshot(wx, wy, wz, view, intr) {
   const cpx = view[0] * wx + view[4] * wy + view[8] * wz + view[12]
   const cpy = view[1] * wx + view[5] * wy + view[9] * wz + view[13]
@@ -648,6 +703,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame)
   const preferredSnapshotByPlaneCell = planePreference.preferredByCell
   const snapshotReliability = await estimateSnapshotReliability(buf, views, intrs, atlases)
+  const autoTunePolicy = buildAutoTunePolicy(snapshotReliability, planePreference)
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -670,6 +726,13 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     planeCellPreferred: planePreference.preferredCells,
     hardPlaneCellBlocked: 0,
     unreliableSnapshotRejected: 0,
+    geometryGuardedFallback: 0,
+    depthEdgeRejected: 0,
+    autoReliabilityMin: autoTunePolicy.reliabilityMin,
+    autoPlaneMinConfidence: autoTunePolicy.minPlaneConfidence,
+    autoMaxEnvelopeDistance: autoTunePolicy.maxEnvelopeDistance,
+    autoDepthEdgeGuard: autoTunePolicy.depthEdgeGuard,
+    autoPlaneCoverage: autoTunePolicy.planeCoverage,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -683,13 +746,29 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
     const plane = classifyPlaneNormal(wx, wy, wz, roomFrame)
 
+    const geometryEligible = !!(
+      plane &&
+      plane.confidence >= autoTunePolicy.minPlaneConfidence &&
+      plane.bestDistance <= autoTunePolicy.maxEnvelopeDistance
+    )
+    if (!geometryEligible) {
+      newColors[i*3] = or
+      newColors[i*3+1] = og
+      newColors[i*3+2] = ob
+      if (stats) {
+        stats.fallback++
+        stats.geometryGuardedFallback++
+      }
+      continue
+    }
+
     let best = null
     let second = null
     const ranked = []
     const preferredSiForPoint = plane ? preferredSnapshotByPlaneCell.get(planeCellKey(plane)) : null
 
     for (let si = 0; si < S; si++) {
-      if (snapshotReliability[si] < SNAPSHOT_RELIABILITY_MIN) {
+      if (snapshotReliability[si] < autoTunePolicy.reliabilityMin) {
         if (stats) stats.unreliableSnapshotRejected++
         continue
       }
@@ -721,6 +800,11 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const atlas = atlases[si]
       const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
       const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
+      const depthSpread = localAtlasDepthSpread(atlas, ax, ay)
+      if (depthSpread > autoTunePolicy.depthEdgeGuard) {
+        if (stats) stats.depthEdgeRejected++
+        continue
+      }
       const idx = ay * atlas.width + ax
       const depthRef = atlas.depth[idx]
       if (!isDepthVisible(proj.depth, depthRef, STRICT_VISIBILITY_REL_TOL, STRICT_VISIBILITY_ABS_TOL)) {
@@ -796,7 +880,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       if (second) {
         const secondConsensus = consensusSupport(second, ranked)
         const ratio = second.score / (best.score + 1e-6)
-        const ratioGate = Math.max(0.82, AMBIGUITY_SCORE_RATIO - Math.min(0.08, bestConsensusRel * 0.02))
+        const ratioGate = Math.max(autoTunePolicy.ambiguityRatioBase, AMBIGUITY_SCORE_RATIO - Math.min(0.08, bestConsensusRel * 0.02))
         const disagreement =
           Math.abs(best.color[0] - second.color[0]) +
           Math.abs(best.color[1] - second.color[1]) +
@@ -855,6 +939,13 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       planeCellPreferred: stats.planeCellPreferred,
       hardPlaneCellBlocked: stats.hardPlaneCellBlocked,
       unreliableSnapshotRejected: stats.unreliableSnapshotRejected,
+      geometryGuardedFallback: stats.geometryGuardedFallback,
+      depthEdgeRejected: stats.depthEdgeRejected,
+      autoReliabilityMin: stats.autoReliabilityMin,
+      autoPlaneMinConfidence: stats.autoPlaneMinConfidence,
+      autoMaxEnvelopeDistance: stats.autoMaxEnvelopeDistance,
+      autoDepthEdgeGuard: stats.autoDepthEdgeGuard,
+      autoPlaneCoverage: stats.autoPlaneCoverage,
     })
   }
 
