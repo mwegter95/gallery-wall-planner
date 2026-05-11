@@ -130,9 +130,9 @@ const STRUCTURE_MIN_WEIGHT = 0.82
 const MAX_DEPTH_RESIDUAL_REJECT = 0.06
 const PLANE_CELL_SIZE_M = 0.24
 const PLANE_PREF_MAX_SAMPLES = 450_000
-const PLANE_PREF_DOMINANCE_RATIO = 1.18
-const PLANE_PREF_MATCH_BONUS = 1.16
-const PLANE_PREF_MISMATCH_PENALTY = 0.72
+const PLANE_PREF_DOMINANCE_RATIO = 1.06
+const PLANE_PREF_MATCH_BONUS = 1.2
+const PLANE_PREF_MISMATCH_PENALTY = 0.55
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -292,7 +292,7 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
     const wy = D[b + 1]
     const wz = D[b + 2]
     const plane = classifyPlaneNormal(wx, wy, wz, roomFrame)
-    if (!plane || plane.confidence < 0.35) continue
+    if (!plane || plane.confidence < 0.2) continue
     const key = planeCellKey(plane)
     if (!key) continue
 
@@ -342,7 +342,11 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
     }
   }
 
-  return preferredByCell
+  return {
+    preferredByCell,
+    sampledCells: scoresByCell.size,
+    preferredCells: preferredByCell.size,
+  }
 }
 
 function structureWeightFromDistance(distanceToEnvelope) {
@@ -586,7 +590,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
   const roomFrame = estimateRoomFrame(buf)
-  const preferredSnapshotByPlaneCell = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame)
+  const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame)
+  const preferredSnapshotByPlaneCell = planePreference.preferredByCell
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -605,6 +610,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     structureDownWeighted: 0,
     depthResidualRejected: 0,
     planeCellPenaltyApplied: 0,
+    planeCellSampled: planePreference.sampledCells,
+    planeCellPreferred: planePreference.preferredCells,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -776,6 +783,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       structureDownWeighted: stats.structureDownWeighted,
       depthResidualRejected: stats.depthResidualRejected,
       planeCellPenaltyApplied: stats.planeCellPenaltyApplied,
+      planeCellSampled: stats.planeCellSampled,
+      planeCellPreferred: stats.planeCellPreferred,
     })
   }
 

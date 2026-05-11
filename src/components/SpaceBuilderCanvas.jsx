@@ -1496,9 +1496,13 @@ export default function SpaceBuilderCanvas({
           <div>Fallback: {projectionDiag.fallbackPct.toFixed(1)}%</div>
           <div>Multi-view: {projectionDiag.multiViewPct.toFixed(1)}%</div>
           <div>Depth reject: {projectionDiag.depthRejected.toLocaleString()}</div>
+          <div>Depth residual reject: {(projectionDiag.depthResidualRejected || 0).toLocaleString()}</div>
           <div>Score reject: {projectionDiag.scoreRejected.toLocaleString()}</div>
           <div>Edge reject: {(projectionDiag.edgeRejected || 0).toLocaleString()}</div>
           <div>Plane reject: {(projectionDiag.planeRejected || 0).toLocaleString()}</div>
+          <div>Plane-cell penalty: {(projectionDiag.planeCellPenaltyApplied || 0).toLocaleString()}</div>
+          <div>Plane cells sampled: {(projectionDiag.planeCellSampled || 0).toLocaleString()}</div>
+          <div>Plane cells preferred: {(projectionDiag.planeCellPreferred || 0).toLocaleString()}</div>
           <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
           <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
         </div>
