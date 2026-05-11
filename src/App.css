@@ -3243,15 +3243,13 @@ kbd {
     border-radius: 0;
   }
 
-  /* Force the body to not overflow horizontally.  align-items:flex-start
-     prevents iOS's justify-content:center scroll-clipping bug.
-     min-height:0 is required for flex children to actually shrink below their
-     content size — without it the body refuses to shrink when the footer grows
-     (e.g. when the LiDAR banner is visible), causing the SVG to overflow the
-     modal and the BL/BR handles to be clipped off the bottom of the screen. */
+  /* align-items:stretch gives ws-photo-wrap a concrete height equal to the
+     flex body's remaining space. Without this, max-height:100% on the SVG
+     has no reference height (flex-start leaves height=content), so portrait
+     photos overflow and push BL/BR handles below the footer. */
   .ws-body {
-    padding: 10px 12px;
-    align-items: flex-start;
+    padding: 6px 8px;
+    align-items: stretch;
     justify-content: flex-start;
     overflow: hidden;
     min-height: 0;
@@ -3265,15 +3263,16 @@ kbd {
     max-height: 100% !important;
   }
 
-  /* Explicit width:100% breaks the circular inline-flex sizing where the
-     wrap's width is derived from the image's intrinsic size, making
-     max-width:100% on the image reference the raw natural px instead of
-     the viewport.  With a concrete 100% width set here, the image's
-     max-width:100% correctly resolves to the viewport width.
-     The image is left-aligned at x:0 so absolute handles still land right. */
+  /* flex:1 + min-height:0 lets the wrap fill the body and shrink properly.
+     overflow:visible keeps corner handles visible outside the box.
+     padding:4px replaces 18px — SVG viewBox already includes HANDLE_PAD space. */
   .ws-photo-wrap {
     width: 100%;
     max-width: 100%;
+    flex: 1;
+    min-height: 0;
+    overflow: visible;
+    padding: 4px;
   }
 
   /* Both axes constrained — whichever is more restrictive wins.

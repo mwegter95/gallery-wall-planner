@@ -97,63 +97,50 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 //   points are still visible at maximum zoom-out.
 
 const SPLAT_VERT = /* glsl */`
-  attribute float splatScale;    // density-based size boost
-  attribute vec3  aNormal;       // estimated surface normal (floor/ceiling/wall heuristic)
+  attribute float splatScale;
+  attribute vec3  aNormal;
   varying   vec3  vColor;
-  varying   float vAngleFactor;  // view-dependent stretch amount
-  varying   vec2  vNormalScreen; // surface normal projected into screen space (unit vec2)
 
   void main() {
     vColor = color;
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
 
-    // ── View-dependent ellipse enlargement ───────────────────────────────────
-    // Surface normal in camera (view) space.
+    // Surface normal in camera space → view-dependent disc enlargement.
+    // Surfaces seen at grazing angles need bigger discs to fill the
+    // inter-point gaps that appear on walls viewed nearly edge-on.
     vec3  mvN       = normalize(normalMatrix * aNormal);
     float cosView   = max(0.28, abs(mvN.z));
-    float angleFactor = min(2.2, 1.0 / cosView);   // cap grazing boost
-    vAngleFactor = angleFactor;
+    float angleFactor = min(2.2, 1.0 / cosView);
 
-    // Project the view-space normal onto the screen plane (XY), normalise.
-    // This unit vector tells the fragment shader which way the surface tilts
-    // on screen — the perpendicular (tangent) direction is where we stretch.
-    float sLen = length(mvN.xy);
-    vNormalScreen = sLen > 0.001 ? mvN.xy / sLen : vec2(1.0, 0.0);
-
-    // Larger base (10.0 vs 5.4) makes splats ~10 px at typical viewing
-    // distances, filling inter-point gaps without requiring SSDD to cover
-    // large areas (which was the primary cause of the blocky mosaic look).
-    gl_PointSize = clamp(10.0 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.0, 40.0);
+    // 8.0 base (↑ from 5.2): at FOV55, depth 3 m → ~5.5 px diameter.
+    // Typical inter-point gap at 3 m ≈ 1.5 px → each splat covers
+    // ~3.5 neighbours, giving near-solid coverage without SSDD over-fill.
+    gl_PointSize = clamp(8.0 * splatScale * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.2, 28.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
 
 const SPLAT_FRAG = /* glsl */`
-  varying vec3  vColor;
-  varying float vAngleFactor;
-  varying vec2  vNormalScreen;
+  varying vec3 vColor;
 
   void main() {
-    vec2 uv = gl_PointCoord - 0.5;
-
-    // ── Oriented elliptical splat ─────────────────────────────────────────────
-    // Decompose uv into screen-normal and screen-tangent directions so we can
-    // stretch the splat footprint along the surface tangent at grazing angles.
-    // At face-on (angleFactor=1): perfect circle.
-    // At edge-on (angleFactor=2.2): ellipse 2.2× wider along the tangent,
-    //   which fills the coverage gaps that make walls look dotty from the side.
-    vec2  tangentDir = vec2(-vNormalScreen.y, vNormalScreen.x);
-    float nComp = dot(uv, vNormalScreen);  // along screen-projected surface normal
-    float tComp = dot(uv, tangentDir);     // along surface tangent in screen space
-
-    // Ellipse equation: stretch tangent axis by angleFactor.
-    float r2 = nComp * nComp + (tComp / vAngleFactor) * (tComp / vAngleFactor);
+    // Hard circular clip — discard corners of the GL_POINT square.
+    // Solid opaque discs with depthWrite:true occlude each other correctly,
+    // reading as a dense coloured surface rather than semi-transparent halos.
+    vec2  uv = gl_PointCoord - 0.5;
+    float r2 = dot(uv, uv);
     if (r2 > 0.25) discard;
 
-    // Gaussian-style smooth falloff — reduces harsh dot edges and makes the
-    // rendered surface feel continuous rather than a field of visible circles.
-    vec3  col   = pow(clamp(vColor, 0.0, 1.0), vec3(0.95));
-    float alpha = smoothstep(0.25, 0.04, r2);
+    // Colour grading: +35 % saturation + mild gamma lift makes LiDAR colours
+    // look rich and picture-like without blurring any spatial detail.
+    vec3  col  = vColor;
+    float luma = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(vec3(luma), col, 1.35);                     // +35 % saturation
+    col = pow(clamp(col, 0.0, 1.0), vec3(0.88));          // mild gamma lift
+
+    // alphaToCoverage soft edge: inner 72 % of disc is fully opaque, outer
+    // ring feathers to zero for clean sub-pixel anti-aliasing of disc edges.
+    float alpha = r2 < 0.18 ? 1.0 : smoothstep(0.25, 0.18, r2);
     gl_FragColor = vec4(col, alpha);
   }
 `
@@ -191,40 +178,20 @@ const SSDD_FRAG = /* glsl */`
     // Occupied pixel — pass through unchanged.
     if (d < 0.9999) { gl_FragColor = texture2D(tColor, uv); return; }
 
-    // ── Two-pass spatially-weighted depth-gated fill ──────────────────────────
-    // Pass 1: find the minimum depth (closest surface) in the neighbourhood.
-    //   This identifies which surface should fill this gap pixel — preventing
-    //   a background wall from bleeding into a foreground-surface gap.
+    // Gap pixel — find the closest (min depth) occupied neighbour in a
+    // 13×13 window and fill with that exact pixel's colour.  Min-depth
+    // ensures foreground surfaces fill gaps; no averaging so sharp colour
+    // transitions between surfaces are preserved (no blurry mosaic artefacts).
     float bestD = 2.0;
-    for (int xi = -5; xi <= 5; xi++) {
-      for (int yi = -5; yi <= 5; yi++) {
-        float nd = texture2D(tDepth, uv + vec2(float(xi), float(yi)) / uRes).r;
-        if (nd < bestD) bestD = nd;
-      }
-    }
-    if (bestD >= 0.9999) { gl_FragColor = vec4(uBg, 1.0); return; }
-
-    // Pass 2: Gaussian-weighted average of all occupied neighbours on the same
-    //   surface (depth within tolerance of bestD).  Using a weighted average
-    //   instead of the single nearest pixel produces smooth continuous fills
-    //   rather than hard-edged colour patches.
-    //   depthTol: ~0.003 NDC depth ≈ 10-15 cm at typical room depth — enough
-    //   to accept all points belonging to the same wall surface.
-    float depthTol = 0.003;
-    float totalW   = 0.0;
-    vec4  sumC     = vec4(0.0);
-    for (int xi = -5; xi <= 5; xi++) {
-      for (int yi = -5; yi <= 5; yi++) {
+    vec4  bestC = vec4(uBg, 1.0);
+    for (int xi = -6; xi <= 6; xi++) {
+      for (int yi = -6; yi <= 6; yi++) {
         vec2  suv = uv + vec2(float(xi), float(yi)) / uRes;
         float nd  = texture2D(tDepth, suv).r;
-        if (nd >= 0.9999 || nd > bestD + depthTol) continue;
-        // Gaussian spatial weight: sigma ≈ 3.5 px — smooth but localised.
-        float w = exp(-float(xi*xi + yi*yi) * 0.082);
-        totalW += w;
-        sumC   += texture2D(tColor, suv) * w;
+        if (nd < bestD) { bestD = nd; bestC = texture2D(tColor, suv); }
       }
     }
-    gl_FragColor = totalW > 0.0 ? sumC / totalW : vec4(uBg, 1.0);
+    gl_FragColor = (bestD < 0.9999) ? bestC : vec4(uBg, 1.0);
   }
 `
 
@@ -989,7 +956,7 @@ export default function SpaceBuilderCanvas({
           colors[vi*3]   = rawData[b+3]
           colors[vi*3+1] = rawData[b+4]
           colors[vi*3+2] = rawData[b+5]
-          splatScales[vi] = cnt >= 6 ? 1.08 : cnt >= 3 ? 1.03 : 1.0
+          splatScales[vi] = 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
