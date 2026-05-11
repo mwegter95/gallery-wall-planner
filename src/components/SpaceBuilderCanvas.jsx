@@ -172,6 +172,40 @@ const SPLAT_FRAG = /* glsl */`
   }
 `
 
+// ── Mesh shaders (used when point cloud is rendered as a triangle mesh) ───────
+// The vertex shader just applies uYOffset (raw y → scene y) and passes
+// the vertex colour through.  No lighting — LiDAR colour data is already
+// captured under real-world illumination, so diffuse lighting would double-
+// shade it.  Colour grading (saturation + gamma) matches the splat path.
+
+const MESH_VERT = /* glsl */`
+  uniform float uYOffset;
+  varying vec3  vColor;
+  void main() {
+    vColor = color;
+    gl_Position = projectionMatrix * modelViewMatrix *
+      vec4(position.x, position.y + uYOffset, position.z, 1.0);
+  }
+`
+
+const MESH_FRAG = /* glsl */`
+  varying vec3 vColor;
+  uniform int  uDiagMode; // 0=colour, 1=depth false-colour
+  void main() {
+    vec3 col;
+    if (uDiagMode == 1) {
+      float d = gl_FragCoord.z;
+      col = mix(vec3(1.0, 0.3, 0.0), vec3(0.0, 0.4, 1.0), clamp(d * 2.0 - 0.5, 0.0, 1.0));
+    } else {
+      col = vColor;
+      float luma = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(vec3(luma), col, 1.35);
+      col = pow(clamp(col, 0.0, 1.0), vec3(0.88));
+    }
+    gl_FragColor = vec4(col, 1.0);
+  }
+`
+
 // ── Screen-Space Depth Dilation (SSDD) ─────────────────────────────────────
 // Post-processing pass that runs after the point cloud is rendered to an FBO.
 // For every screen pixel whose depth = 1.0 (background / gap between dots) we
@@ -205,14 +239,13 @@ const SSDD_FRAG = /* glsl */`
     // Occupied pixel — pass through unchanged.
     if (d < 0.9999) { gl_FragColor = texture2D(tColor, uv); return; }
 
-    // Gap pixel — find the closest (min depth) occupied neighbour in a
-    // 21×21 window.  The larger window is needed because raw LiDAR points
-    // at 3–5 m have ~24 fb-px inter-point gaps; ±10 px reach + 2 cm disc
-    // radius guarantees full surface coverage at up to ~4 m depth.
+    // Gap pixel — mesh triangles cover >99% of the surface; only culled
+    // boundary edges (depth-discontinuity seams) reach here.  A 9×9 fill
+    // closes the thin silhouette gap along object/wall transitions.
     float bestD = 2.0;
     vec4  bestC = vec4(uBg, 1.0);
-    for (int xi = -10; xi <= 10; xi++) {
-      for (int yi = -10; yi <= 10; yi++) {
+    for (int xi = -4; xi <= 4; xi++) {
+      for (int yi = -4; yi <= 4; yi++) {
         vec2  suv = uv + vec2(float(xi), float(yi)) / uRes;
         float nd  = texture2D(tDepth, suv).r;
         if (nd < bestD) { bestD = nd; bestC = texture2D(tColor, suv); }
@@ -975,78 +1008,143 @@ export default function SpaceBuilderCanvas({
         if (cancelled) return
         await new Promise(r => setTimeout(r, 0))
 
-        // ─── Pass 2: build raw render arrays — NO voxelisation ────────────
-        // Render every non-outlier raw LiDAR point at its actual sensor position.
-        // No grid-snapping, no centroid, no colour averaging.  Raw positions
-        // preserve every surface detail; raw colours are the real RGB samples.
+        // ─── Pass 2: spherical range-image grid + vertex build ────────────
+        // Project every non-outlier LiDAR point onto a 2-D spherical panorama
+        // centred on the room origin.  Only the nearest-depth point per cell
+        // is kept — this simultaneously deduplicates dense clusters AND creates
+        // an organised topology that can be triangulated in the next pass.
         //
-        // Normals are computed procedurally in the vertex shader (uFloorY /
-        // uCeilY / uRoomCX / uRoomCZ uniforms) so we skip the normals array
-        // (~135 MB) and splatScales array (~45 MB) entirely.
-        //
-        // Memory: pre-allocate at full n, track vi, then slice.  subarray() is
-        // a zero-copy view so Three.js uploads exactly the filled region.
-        reportRoomLoad(68, 'Building render arrays')
-        const positions = new Float32Array(n * 3)
-        const colors    = new Float32Array(n * 3)
+        // Grid: 2000 columns (360° / 0.18°) × 1000 rows (180° / 0.18°).
+        // ~12 M points → ~1.5–2 M occupied cells → 1.5–2 M vertices.
+        // Memory: 2 M × 2 Int32/Float32 arrays = ~16 MB for the grid;
+        //         2 M × 6 floats = ~48 MB for position + colour buffers.
+        reportRoomLoad(68, 'Building panoramic grid')
+        const GRID_W    = 2000
+        const GRID_H    = 1000
+        const GRID_SIZE = GRID_W * GRID_H
+        const gridVtx   = new Int32Array(GRID_SIZE).fill(-1)    // → vertex idx
+        const gridDepth = new Float32Array(GRID_SIZE).fill(1e9) // → depth r
+
+        const cx = roomCenterX
+        const cy = (minY + maxY) * 0.5
+        const cz = roomCenterZ
+
+        const positions = new Float32Array(GRID_SIZE * 3)  // max 2 M vertices
+        const colors    = new Float32Array(GRID_SIZE * 3)
         let vi = 0
+
+        const TWO_PI_INV = GRID_W / (2 * Math.PI)
+        const PI_INV     = GRID_H / Math.PI
 
         for (let i = 0, b = 0; i < n; i++, b += 6) {
           if (outlierKeys.has(voxelKeys[i])) continue
-          // Store raw y — vertex shader applies uYOffset to get scene-space y.
-          positions[vi*3]   = rawData[b]
-          positions[vi*3+1] = rawData[b+1]
-          positions[vi*3+2] = rawData[b+2]
-          colors[vi*3]   = rawData[b+3]
-          colors[vi*3+1] = rawData[b+4]
-          colors[vi*3+2] = rawData[b+5]
-          vi++
-          if ((i & 0x1ffff) === 0 && i > 0 && !cancelled) {
-            reportRoomLoad(68 + (22 * i / n), 'Building render arrays')
+          const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
+          const dx = px - cx, dy = py - cy, dz = pz - cz
+          const r  = Math.sqrt(dx*dx + dy*dy + dz*dz) || 0.001
+
+          const phi = Math.asin(Math.max(-1, Math.min(1, dy / r)))  // -π/2..π/2
+          const th  = Math.atan2(dz, dx)                            // -π..π
+          const gx  = Math.min(GRID_W - 1, (th + Math.PI) * TWO_PI_INV | 0)
+          const gy  = Math.min(GRID_H - 1, (phi + Math.PI * 0.5) * PI_INV | 0)
+          const gi  = gy * GRID_W + gx
+
+          if (r < gridDepth[gi]) {
+            if (gridVtx[gi] < 0) { gridVtx[gi] = vi; vi++ }
+            const v = gridVtx[gi]
+            positions[v*3]   = px
+            positions[v*3+1] = py   // raw y — MESH_VERT applies uYOffset
+            positions[v*3+2] = pz
+            colors[v*3]   = rawData[b+3]
+            colors[v*3+1] = rawData[b+4]
+            colors[v*3+2] = rawData[b+5]
+            gridDepth[gi] = r
           }
+          if ((i & 0x1ffff) === 0 && i > 0 && !cancelled)
+            reportRoomLoad(68 + (14 * i / n), 'Building panoramic grid')
         }
         if (cancelled) return
         await new Promise(r => setTimeout(r, 0))
 
-        const floorY = minY + roomHeight * 0.20
-        const ceilY  = maxY - roomHeight * 0.20
+        // ─── Pass 3: triangulate the spherical grid ──────────────────────
+        // For each 2×2 quad of adjacent grid cells, form two triangles.
+        // Quads where any vertex-pair depth ratio exceeds MAX_DEPTH_RATIO are
+        // discarded — those span a real surface discontinuity (wall edge,
+        // object silhouette).  The theta seam wraps around with modulo.
+        reportRoomLoad(82, 'Triangulating surface')
+        const MAX_DEPTH_RATIO = 1.08   // 8% depth jump → cull triangle
+        const triBuffer = new Uint32Array(GRID_SIZE * 2 * 3)  // 2 tris/cell max
+        let   triCount  = 0
+
+        for (let gy = 0; gy < GRID_H - 1; gy++) {
+          for (let gx = 0; gx < GRID_W; gx++) {
+            const gx1 = (gx + 1) % GRID_W   // wrap at ±π theta seam
+
+            const gi00 = gy       * GRID_W + gx
+            const gi10 = gy       * GRID_W + gx1
+            const gi01 = (gy + 1) * GRID_W + gx
+            const gi11 = (gy + 1) * GRID_W + gx1
+
+            const v00 = gridVtx[gi00], d00 = gridDepth[gi00]
+            const v10 = gridVtx[gi10], d10 = gridDepth[gi10]
+            const v01 = gridVtx[gi01], d01 = gridDepth[gi01]
+            const v11 = gridVtx[gi11], d11 = gridDepth[gi11]
+
+            // Triangle A: upper-left half of the quad (00, 10, 01)
+            if (v00 >= 0 && v10 >= 0 && v01 >= 0) {
+              const mx = d00 > d10 ? (d00 > d01 ? d00 : d01) : (d10 > d01 ? d10 : d01)
+              const mn = d00 < d10 ? (d00 < d01 ? d00 : d01) : (d10 < d01 ? d10 : d01)
+              if (mx / mn < MAX_DEPTH_RATIO) {
+                triBuffer[triCount*3] = v00; triBuffer[triCount*3+1] = v10; triBuffer[triCount*3+2] = v01
+                triCount++
+              }
+            }
+            // Triangle B: lower-right half (10, 11, 01)
+            if (v10 >= 0 && v11 >= 0 && v01 >= 0) {
+              const mx = d10 > d11 ? (d10 > d01 ? d10 : d01) : (d11 > d01 ? d11 : d01)
+              const mn = d10 < d11 ? (d10 < d01 ? d10 : d01) : (d11 < d01 ? d11 : d01)
+              if (mx / mn < MAX_DEPTH_RATIO) {
+                triBuffer[triCount*3] = v10; triBuffer[triCount*3+1] = v11; triBuffer[triCount*3+2] = v01
+                triCount++
+              }
+            }
+          }
+          if ((gy & 0x1f) === 0 && !cancelled)
+            reportRoomLoad(82 + (8 * gy / GRID_H), 'Triangulating surface')
+        }
+        if (cancelled) return
+        await new Promise(r => setTimeout(r, 0))
 
         const fboW = t.renderer?.domElement?.width  ?? 0
         const fboH = t.renderer?.domElement?.height ?? 0
         diagStatsRef.current = {
           rawPts: n,
           renderedPts: vi,
+          triCount,
           fboW,
           fboH,
           dpr: Math.min(window.devicePixelRatio, 2),
         }
 
-        // subarray() creates a zero-copy view — no extra 136 MB copy.
+        // Zero-copy subarray views — Three.js uploads only the filled slice.
         const geo = new THREE.BufferGeometry()
         geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vi * 3), 3))
         geo.setAttribute('color',    new THREE.BufferAttribute(colors.subarray(0, vi * 3),    3))
+        geo.setIndex(new THREE.BufferAttribute(triBuffer.subarray(0, triCount * 3), 1))
 
         const mat = new THREE.ShaderMaterial({
           vertexColors: true,
-          transparent: false,
-          depthWrite: true,
-          alphaToCoverage: true,
-          vertexShader: SPLAT_VERT,
-          fragmentShader: SPLAT_FRAG,
+          side: THREE.DoubleSide,   // room is viewed from inside — all faces visible
+          vertexShader: MESH_VERT,
+          fragmentShader: MESH_FRAG,
           uniforms: {
-            uViewH:    { value: fboH },
-            uDiagMode: { value: 0 },
             uYOffset:  { value: yOffset },
-            uFloorY:   { value: floorY },
-            uCeilY:    { value: ceilY },
-            uRoomCX:   { value: roomCenterX },
-            uRoomCZ:   { value: roomCenterZ },
+            uDiagMode: { value: 0 },
           },
         })
 
-        const points = new THREE.Points(geo, mat)
-        t.scene.add(points)
-        pointCloudMeshRef.current = points
+        const mesh = new THREE.Mesh(geo, mat)
+        t.scene.add(mesh)
+        pointCloudMeshRef.current = mesh
         rawBufferRef.current = buf  // keep decoded buffer for Declare Surface measurement
         reportRoomLoad(90, 'Rendering scan')
         reportRoomLoad(100, 'Scan ready', false)
@@ -1550,15 +1648,12 @@ export default function SpaceBuilderCanvas({
         const s = diagStatsRef.current
         const pct = ((s.renderedPts / s.rawPts) * 100).toFixed(1)
         const dedupX = (s.rawPts / s.renderedPts).toFixed(0)
-        // Splat px = 8.0 * cot(FOV/2) / z — matches vertex shader exactly.
-        const projY  = 1 / Math.tan(fov * Math.PI / 360)
-        const splatPx = (8.0 * projY / 3.0).toFixed(1)
         return (
           <div className="sbc-diag-panel">
             <div className="sbc-diag-title">
               Scan Diagnostics
               <div className="sbc-diag-modes">
-                {['Color', 'Depth', 'Normals'].map((label, i) => (
+                {['Color', 'Depth'].map((label, i) => (
                   <button
                     key={i}
                     className={`sbc-diag-mode-btn${diagMode === i ? ' active' : ''}`}
@@ -1570,11 +1665,10 @@ export default function SpaceBuilderCanvas({
             <table className="sbc-diag-table">
               <tbody>
                 <tr><td>Raw points</td><td>{s.rawPts.toLocaleString()}</td></tr>
-                <tr><td>Rendered (dedup)</td><td>{s.renderedPts.toLocaleString()} <span className="sbc-diag-dim">({pct}% / {dedupX}× reduction)</span></td></tr>
+                <tr><td>Vertices</td><td>{s.renderedPts.toLocaleString()} <span className="sbc-diag-dim">({pct}% / {dedupX}× reduction)</span></td></tr>
+                <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
                 <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
-                <tr><td>Splat px @ 3 m</td><td>{splatPx} fb-px <span className="sbc-diag-dim">({(splatPx / s.dpr).toFixed(1)} CSS px)</span></td></tr>
-                <tr><td>Voxel cell</td><td>none — raw sensor positions</td></tr>
                 <tr><td>Colour method</td><td>raw RGB sensor values</td></tr>
               </tbody>
             </table>
