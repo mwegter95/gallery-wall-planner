@@ -1065,13 +1065,52 @@ export default function SpaceBuilderCanvas({
         if (cancelled) return
         await new Promise(r => setTimeout(r, 0))
 
+        // ─── Pass 2.5: 3×3 bilateral color smoothing in grid space ───────
+        // Each occupied cell averages the colors of its 3×3 neighbors whose
+        // depth is within ±5% (same surface).  This removes per-point LiDAR
+        // color noise (the ~5% salt-and-pepper sensor variation) which is the
+        // primary cause of the "blurry" muddy look on uniform surfaces like
+        // walls.  Color edges between objects are preserved because the depth
+        // gate excludes neighbors on a different surface.
+        //
+        // We read from rawC (a copy of the original colors) and write back to
+        // colors so every vertex sees unmodified neighbor values.
+        reportRoomLoad(82, 'Smoothing colours')
+        const rawC = colors.slice(0, vi * 3)   // ~14 MB copy for 1.2 M verts
+        for (let gi = 0; gi < GRID_SIZE; gi++) {
+          const v = gridVtx[gi]; if (v < 0) continue
+          const gy2 = (gi / GRID_W) | 0
+          const gx2 = gi % GRID_W
+          const d0  = gridDepth[gi]
+          const dLo = d0 * 0.95, dHi = d0 * 1.05
+          let sr = 0, sg = 0, sb = 0, cnt = 0
+          for (let dy = -1; dy <= 1; dy++) {
+            const row = gy2 + dy; if (row < 0 || row >= GRID_H) continue
+            for (let dx = -1; dx <= 1; dx++) {
+              const col2 = (gx2 + dx + GRID_W) % GRID_W
+              const v2   = gridVtx[row * GRID_W + col2]; if (v2 < 0) continue
+              const d2   = gridDepth[row * GRID_W + col2]
+              if (d2 < dLo || d2 > dHi) continue
+              sr += rawC[v2*3]; sg += rawC[v2*3+1]; sb += rawC[v2*3+2]
+              cnt++
+            }
+          }
+          if (cnt > 0) {
+            colors[v*3]   = sr / cnt
+            colors[v*3+1] = sg / cnt
+            colors[v*3+2] = sb / cnt
+          }
+        }
+        if (cancelled) return
+        await new Promise(r => setTimeout(r, 0))
+
         // ─── Pass 3: triangulate the spherical grid ──────────────────────
         // For each 2×2 quad of adjacent grid cells, form two triangles.
         // Quads where any vertex-pair depth ratio exceeds MAX_DEPTH_RATIO are
         // discarded — those span a real surface discontinuity (wall edge,
         // object silhouette).  The theta seam wraps around with modulo.
-        reportRoomLoad(82, 'Triangulating surface')
-        const MAX_DEPTH_RATIO = 1.08   // 8% depth jump → cull triangle
+        reportRoomLoad(86, 'Triangulating surface')
+        const MAX_DEPTH_RATIO = 1.04   // 4% depth jump → cull triangle (tight = clean edges)
         const triBuffer = new Uint32Array(GRID_SIZE * 2 * 3)  // 2 tris/cell max
         let   triCount  = 0
 
@@ -1109,7 +1148,7 @@ export default function SpaceBuilderCanvas({
             }
           }
           if ((gy & 0x1f) === 0 && !cancelled)
-            reportRoomLoad(82 + (8 * gy / GRID_H), 'Triangulating surface')
+            reportRoomLoad(86 + (4 * gy / GRID_H), 'Triangulating surface')
         }
         if (cancelled) return
         await new Promise(r => setTimeout(r, 0))
