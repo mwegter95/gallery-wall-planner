@@ -872,7 +872,7 @@ export default function SpaceBuilderCanvas({
         try {
           reportRoomLoad(5, 'Checking for pre-built mesh…')
           const meshResp = await fetch(`/api/rooms/${roomId}/mesh`, {
-            headers: { Authorization: `Bearer ${localStorage.getItem('mw_token') || ''}` },
+            headers: { Authorization: `Bearer ${localStorage.getItem('gwp-jwt') || ''}` },
           })
           if (meshResp.ok) {
             const meshMeta = await meshResp.json()
