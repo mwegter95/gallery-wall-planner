@@ -133,6 +133,10 @@ const PLANE_PREF_MAX_SAMPLES = 450_000
 const PLANE_PREF_DOMINANCE_RATIO = 1.06
 const PLANE_PREF_MATCH_BONUS = 1.2
 const PLANE_PREF_MISMATCH_PENALTY = 0.55
+const PLANE_PREF_HARD_GATING = true
+const SNAPSHOT_RELIABILITY_MAX_SAMPLES = 380_000
+const SNAPSHOT_RELIABILITY_MIN = 0.3
+const SNAPSHOT_RELIABILITY_RESIDUAL_SCALE = 12
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -347,6 +351,57 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
     sampledCells: scoresByCell.size,
     preferredCells: preferredByCell.size,
   }
+}
+
+async function estimateSnapshotReliability(buf, views, intrs, atlases, {
+  maxSamples = SNAPSHOT_RELIABILITY_MAX_SAMPLES,
+  yieldEvery = 120_000,
+} = {}) {
+  const n = buf.pointCount
+  const D = buf._data
+  const S = views.length
+  const stride = Math.max(1, Math.ceil(n / Math.max(1, maxSamples)))
+  const support = new Float32Array(S)
+  const residualSum = new Float32Array(S)
+
+  for (let i = 0; i < n; i += stride) {
+    if (i > 0 && i % yieldEvery === 0) await new Promise(r => setTimeout(r, 0))
+    const b = i * 6
+    const wx = D[b]
+    const wy = D[b + 1]
+    const wz = D[b + 2]
+
+    for (let si = 0; si < S; si++) {
+      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
+      if (!proj) continue
+      const center = edgeCentralityWeight(intrs[si], proj.u, proj.v)
+      if (center.weight <= 0) continue
+      const atlas = atlases[si]
+      const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
+      const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
+      const depthRef = atlas.depth[ay * atlas.width + ax]
+      if (!isDepthVisible(proj.depth, depthRef, STRICT_VISIBILITY_REL_TOL, STRICT_VISIBILITY_ABS_TOL)) continue
+      const residual = Math.max(0, proj.depth - depthRef)
+      if (residual > MAX_DEPTH_RESIDUAL_REJECT) continue
+
+      support[si] += center.weight
+      residualSum[si] += residual
+    }
+  }
+
+  const reliability = new Float32Array(S)
+  let maxSupport = 0
+  for (let si = 0; si < S; si++) {
+    if (support[si] > maxSupport) maxSupport = support[si]
+  }
+  const supportDenom = Math.max(1e-6, maxSupport)
+  for (let si = 0; si < S; si++) {
+    const meanResidual = residualSum[si] / Math.max(1e-6, support[si])
+    const supportNorm = support[si] / supportDenom
+    const residualQuality = Math.exp(-SNAPSHOT_RELIABILITY_RESIDUAL_SCALE * meanResidual)
+    reliability[si] = Math.max(0, Math.min(1, supportNorm * residualQuality))
+  }
+  return reliability
 }
 
 function structureWeightFromDistance(distanceToEnvelope) {
@@ -592,6 +647,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const roomFrame = estimateRoomFrame(buf)
   const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame)
   const preferredSnapshotByPlaneCell = planePreference.preferredByCell
+  const snapshotReliability = await estimateSnapshotReliability(buf, views, intrs, atlases)
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -612,6 +668,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     planeCellPenaltyApplied: 0,
     planeCellSampled: planePreference.sampledCells,
     planeCellPreferred: planePreference.preferredCells,
+    hardPlaneCellBlocked: 0,
+    unreliableSnapshotRejected: 0,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -628,8 +686,17 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     let best = null
     let second = null
     const ranked = []
+    const preferredSiForPoint = plane ? preferredSnapshotByPlaneCell.get(planeCellKey(plane)) : null
 
     for (let si = 0; si < S; si++) {
+      if (snapshotReliability[si] < SNAPSHOT_RELIABILITY_MIN) {
+        if (stats) stats.unreliableSnapshotRejected++
+        continue
+      }
+      if (PLANE_PREF_HARD_GATING && preferredSiForPoint !== undefined && preferredSiForPoint !== null && si !== preferredSiForPoint) {
+        if (stats) stats.hardPlaneCellBlocked++
+        continue
+      }
       let proj
       if (stats) {
         const verbose = projectToSnapshotVerbose(wx, wy, wz, views[si], intrs[si])
@@ -688,6 +755,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         : 1
       const structureWeight = structureWeightFromDistance(plane?.bestDistance)
       let weightedScore = proj.score * center.weight * planeWeight * structureWeight * depthResidualWeight
+      weightedScore *= Math.max(0.25, snapshotReliability[si])
       if (plane) {
         const cellKey = planeCellKey(plane)
         const preferredSi = cellKey ? preferredSnapshotByPlaneCell.get(cellKey) : null
@@ -785,6 +853,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       planeCellPenaltyApplied: stats.planeCellPenaltyApplied,
       planeCellSampled: stats.planeCellSampled,
       planeCellPreferred: stats.planeCellPreferred,
+      hardPlaneCellBlocked: stats.hardPlaneCellBlocked,
+      unreliableSnapshotRejected: stats.unreliableSnapshotRejected,
     })
   }
 

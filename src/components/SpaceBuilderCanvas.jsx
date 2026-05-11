@@ -1503,6 +1503,8 @@ export default function SpaceBuilderCanvas({
           <div>Plane-cell penalty: {(projectionDiag.planeCellPenaltyApplied || 0).toLocaleString()}</div>
           <div>Plane cells sampled: {(projectionDiag.planeCellSampled || 0).toLocaleString()}</div>
           <div>Plane cells preferred: {(projectionDiag.planeCellPreferred || 0).toLocaleString()}</div>
+          <div>Hard plane-cell blocked: {(projectionDiag.hardPlaneCellBlocked || 0).toLocaleString()}</div>
+          <div>Unreliable snapshot reject: {(projectionDiag.unreliableSnapshotRejected || 0).toLocaleString()}</div>
           <div>Ambiguous reject: {(projectionDiag.ambiguousRejected || 0).toLocaleString()}</div>
           <div>Behind/outside: {(projectionDiag.behindCamera + projectionDiag.outsideFrame).toLocaleString()}</div>
         </div>
