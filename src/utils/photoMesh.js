@@ -151,6 +151,9 @@ const RELAXED_RECOVERY_DEPTH_EDGE_EXPAND_M = 0.028
 const RELAXED_RECOVERY_SCORE_FACTOR = 0.72
 const COLOR_DRIFT_BASE_L1 = 0.78
 const COLOR_DRIFT_RELAXED_BONUS = 0.16
+const POSE_REFINE_MAX_SAMPLES = 220_000
+const POSE_REFINE_DEG_COARSE = 1.6
+const POSE_REFINE_DEG_FINE = 0.65
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -610,6 +613,146 @@ function colorDriftL1ToBase(sampled, baseR, baseG, baseB) {
   )
 }
 
+function rad(deg) {
+  return deg * (Math.PI / 180)
+}
+
+function applyViewRotationDelta(view, yawRad, pitchRad, rollRad) {
+  const cy = Math.cos(yawRad), sy = Math.sin(yawRad)
+  const cp = Math.cos(pitchRad), sp = Math.sin(pitchRad)
+  const cr = Math.cos(rollRad), sr = Math.sin(rollRad)
+
+  // Camera-space delta rotation: Rz * Rx * Ry
+  const rd00 = cr * cy - sr * sp * sy
+  const rd01 = -sr * cp
+  const rd02 = cr * sy + sr * sp * cy
+  const rd10 = sr * cy + cr * sp * sy
+  const rd11 = cr * cp
+  const rd12 = sr * sy - cr * sp * cy
+  const rd20 = -cp * sy
+  const rd21 = sp
+  const rd22 = cp * cy
+
+  const out = new Float32Array(view)
+
+  // Extract current row-major R from column-major 4x4 view matrix
+  const r00 = view[0], r01 = view[4], r02 = view[8]
+  const r10 = view[1], r11 = view[5], r12 = view[9]
+  const r20 = view[2], r21 = view[6], r22 = view[10]
+
+  // R' = Rd * R
+  const n00 = rd00 * r00 + rd01 * r10 + rd02 * r20
+  const n01 = rd00 * r01 + rd01 * r11 + rd02 * r21
+  const n02 = rd00 * r02 + rd01 * r12 + rd02 * r22
+  const n10 = rd10 * r00 + rd11 * r10 + rd12 * r20
+  const n11 = rd10 * r01 + rd11 * r11 + rd12 * r21
+  const n12 = rd10 * r02 + rd11 * r12 + rd12 * r22
+  const n20 = rd20 * r00 + rd21 * r10 + rd22 * r20
+  const n21 = rd20 * r01 + rd21 * r11 + rd22 * r21
+  const n22 = rd20 * r02 + rd21 * r12 + rd22 * r22
+
+  out[0] = n00; out[4] = n01; out[8] = n02
+  out[1] = n10; out[5] = n11; out[9] = n12
+  out[2] = n20; out[6] = n21; out[10] = n22
+
+  // t' = Rd * t
+  const tx = view[12], ty = view[13], tz = view[14]
+  out[12] = rd00 * tx + rd01 * ty + rd02 * tz
+  out[13] = rd10 * tx + rd11 * ty + rd12 * tz
+  out[14] = rd20 * tx + rd21 * ty + rd22 * tz
+
+  return out
+}
+
+function evaluateViewAlignmentMetric(buf, view, intr, pixMap, {
+  maxSamples = POSE_REFINE_MAX_SAMPLES,
+} = {}) {
+  const n = buf.pointCount
+  const D = buf._data
+  const stride = Math.max(1, Math.ceil(n / Math.max(1, maxSamples)))
+  let total = 0
+  let support = 0
+
+  for (let i = 0; i < n; i += stride) {
+    const b = i * 6
+    const wx = D[b]
+    const wy = D[b + 1]
+    const wz = D[b + 2]
+    const proj = projectToSnapshot(wx, wy, wz, view, intr)
+    if (!proj) continue
+
+    const center = edgeCentralityWeight(intr, proj.u, proj.v)
+    if (center.weight <= 0) continue
+
+    const color = bilinearSampleRGBA(pixMap.data, pixMap.width, pixMap.height, proj.u, proj.v)
+    const drift = colorDriftL1ToBase(color, D[b + 3], D[b + 4], D[b + 5])
+    const quality = Math.exp(-2.2 * drift)
+    total += proj.score * center.weight * quality
+    support += 1
+  }
+
+  return support > 0 ? (total / support) : 0
+}
+
+function refineSnapshotViewsByPoseSearch(buf, views, intrs, pixMaps) {
+  const refined = views.map(v => new Float32Array(v))
+  let refinedCount = 0
+  let totalShiftDeg = 0
+
+  for (let si = 0; si < refined.length; si++) {
+    let bestView = refined[si]
+    let bestMetric = evaluateViewAlignmentMetric(buf, bestView, intrs[si], pixMaps[si])
+    let bestYaw = 0
+    let bestPitch = 0
+
+    const coarse = [0, -POSE_REFINE_DEG_COARSE, POSE_REFINE_DEG_COARSE]
+    for (const yd of coarse) {
+      for (const pd of coarse) {
+        if (yd === 0 && pd === 0) continue
+        const cand = applyViewRotationDelta(refined[si], rad(yd), rad(pd), 0)
+        const m = evaluateViewAlignmentMetric(buf, cand, intrs[si], pixMaps[si])
+        if (m > bestMetric) {
+          bestMetric = m
+          bestView = cand
+          bestYaw = yd
+          bestPitch = pd
+        }
+      }
+    }
+
+    const fine = [0, -POSE_REFINE_DEG_FINE, POSE_REFINE_DEG_FINE]
+    const baseForFine = bestView
+    let fineYaw = 0
+    let finePitch = 0
+    for (const yd of fine) {
+      for (const pd of fine) {
+        if (yd === 0 && pd === 0) continue
+        const cand = applyViewRotationDelta(baseForFine, rad(yd), rad(pd), 0)
+        const m = evaluateViewAlignmentMetric(buf, cand, intrs[si], pixMaps[si])
+        if (m > bestMetric) {
+          bestMetric = m
+          bestView = cand
+          fineYaw = yd
+          finePitch = pd
+        }
+      }
+    }
+
+    const shiftDeg = Math.hypot(bestYaw + fineYaw, bestPitch + finePitch)
+    if (shiftDeg > 0.05) {
+      refinedCount++
+      totalShiftDeg += shiftDeg
+    }
+    refined[si] = bestView
+  }
+
+  return {
+    views: refined,
+    refinedCount,
+    avgShiftDeg: refinedCount > 0 ? (totalShiftDeg / refinedCount) : 0,
+  }
+}
+
 function edgeCentralityWeight(intr, u, v) {
   const fx = Math.max(1e-6, intr[0])
   const fy = Math.max(1e-6, intr[1])
@@ -787,9 +930,14 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   // ── Precompute per-snapshot data ──────────────────────────────────────────
   // views[si]  = column-major 4×4 world→camera matrix (inverse of cam→world)
   // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
-  const views = snapshots.map(s => invertRigid(s.transform))
-  const camPositions = snapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
+  let views = snapshots.map(s => invertRigid(s.transform))
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
+  const poseRefine = refineSnapshotViewsByPoseSearch(buf, views, intrs, pixMaps)
+  views = poseRefine.views
+  const camPositions = views.map(v => {
+    const t = invertRigid(v)
+    return [t[12], t[13], t[14]]
+  })
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
   const roomFrame = estimateRoomFrame(buf)
   const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame, pixMaps)
@@ -827,6 +975,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     autoMaxEnvelopeDistance: autoTunePolicy.maxEnvelopeDistance,
     autoDepthEdgeGuard: autoTunePolicy.depthEdgeGuard,
     autoPlaneCoverage: autoTunePolicy.planeCoverage,
+    poseRefinedSnapshots: poseRefine.refinedCount,
+    poseAvgShiftDeg: poseRefine.avgShiftDeg,
     relaxedRecoveryAccepted: 0,
     relaxedRecoveryFallback: 0,
     colorDriftRejected: 0,
@@ -1083,6 +1233,8 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       autoMaxEnvelopeDistance: stats.autoMaxEnvelopeDistance,
       autoDepthEdgeGuard: stats.autoDepthEdgeGuard,
       autoPlaneCoverage: stats.autoPlaneCoverage,
+      poseRefinedSnapshots: stats.poseRefinedSnapshots,
+      poseAvgShiftDeg: stats.poseAvgShiftDeg,
       relaxedRecoveryAccepted: stats.relaxedRecoveryAccepted,
       relaxedRecoveryFallback: stats.relaxedRecoveryFallback,
       colorDriftRejected: stats.colorDriftRejected,

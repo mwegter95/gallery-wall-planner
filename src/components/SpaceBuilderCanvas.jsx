@@ -222,6 +222,16 @@ export default function SpaceBuilderCanvas({
       return false
     }
   })
+  const [photoOverlayEnabled, setPhotoOverlayEnabled] = useState(() => {
+    try {
+      const raw = localStorage.getItem('gwp-photo-overlay-enabled')
+      return raw == null ? true : raw === '1'
+    } catch {
+      return true
+    }
+  })
+  const projectionTaskVersionRef = useRef(0)
+  const scanProjectionRef = useRef(null)
   const setZoomRef = useRef(setZoomRadius)                 // stable ref so onWheel closure can call it
   setZoomRef.current = setZoomRadius
   // When a room scan is loaded, orbit switches to FPS mode (camera rotates in
@@ -1005,24 +1015,47 @@ export default function SpaceBuilderCanvas({
         // The colAttr.array reference stays live in Three.js, so mutating it
         // and setting needsUpdate is sufficient — no geometry rebuild needed.
         if (snapshots?.length) {
-          reportRoomLoad(93, 'Projecting photo colors')
-          ;(async () => {
+          const baseColors = new Float32Array(colors)
+          scanProjectionRef.current = {
+            geo,
+            positions,
+            baseColors,
+            snapshots,
+            yOffset: yOffsetRef.current,
+            projected: null,
+          }
+
+          const runProjection = async () => {
+            if (!scanProjectionRef.current) return
+            const taskVersion = ++projectionTaskVersionRef.current
+            if (!photoOverlayEnabled) {
+              const colAttr = geo.getAttribute('color')
+              colAttr.array.set(baseColors)
+              colAttr.needsUpdate = true
+              setProjectionDiag(null)
+              reportRoomLoad(100, 'Scan ready (point cloud only)', false)
+              return
+            }
+            reportRoomLoad(93, 'Projecting photo colors')
             try {
-              const newColors = await buildPhotoColorsForPositions(positions, colors, snapshots, yOffsetRef.current, {
+              const newColors = await buildPhotoColorsForPositions(positions, baseColors, snapshots, yOffsetRef.current, {
                 onDiagnostics: (diag) => {
-                  if (!cancelled) setProjectionDiag(diag)
+                  if (!cancelled && taskVersion === projectionTaskVersionRef.current) setProjectionDiag(diag)
                 },
               })
-              if (cancelled || !newColors) return
+              if (cancelled || taskVersion !== projectionTaskVersionRef.current || !newColors) return
               const colAttr = geo.getAttribute('color')
               colAttr.array.set(newColors)
               colAttr.needsUpdate = true
+              if (scanProjectionRef.current) scanProjectionRef.current.projected = newColors
               reportRoomLoad(100, 'Scan ready', false)
             } catch (err) {
               console.warn('[SpaceBuilderCanvas] Photo retexture failed:', err)
               reportRoomLoad(100, 'Scan ready (base colors)', false)
             }
-          })()
+          }
+
+          await runProjection()
         } else {
           reportRoomLoad(100, 'Scan ready', false)
         }
@@ -1153,6 +1186,51 @@ export default function SpaceBuilderCanvas({
   // Photo overlay approach parked — dense Gaussian splat point cloud used instead.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { /* disabled */ }, [roomScan])
+
+  useEffect(() => {
+    try { localStorage.setItem('gwp-photo-overlay-enabled', photoOverlayEnabled ? '1' : '0') } catch {}
+
+    const state = scanProjectionRef.current
+    if (!state?.geo) return
+    const colAttr = state.geo.getAttribute('color')
+    if (!colAttr) return
+
+    if (!photoOverlayEnabled) {
+      colAttr.array.set(state.baseColors)
+      colAttr.needsUpdate = true
+      setProjectionDiag(null)
+      return
+    }
+
+    if (state.projected) {
+      colAttr.array.set(state.projected)
+      colAttr.needsUpdate = true
+      return
+    }
+
+    const taskVersion = ++projectionTaskVersionRef.current
+    ;(async () => {
+      try {
+        const newColors = await buildPhotoColorsForPositions(
+          state.positions,
+          state.baseColors,
+          state.snapshots,
+          state.yOffset,
+          {
+            onDiagnostics: (diag) => {
+              if (taskVersion === projectionTaskVersionRef.current) setProjectionDiag(diag)
+            },
+          },
+        )
+        if (taskVersion !== projectionTaskVersionRef.current || !newColors) return
+        state.projected = newColors
+        colAttr.array.set(newColors)
+        colAttr.needsUpdate = true
+      } catch (err) {
+        console.warn('[SpaceBuilderCanvas] On-demand photo overlay failed:', err)
+      }
+    })()
+  }, [photoOverlayEnabled])
 
   // ── Composite piece overlays onto surface textures ───────────────────────
   useEffect(() => {
@@ -1513,6 +1591,8 @@ export default function SpaceBuilderCanvas({
           <div>Auto env-max: {Number(projectionDiag.autoMaxEnvelopeDistance || 0).toFixed(3)}m</div>
           <div>Auto depth-edge: {Number(projectionDiag.autoDepthEdgeGuard || 0).toFixed(3)}m</div>
           <div>Auto plane coverage: {(100 * Number(projectionDiag.autoPlaneCoverage || 0)).toFixed(1)}%</div>
+          <div>Pose refined snapshots: {(projectionDiag.poseRefinedSnapshots || 0).toLocaleString()}</div>
+          <div>Pose avg shift: {Number(projectionDiag.poseAvgShiftDeg || 0).toFixed(2)}deg</div>
           <div>Relaxed recovery accepted: {(projectionDiag.relaxedRecoveryAccepted || 0).toLocaleString()}</div>
           <div>Relaxed recovery fallback: {(projectionDiag.relaxedRecoveryFallback || 0).toLocaleString()}</div>
           <div>Color drift reject: {(projectionDiag.colorDriftRejected || 0).toLocaleString()}</div>
@@ -1546,6 +1626,28 @@ export default function SpaceBuilderCanvas({
           }}
         >
           {showProjectionDiag ? 'Hide Projection Stats' : 'Show Projection Stats'}
+        </button>
+      )}
+
+      {roomScan && (
+        <button
+          type="button"
+          onClick={() => setPhotoOverlayEnabled(prev => !prev)}
+          style={{
+            position: 'absolute',
+            right: 14,
+            bottom: 112,
+            zIndex: 8,
+            border: '1px solid rgba(120,160,230,0.45)',
+            background: photoOverlayEnabled ? 'rgba(24,36,58,0.8)' : 'rgba(16,20,30,0.66)',
+            color: photoOverlayEnabled ? '#e6f0ff' : '#c7d9ff',
+            borderRadius: 8,
+            padding: '4px 8px',
+            fontSize: 11,
+            cursor: 'pointer',
+          }}
+        >
+          {photoOverlayEnabled ? 'Photo Overlay: On' : 'Photo Overlay: Off'}
         </button>
       )}
 
