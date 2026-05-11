@@ -109,13 +109,15 @@ const VISIBILITY_TARGET_SAMPLES = 1_800_000
 const VISIBILITY_MAX_DIM = 768
 const VISIBILITY_REL_TOL = 0.015
 const VISIBILITY_ABS_TOL = 0.03
+const STRICT_VISIBILITY_REL_TOL = 0.007
+const STRICT_VISIBILITY_ABS_TOL = 0.012
 const FUSION_MAX_CANDIDATES = 1
 const COLOR_GATE_L1 = 0.33
 const MIN_PROJECTION_SCORE = 0.16
 const VIEW_EDGE_SIGMA = 0.62
 const VIEW_EDGE_HARD_RADIUS2 = 1.35
-const AMBIGUITY_SCORE_RATIO = 0.96
-const AMBIGUITY_COLOR_L1 = 0.31
+const AMBIGUITY_SCORE_RATIO = 0.9
+const AMBIGUITY_COLOR_L1 = 0.2
 const CONSENSUS_COLOR_L1 = 0.18
 const CONSENSUS_AMBIGUITY_RELIEF = 0.42
 const PLANE_FACING_MIN = 0.05
@@ -125,6 +127,7 @@ const CORNER_DISTANCE_SOFT = 0.24
 const STRUCTURE_NEAR_M = 0.12
 const STRUCTURE_FAR_M = 1.6
 const STRUCTURE_MIN_WEIGHT = 0.82
+const MAX_DEPTH_RESIDUAL_REJECT = 0.06
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -495,6 +498,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     ambiguousRejected: 0,
     planeRejected: 0,
     structureDownWeighted: 0,
+    depthResidualRejected: 0,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -539,12 +543,16 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
       const idx = ay * atlas.width + ax
       const depthRef = atlas.depth[idx]
-      if (!isDepthVisible(proj.depth, depthRef)) {
+      if (!isDepthVisible(proj.depth, depthRef, STRICT_VISIBILITY_REL_TOL, STRICT_VISIBILITY_ABS_TOL)) {
         if (stats) stats.depthRejected++
         continue
       }
 
       const depthResidual = Math.max(0, proj.depth - depthRef)
+      if (depthResidual > MAX_DEPTH_RESIDUAL_REJECT) {
+        if (stats) stats.depthResidualRejected++
+        continue
+      }
       const toCam = unitVector(
         camPositions[si][0] - wx,
         camPositions[si][1] - wy,
@@ -595,13 +603,13 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       if (second) {
         const secondConsensus = consensusSupport(second, ranked)
         const ratio = second.score / (best.score + 1e-6)
-        const ratioGate = Math.max(0.9, AMBIGUITY_SCORE_RATIO - Math.min(0.05, bestConsensusRel * 0.03))
+        const ratioGate = Math.max(0.82, AMBIGUITY_SCORE_RATIO - Math.min(0.08, bestConsensusRel * 0.02))
         const disagreement =
           Math.abs(best.color[0] - second.color[0]) +
           Math.abs(best.color[1] - second.color[1]) +
           Math.abs(best.color[2] - second.color[2])
         const consensusDelta = (bestConsensus - secondConsensus) / (best.score + second.score + 1e-6)
-        const canRelieveByConsensus = consensusDelta >= CONSENSUS_AMBIGUITY_RELIEF
+        const canRelieveByConsensus = consensusDelta >= (CONSENSUS_AMBIGUITY_RELIEF + 0.2)
         if (ratio >= ratioGate && disagreement >= AMBIGUITY_COLOR_L1 && !canRelieveByConsensus) {
           newColors[i*3] = or
           newColors[i*3+1] = og
@@ -648,6 +656,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       ambiguousRejected: stats.ambiguousRejected,
       planeRejected: stats.planeRejected,
       structureDownWeighted: stats.structureDownWeighted,
+      depthResidualRejected: stats.depthResidualRejected,
     })
   }
 
