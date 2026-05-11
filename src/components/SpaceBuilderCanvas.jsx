@@ -134,10 +134,11 @@ const SPLAT_VERT = /* glsl */`
     float cosView   = max(0.30, abs(mvN.z));
     float angleFactor = min(2.0, 1.0 / cosView);
 
-    // 2 cm world diameter × angleFactor fills the ~1.2 cm LiDAR inter-point
-    // gap at 3 m.  21×21 SSDD covers any residual hairline seams beyond 3 m.
-    float worldDiam = 0.020 * angleFactor;
-    gl_PointSize = clamp(worldDiam * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 20.0);
+    // Empirically-tuned sizing (same as ba2bae2, verified to look solid):
+    // 8.0 * cot(FOV/2) / z → ~5 fb-px at 3 m / 55° FOV.
+    // No uViewH needed — scales naturally with depth and FOV only.
+    // Max 28 px handles grazing walls; min 1.2 keeps far points visible.
+    gl_PointSize = clamp(8.0 * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.2, 28.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -1549,9 +1550,9 @@ export default function SpaceBuilderCanvas({
         const s = diagStatsRef.current
         const pct = ((s.renderedPts / s.rawPts) * 100).toFixed(1)
         const dedupX = (s.rawPts / s.renderedPts).toFixed(0)
-        // Estimate splat px size at 3 m depth using current FOV
+        // Splat px = 8.0 * cot(FOV/2) / z — matches vertex shader exactly.
         const projY  = 1 / Math.tan(fov * Math.PI / 360)
-        const splatPx = (0.115 * projY * s.fboH * 0.5 / 3.0).toFixed(1)
+        const splatPx = (8.0 * projY / 3.0).toFixed(1)
         return (
           <div className="sbc-diag-panel">
             <div className="sbc-diag-title">
