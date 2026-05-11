@@ -303,6 +303,9 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
   const scoresByCell = new Map()
   const driftSumByCell = new Map()
   const driftWeightByCell = new Map()
+  const planeGlobalScores = Array.from({ length: 6 }, () => new Float32Array(S))
+  const planeGlobalDriftSums = Array.from({ length: 6 }, () => new Float32Array(S))
+  const planeGlobalDriftWeights = Array.from({ length: 6 }, () => new Float32Array(S))
 
   for (let i = 0; i < n; i += stride) {
     if (i > 0 && i % yieldEvery === 0) await new Promise(r => setTimeout(r, 0))
@@ -355,6 +358,10 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
       cellScores[si] += contrib
       cellDriftSums[si] += drift * contrib
       cellDriftWeights[si] += contrib
+      const pidx = Math.max(0, Math.min(5, plane.planeIndex | 0))
+      planeGlobalScores[pidx][si] += contrib
+      planeGlobalDriftSums[pidx][si] += drift * contrib
+      planeGlobalDriftWeights[pidx][si] += contrib
     }
   }
 
@@ -388,10 +395,48 @@ async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, room
     }
   }
 
+  const preferredByPlane = new Int16Array(6).fill(-1)
+  for (let pidx = 0; pidx < 6; pidx++) {
+    const scores = planeGlobalScores[pidx]
+    const driftSums = planeGlobalDriftSums[pidx]
+    const driftWeights = planeGlobalDriftWeights[pidx]
+    let bestSi = -1
+    let bestScore = 0
+    let secondScore = 0
+    for (let si = 0; si < scores.length; si++) {
+      const s = scores[si]
+      if (s > bestScore) {
+        secondScore = bestScore
+        bestScore = s
+        bestSi = si
+      } else if (s > secondScore) {
+        secondScore = s
+      }
+    }
+    const bestMeanDrift = (bestSi >= 0 && driftWeights[bestSi] > 0)
+      ? (driftSums[bestSi] / driftWeights[bestSi])
+      : Infinity
+    if (
+      bestSi >= 0 &&
+      bestScore > 0 &&
+      bestScore >= secondScore * PLANE_PREF_DOMINANCE_RATIO &&
+      bestMeanDrift <= PLANE_PREF_MAX_MEAN_DRIFT
+    ) {
+      preferredByPlane[pidx] = bestSi
+    }
+  }
+
+  let preferredPlanes = 0
+  for (let pidx = 0; pidx < preferredByPlane.length; pidx++) {
+    if (preferredByPlane[pidx] >= 0) preferredPlanes++
+  }
+
   return {
     preferredByCell,
+    preferredByPlane,
     sampledCells: scoresByCell.size,
     preferredCells: preferredByCell.size,
+    preferredPlanes,
   }
 }
 
@@ -749,6 +794,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const roomFrame = estimateRoomFrame(buf)
   const planePreference = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame, pixMaps)
   const preferredSnapshotByPlaneCell = planePreference.preferredByCell
+  const preferredSnapshotByPlane = planePreference.preferredByPlane
   const snapshotReliability = await estimateSnapshotReliability(buf, views, intrs, atlases)
   const autoTunePolicy = buildAutoTunePolicy(snapshotReliability, planePreference)
 
@@ -771,6 +817,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     planeCellPenaltyApplied: 0,
     planeCellSampled: planePreference.sampledCells,
     planeCellPreferred: planePreference.preferredCells,
+    planePreferredGlobal: planePreference.preferredPlanes,
     hardPlaneCellBlocked: 0,
     unreliableSnapshotRejected: 0,
     geometryGuardedFallback: 0,
@@ -833,7 +880,16 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     let best = null
     let second = null
     const ranked = []
-    const preferredSiForPoint = plane ? preferredSnapshotByPlaneCell.get(planeCellKey(plane)) : null
+    let preferredSiForPoint = null
+    if (plane) {
+      const planeIdx = Math.max(0, Math.min(5, plane.planeIndex | 0))
+      const planeGlobal = preferredSnapshotByPlane[planeIdx]
+      if (planeGlobal !== undefined && planeGlobal !== null && planeGlobal >= 0) {
+        preferredSiForPoint = planeGlobal
+      } else {
+        preferredSiForPoint = preferredSnapshotByPlaneCell.get(planeCellKey(plane))
+      }
+    }
 
     for (let si = 0; si < S; si++) {
       if (snapshotReliability[si] < reliabilityMinGate) {
@@ -1017,6 +1073,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       planeCellPenaltyApplied: stats.planeCellPenaltyApplied,
       planeCellSampled: stats.planeCellSampled,
       planeCellPreferred: stats.planeCellPreferred,
+      planePreferredGlobal: stats.planePreferredGlobal,
       hardPlaneCellBlocked: stats.hardPlaneCellBlocked,
       unreliableSnapshotRejected: stats.unreliableSnapshotRejected,
       geometryGuardedFallback: stats.geometryGuardedFallback,
