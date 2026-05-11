@@ -225,9 +225,9 @@ export default function SpaceBuilderCanvas({
   const [photoOverlayEnabled, setPhotoOverlayEnabled] = useState(() => {
     try {
       const raw = localStorage.getItem('gwp-photo-overlay-enabled')
-      return raw == null ? true : raw === '1'
+      return raw == null ? false : raw === '1'
     } catch {
-      return true
+      return false
     }
   })
   const projectionTaskVersionRef = useRef(0)
@@ -876,14 +876,15 @@ export default function SpaceBuilderCanvas({
         //   from local voxel density.  splatScale is capped at 1.5 because SOR
         //   ensures no truly isolated point remains.
         //
-        const CELL     = 0.10
-        const CELL_INV = 10.0
-        const SOR_MIN  = 5
+        const CELL     = 0.075
+        const CELL_INV = 1 / CELL
+        const SOR_MIN  = 4
 
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
         const voxelCounts = new Map()
+        const voxelSums   = new Map()
         const voxelKeys   = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
@@ -901,6 +902,12 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
+          const sums = voxelSums.get(key)
+          if (sums) {
+            sums.x += x; sums.y += y; sums.z += z
+          } else {
+            voxelSums.set(key, { x, y, z })
+          }
 
           if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
             reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
@@ -956,20 +963,33 @@ export default function SpaceBuilderCanvas({
 
           const cnt = voxelCounts.get(key) || 1
           const px = rawData[b], py = rawData[b+1], pz = rawData[b+2]
-          positions[vi*3]   = px
-          positions[vi*3+1] = py + yOffset
-          positions[vi*3+2] = pz
+          const sums = voxelSums.get(key)
+          const inv = sums ? (1 / Math.max(1, cnt)) : 1
+          const cx = sums ? sums.x * inv : px
+          const cy = sums ? sums.y * inv : py
+          const cz = sums ? sums.z * inv : pz
+
+          // Temporal alignment: pull repeated same-cell samples toward a stable centroid.
+          // Keeps high point density while reducing same-place/different-time jitter.
+          const align = Math.min(0.82, 0.34 + 0.12 * Math.log2(1 + cnt))
+          const sx = px + (cx - px) * align
+          const sy = py + (cy - py) * align
+          const sz = pz + (cz - pz) * align
+
+          positions[vi*3]   = sx
+          positions[vi*3+1] = sy + yOffset
+          positions[vi*3+2] = sz
           colors[vi*3]      = rawData[b+3]
           colors[vi*3+1]    = rawData[b+4]
           colors[vi*3+2]    = rawData[b+5]
           splatScales[vi] = Math.max(0.25, Math.min(1.5, 2.0 / Math.sqrt(cnt)))
 
-          if (py <= floorTop) {
+          if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
-          } else if (py >= ceilBottom) {
+          } else if (sy >= ceilBottom) {
             normals[vi*3] = 0;  normals[vi*3+1] = -1; normals[vi*3+2] = 0
           } else {
-            let nx = px - roomCenterX, nz = pz - roomCenterZ
+            let nx = sx - roomCenterX, nz = sz - roomCenterZ
             const len = Math.sqrt(nx*nx + nz*nz) || 1
             normals[vi*3] = nx/len;  normals[vi*3+1] = 0;  normals[vi*3+2] = nz/len
           }

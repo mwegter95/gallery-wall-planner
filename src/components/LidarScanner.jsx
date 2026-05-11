@@ -26,7 +26,11 @@ import {
 
 // How many depth samples to take per frame (spread across the depth image).
 // Higher = denser cloud but heavier CPU/memory.
-const SAMPLES_PER_FRAME = 600
+const SAMPLES_PER_FRAME_BASE = 1200
+const SAMPLES_PER_FRAME_FAST = 650
+const MAX_LINEAR_SPEED = 1.1
+const MAX_ANGULAR_SPEED = 3.2
+const VOXEL_ALIGN_CELL = 0.03
 
 // Minimum depth (m) to accept — filters out noise from very close surfaces
 const MIN_DEPTH = 0.15
@@ -51,6 +55,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
   const camCtxRef     = useRef(null)  // 2D canvas ctx for sampling camera color
   const glRef         = useRef(null)  // WebGL context
   const refSpaceRef   = useRef(null)
+  const motionRef     = useRef({ t: 0, x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1 })
+  const alignMapRef   = useRef(new Map())
 
   /* ── Check availability (native bridge OR WebXR) ─────────────────────── */
   useEffect(() => {
@@ -297,6 +303,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
 
       bufferRef.current = new PointCloudBuffer(2_000_000)
       planesRef.current = []
+      motionRef.current = { t: 0, x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1 }
+      alignMapRef.current = new Map()
 
       session.addEventListener('end', () => {
         document.body.removeChild(canvas)
@@ -318,13 +326,46 @@ export default function LidarScanner({ onComplete, onCancel }) {
           let depthInfo = null
           try { depthInfo = frame.getDepthInformation(view) } catch { /* optional */ }
 
+          const mat = view.transform?.matrix
+          let linearSpeed = 0
+          let angularSpeed = 0
+          let samplesPerFrame = SAMPLES_PER_FRAME_BASE
+          if (mat?.length === 16) {
+            const x = mat[12], y = mat[13], z = mat[14]
+            let fx = -mat[8], fy = -mat[9], fz = -mat[10]
+            const fl = Math.hypot(fx, fy, fz) || 1
+            fx /= fl; fy /= fl; fz /= fl
+
+            const last = motionRef.current
+            if (last.t > 0) {
+              const dt = Math.max(1e-3, (time - last.t) / 1000)
+              linearSpeed = Math.hypot(x - last.x, y - last.y, z - last.z) / dt
+              const dot = Math.max(-1, Math.min(1, fx * last.fx + fy * last.fy + fz * last.fz))
+              angularSpeed = Math.acos(dot) / dt
+            }
+
+            motionRef.current = { t: time, x, y, z, fx, fy, fz }
+
+            if (linearSpeed > MAX_LINEAR_SPEED || angularSpeed > MAX_ANGULAR_SPEED) {
+              continue
+            }
+            if (linearSpeed > 0.75 || angularSpeed > 2.1) {
+              samplesPerFrame = SAMPLES_PER_FRAME_FAST
+            }
+          }
+
           // Sample camera image for colors
           let hasCameraColor = false
+          let camData = null
+          let camStride = 0
           try {
             const cameraImage = frame.getCameraImage?.(view)
             if (cameraImage) {
               // Draw camera frame into the 2D canvas at reduced resolution
               camCtx.drawImage(cameraImage, 0, 0, camCanvas.width, camCanvas.height)
+              const imgData = camCtx.getImageData(0, 0, camCanvas.width, camCanvas.height)
+              camData = imgData.data
+              camStride = camCanvas.width * 4
               hasCameraColor = true
             }
           } catch { /* optional */ }
@@ -333,20 +374,43 @@ export default function LidarScanner({ onComplete, onCancel }) {
             const dw = depthInfo.width
             const dh = depthInfo.height
             // Random stratified sampling across the depth image
-            for (let s = 0; s < SAMPLES_PER_FRAME; s++) {
+            for (let s = 0; s < samplesPerFrame; s++) {
               const u = Math.random()
               const v = Math.random()
               const depth = depthInfo.getDepthInMeters(u, v)
               if (depth < MIN_DEPTH || depth > MAX_DEPTH) continue
 
-              const [wx, wy, wz] = unprojectDepthSample(u, v, depth, view)
+              let [wx, wy, wz] = unprojectDepthSample(u, v, depth, view)
+
+              const ix = Math.floor(wx / VOXEL_ALIGN_CELL)
+              const iy = Math.floor(wy / VOXEL_ALIGN_CELL)
+              const iz = Math.floor(wz / VOXEL_ALIGN_CELL)
+              const vKey = `${ix}:${iy}:${iz}`
+              const alignMap = alignMapRef.current
+              const prev = alignMap.get(vKey)
+              if (prev) {
+                const n = prev.n + 1
+                const cx = (prev.x * prev.n + wx) / n
+                const cy = (prev.y * prev.n + wy) / n
+                const cz = (prev.z * prev.n + wz) / n
+                alignMap.set(vKey, { x: cx, y: cy, z: cz, n })
+                const pull = Math.min(0.82, 0.36 + 0.11 * Math.log2(n + 1))
+                wx += (cx - wx) * pull
+                wy += (cy - wy) * pull
+                wz += (cz - wz) * pull
+              } else {
+                alignMap.set(vKey, { x: wx, y: wy, z: wz, n: 1 })
+              }
+              if (alignMap.size > 350000) alignMap.clear()
 
               let r = 0.4, g = 0.7, b = 1.0  // default blue-ish
-              if (hasCameraColor) {
+              if (hasCameraColor && camData) {
                 const px = Math.min(camCanvas.width  - 1, Math.round(u * camCanvas.width))
                 const py = Math.min(camCanvas.height - 1, Math.round(v * camCanvas.height))
-                const d = camCtx.getImageData(px, py, 1, 1).data
-                r = d[0] / 255; g = d[1] / 255; b = d[2] / 255
+                const i4 = py * camStride + px * 4
+                r = camData[i4] / 255
+                g = camData[i4 + 1] / 255
+                b = camData[i4 + 2] / 255
               }
 
               bufferRef.current.addPoint(wx, wy, wz, r, g, b)
@@ -364,8 +428,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
         // Update UI every ~30 points to avoid too-frequent renders
         if (count % 300 === 0) {
           setPointCount(count)
-          // Rough progress based on expected room coverage (~100k points = 100%)
-          setProgress(Math.min(99, Math.round((count / 100_000) * 100)))
+          // Rough progress based on denser target coverage (~250k points = 100%).
+          setProgress(Math.min(99, Math.round((count / 250_000) * 100)))
         }
 
         rafRef.current = session.requestAnimationFrame(onXRFrame)
