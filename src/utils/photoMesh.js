@@ -109,7 +109,7 @@ const VISIBILITY_TARGET_SAMPLES = 1_800_000
 const VISIBILITY_MAX_DIM = 768
 const VISIBILITY_REL_TOL = 0.015
 const VISIBILITY_ABS_TOL = 0.03
-const FUSION_MAX_CANDIDATES = 8
+const FUSION_MAX_CANDIDATES = 1
 const COLOR_GATE_L1 = 0.33
 const MIN_PROJECTION_SCORE = 0.16
 const VIEW_EDGE_SIGMA = 0.62
@@ -125,16 +125,6 @@ const CORNER_DISTANCE_SOFT = 0.24
 const STRUCTURE_NEAR_M = 0.12
 const STRUCTURE_FAR_M = 1.6
 const STRUCTURE_MIN_WEIGHT = 0.82
-
-// ─── Pose Refinement & Masking Constants ─────────────────────────────────
-const POSE_REFINEMENT_ITERATIONS = 3
-const POSE_REFINEMENT_LEARNING_RATE = 0.018
-const POSE_REFINEMENT_MIN_VISIBLE = 2000
-const DYNAMIC_OBJECT_EDGE_THRESHOLD = 0.12
-const DYNAMIC_OBJECT_COLOR_CLUSTER_MIN = 8
-const DYNAMIC_OBJECT_MIN_REGION = 120
-const FUSION_MIN_CONFIDENCE = 0.2
-const FUSION_CONFIDENCE_BLEND_FLOOR = 0.2
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -278,403 +268,6 @@ function consensusSupport(candidate, ranked) {
     if (disagreement <= CONSENSUS_COLOR_L1) support += other.score
   }
   return support
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// POSE REFINEMENT: Lightweight ICP-like optimization
-// ─────────────────────────────────────────────────────────────────────────
-function multiplyMatrices(a, b) {
-  const c = new Float32Array(16)
-  for (let i = 0; i < 4; i++) {
-    for (let j = 0; j < 4; j++) {
-      let sum = 0
-      for (let k = 0; k < 4; k++) {
-        sum += a[i + k * 4] * b[k + j * 4]
-      }
-      c[i + j * 4] = sum
-    }
-  }
-  return c
-}
-
-function transformPoint(t, p) {
-  const x = t[0] * p[0] + t[4] * p[1] + t[8] * p[2] + t[12]
-  const y = t[1] * p[0] + t[5] * p[1] + t[9] * p[2] + t[13]
-  const z = t[2] * p[0] + t[6] * p[1] + t[10] * p[2] + t[14]
-  return [x, y, z]
-}
-
-function poseDeltaFromResiduals(points, projections, camPos) {
-  // Estimate pose correction from depth residuals and gradient descent
-  // Using simplified Gauss-Newton: compute gradient of reprojection error w.r.t. pose params
-  let dTx = 0, dTy = 0, dTz = 0
-  let dRx = 0, dRy = 0, dRz = 0
-  const gradWeight = 0.0015
-
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i]
-    const proj = projections[i]
-    if (!proj || proj.residual <= 0) continue
-
-    const res = proj.residual * gradWeight
-    const toCam = [
-      camPos[0] - p[0],
-      camPos[1] - p[1],
-      camPos[2] - p[2],
-    ]
-    const dist = Math.hypot(toCam[0], toCam[1], toCam[2])
-    if (dist < 1e-6) continue
-    const dir = [toCam[0] / dist, toCam[1] / dist, toCam[2] / dist]
-
-    dTx += res * dir[0]
-    dTy += res * dir[1]
-    dTz += res * dir[2]
-
-    // Rotation gradient (simplified): perpendicular component
-    dRx += res * (p[1] * dir[2] - p[2] * dir[1])
-    dRy += res * (p[2] * dir[0] - p[0] * dir[2])
-    dRz += res * (p[0] * dir[1] - p[1] * dir[0])
-  }
-
-  return { dTx, dTy, dTz, dRx, dRy, dRz }
-}
-
-function applyPoseDelta(transform, delta) {
-  // Create small-angle rotation matrix from delta.dR{x,y,z}
-  const c = new Float32Array(transform)
-  const scale = POSE_REFINEMENT_LEARNING_RATE
-
-  // Translation update (direct)
-  c[12] += delta.dTx * scale
-  c[13] += delta.dTy * scale
-  c[14] += delta.dTz * scale
-
-  // Rotation update via Rodrigues formula (small angle)
-  const rx = delta.dRx * scale, ry = delta.dRy * scale, rz = delta.dRz * scale
-  const theta = Math.hypot(rx, ry, rz)
-  if (theta > 1e-6) {
-    const k = [rx / theta, ry / theta, rz / theta]
-    const c_theta = Math.cos(theta), s_theta = Math.sin(theta)
-    const K = [
-      [0, -k[2], k[1]],
-      [k[2], 0, -k[0]],
-      [-k[1], k[0], 0],
-    ]
-    for (let i = 0; i < 3; i++) {
-      for (let j = 0; j < 3; j++) {
-        const idx = i + j * 4
-        const R0 = c[idx]
-        let dR = 0
-        for (let l = 0; l < 3; l++) {
-          dR += (c_theta === 1 ? 0 : K[i][l]) * c[l + j * 4]
-        }
-        c[idx] = R0 + dR * 0.08
-      }
-    }
-  }
-
-  return c
-}
-
-async function refineSnapshotPoses(buf, snapshots, views, intrs, atlases) {
-  const D = buf._data
-  const n = buf.pointCount
-  const S = snapshots.length
-  const stride = Math.max(1, Math.ceil(n / 150000))
-
-  const refinedSnapshots = snapshots.map(s => ({ ...s }))
-  const refinedViews = views.map(v => new Float32Array(v))
-
-  for (let iter = 0; iter < POSE_REFINEMENT_ITERATIONS; iter++) {
-    const deltas = []
-    for (let si = 0; si < S; si++) {
-      const visible = []
-      const projections = []
-      const camPos = [refinedSnapshots[si].transform[12], refinedSnapshots[si].transform[13], refinedSnapshots[si].transform[14]]
-
-      for (let i = 0; i < n; i += stride) {
-        if (i > 0 && i % 300000 === 0) await new Promise(r => setTimeout(r, 0))
-
-        const b = i * 6
-        const p = [D[b], D[b + 1], D[b + 2]]
-        const proj = projectToSnapshot(p[0], p[1], p[2], refinedViews[si], intrs[si])
-        if (!proj) continue
-
-        const atlas = atlases[si]
-        const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
-        const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
-        const depthRef = atlas.depth[ay * atlas.width + ax]
-        const residual = Math.max(0, proj.depth - depthRef)
-
-        visible.push(p)
-        projections.push({ ...proj, residual })
-      }
-
-      if (visible.length >= POSE_REFINEMENT_MIN_VISIBLE) {
-        const delta = poseDeltaFromResiduals(visible, projections, camPos)
-        deltas.push({ si, delta })
-      }
-    }
-
-    for (const { si, delta } of deltas) {
-      const updatedTrans = applyPoseDelta(refinedSnapshots[si].transform, delta)
-      refinedSnapshots[si].transform = updatedTrans
-      refinedViews[si] = invertRigid(updatedTrans)
-    }
-  }
-
-  return { snapshots: refinedSnapshots, views: refinedViews }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// DYNAMIC OBJECT MASKING: Detect and mask furniture/clutter
-// ─────────────────────────────────────────────────────────────────────────
-function computeEdgeMap(pixData, width, height) {
-  const edges = new Float32Array(width * height)
-  const kernel = [-1, -2, -1, 0, 0, 0, 1, 2, 1]
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      let gx = 0, gy = 0
-      for (let ky = -1; ky <= 1; ky++) {
-        for (let kx = -1; kx <= 1; kx++) {
-          const idx = ((y + ky) * width + (x + kx)) * 4
-          const lum = 0.299 * pixData[idx] + 0.587 * pixData[idx + 1] + 0.114 * pixData[idx + 2]
-          const k = kernel[(ky + 1) * 3 + (kx + 1)]
-          gx += k * lum
-          gy += kernel[(kx + 1) * 3 + (ky + 1)] * lum
-        }
-      }
-      edges[y * width + x] = Math.hypot(gx, gy) / 256
-    }
-  }
-  return edges
-}
-
-function detectDynamicObjectMask(pixData, width, height) {
-  const mask = new Uint8Array(width * height).fill(255)
-  const edges = computeEdgeMap(pixData, width, height)
-
-  // High-edge regions = likely furniture/objects
-  const edgeThreshold = DYNAMIC_OBJECT_EDGE_THRESHOLD
-  let labelMap = new Int32Array(width * height).fill(-1)
-  let labelCount = 0
-
-  // Connected component labeling on high-edge pixels
-  for (let i = 0; i < edges.length; i++) {
-    if (edges[i] > edgeThreshold && labelMap[i] === -1) {
-      const stack = [i]
-      const label = labelCount++
-      let regionSize = 0
-
-      while (stack.length > 0) {
-        const idx = stack.pop()
-        if (labelMap[idx] !== -1) continue
-        labelMap[idx] = label
-        regionSize++
-
-        const y = (idx / width) | 0
-        const x = idx % width
-        const neighbors = [
-          idx - width,
-          idx + width,
-          idx - 1,
-          idx + 1,
-        ]
-        for (const n of neighbors) {
-          if (n >= 0 && n < edges.length && labelMap[n] === -1 && edges[n] > edgeThreshold) {
-            stack.push(n)
-          }
-        }
-      }
-
-      // Mark small regions as dynamic objects
-      if (regionSize < DYNAMIC_OBJECT_MIN_REGION) {
-        for (let i = 0; i < labelMap.length; i++) {
-          if (labelMap[i] === label) mask[i] = 0
-        }
-      }
-    }
-  }
-
-  // Dilate mask slightly to catch edges
-  const dilated = new Uint8Array(mask)
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x
-      if (mask[idx] === 0) {
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            dilated[(y + dy) * width + (x + dx)] = 0
-          }
-        }
-      }
-    }
-  }
-
-  return dilated
-}
-
-function bilinearSampleRGBAMasked(pix, width, height, u, v, mask = null) {
-  const x = Math.max(0, Math.min(width - 1, u))
-  const y = Math.max(0, Math.min(height - 1, v))
-  const x0 = x | 0
-  const y0 = y | 0
-  const x1 = Math.min(width - 1, x0 + 1)
-  const y1 = Math.min(height - 1, y0 + 1)
-
-  // If mask present and any sample point is masked, return null
-  if (mask) {
-    if (mask[y0 * width + x0] === 0 || mask[y0 * width + x1] === 0 ||
-        mask[y1 * width + x0] === 0 || mask[y1 * width + x1] === 0) {
-      return null
-    }
-  }
-
-  const tx = x - x0
-  const ty = y - y0
-  const i00 = (y0 * width + x0) * 4
-  const i10 = (y0 * width + x1) * 4
-  const i01 = (y1 * width + x0) * 4
-  const i11 = (y1 * width + x1) * 4
-
-  const w00 = (1 - tx) * (1 - ty)
-  const w10 = tx * (1 - ty)
-  const w01 = (1 - tx) * ty
-  const w11 = tx * ty
-
-  return [
-    (pix[i00] * w00 + pix[i10] * w10 + pix[i01] * w01 + pix[i11] * w11) / 255,
-    (pix[i00 + 1] * w00 + pix[i10 + 1] * w10 + pix[i01 + 1] * w01 + pix[i11] * w11) / 255,
-    (pix[i00 + 2] * w00 + pix[i10 + 2] * w10 + pix[i01 + 2] * w01 + pix[i11] * w11) / 255,
-  ]
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// ROBUST FUSION: Lab color space median + confidence scoring
-// ─────────────────────────────────────────────────────────────────────────
-function rgbToLab(r, g, b) {
-  // sRGB to linear
-  const rl = r <= 0.04045 ? r / 12.92 : Math.pow((r + 0.055) / 1.055, 2.4)
-  const gl = g <= 0.04045 ? g / 12.92 : Math.pow((g + 0.055) / 1.055, 2.4)
-  const bl = b <= 0.04045 ? b / 12.92 : Math.pow((b + 0.055) / 1.055, 2.4)
-
-  // Linear RGB to XYZ
-  const x = rl * 0.4124 + gl * 0.3576 + bl * 0.1805
-  const y = rl * 0.2126 + gl * 0.7152 + bl * 0.0722
-  const z = rl * 0.0193 + gl * 0.1192 + bl * 0.9505
-
-  // XYZ to Lab
-  const ref = [0.95047, 1.0, 1.08883]
-  const fx = x / ref[0]
-  const fy = y / ref[1]
-  const fz = z / ref[2]
-
-  const delta = 6 / 29
-  const f = (t) => t > delta * delta * delta ? Math.cbrt(t) : (t / (3 * delta * delta) + 4 / 29)
-
-  const L = 116 * f(fy) - 16
-  const a = 500 * (f(fx) - f(fy))
-  const b_comp = 200 * (f(fy) - f(fz))
-
-  return [L / 100, (a + 128) / 256, (b_comp + 128) / 256]
-}
-
-function labToRgb(l, a, b) {
-  // Lab to XYZ
-  const L = l * 100
-  const a_val = a * 256 - 128
-  const b_val = b * 256 - 128
-
-  const delta = 6 / 29
-  const fy = (L + 16) / 116
-  const fx = a_val / 500 + fy
-  const fz = fy - b_val / 200
-
-  const f_inv = (t) => t > delta ? t * t * t : 3 * delta * delta * (t - 4 / 29)
-
-  const ref = [0.95047, 1.0, 1.08883]
-  const x = f_inv(fx) * ref[0]
-  const y = f_inv(fy) * ref[1]
-  const z = f_inv(fz) * ref[2]
-
-  // XYZ to linear RGB
-  const rl = x * 3.2406 + y * -1.5372 + z * -0.4986
-  const gl = x * -0.9689 + y * 1.8758 + z * 0.0415
-  const bl = x * 0.0557 + y * -0.2040 + z * 1.0570
-
-  // Linear to sRGB
-  const r = rl <= 0.0031308 ? 12.92 * rl : 1.055 * Math.pow(rl, 1 / 2.4) - 0.055
-  const g = gl <= 0.0031308 ? 12.92 * gl : 1.055 * Math.pow(gl, 1 / 2.4) - 0.055
-  const b_out = bl <= 0.0031308 ? 12.92 * bl : 1.055 * Math.pow(bl, 1 / 2.4) - 0.055
-
-  return [
-    Math.max(0, Math.min(1, r)),
-    Math.max(0, Math.min(1, g)),
-    Math.max(0, Math.min(1, b_out)),
-  ]
-}
-
-function robustWeightedMedianLab(candidates) {
-  if (!candidates?.length) return null
-  if (candidates.length === 1) {
-    return { color: candidates[0].color, confidence: candidates[0].score }
-  }
-
-  // Convert to Lab + score weights
-  const labs = candidates.map((c, i) => ({
-    lab: rgbToLab(c.color[0], c.color[1], c.color[2]),
-    weight: c.score * c.score,
-    score: c.score,
-    index: i,
-  }))
-
-  // Weighted median in Lab space
-  const totalWeight = labs.reduce((s, c) => s + c.weight, 0)
-  if (totalWeight === 0) return { color: candidates[0].color, confidence: 0.3 }
-
-  // Find weighted median for each channel
-  const medianLab = [0, 0, 0]
-  for (let ch = 0; ch < 3; ch++) {
-    const sorted = [...labs].sort((a, b) => a.lab[ch] - b.lab[ch])
-    let cumWeight = 0
-    for (const c of sorted) {
-      cumWeight += c.weight
-      if (cumWeight >= totalWeight * 0.5) {
-        medianLab[ch] = c.lab[ch]
-        break
-      }
-    }
-  }
-
-  // Convert back to RGB
-  const medianRgb = labToRgb(medianLab[0], medianLab[1], medianLab[2])
-
-  // Confidence: agreement of top candidates
-  const topScore = labs[0].score
-  let agreement = 0
-  for (const c of labs) {
-    if (c.score >= topScore * 0.85) {
-      const labDist =
-        Math.abs(c.lab[0] - medianLab[0]) * 0.5 +
-        Math.abs(c.lab[1] - medianLab[1]) * 0.25 +
-        Math.abs(c.lab[2] - medianLab[2]) * 0.25
-      agreement += Math.exp(-labDist * 2) * c.weight
-    }
-  }
-
-  const confidence = Math.min(1, agreement / (totalWeight + 1e-6))
-  return { color: medianRgb, confidence }
-}
-
-function blendColorRGB(a, b, t) {
-  const w = Math.max(0, Math.min(1, t))
-  const iw = 1 - w
-  return [
-    a[0] * iw + b[0] * w,
-    a[1] * iw + b[1] * w,
-    a[2] * iw + b[2] * w,
-  ]
 }
 
 function getVisibilityAtlasSize(width, height, maxDim = VISIBILITY_MAX_DIM) {
@@ -876,42 +469,16 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   // ── Per-point colour replacement ──────────────────────────────────────────
   const D         = buf._data               // zero-copy raw Float32Array
   const newColors = new Float32Array(n * 3)
-  const confidenceMap = new Float32Array(n).fill(0) // Confidence scoring for each point
   const YIELD_EVERY = 200_000               // yield to browser every 200 K pts
 
   // ── Precompute per-snapshot data ──────────────────────────────────────────
   // views[si]  = column-major 4×4 world→camera matrix (inverse of cam→world)
   // intrs[si]  = [fx, fy, cx, cy, imgW, imgH]
-  let views = snapshots.map(s => invertRigid(s.transform))
-  let refinedSnapshots = snapshots
-  let camPositions = snapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
+  const views = snapshots.map(s => invertRigid(s.transform))
+  const camPositions = snapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
-  
-  // ── Build initial atlases for pose refinement ──────────────────────────
-  let atlases = await buildVisibilityAtlases(buf, views, intrs)
-
-  // ── STRATEGY 1: Refine snapshot poses for better corner alignment ───────
-  try {
-    const poseRefinement = await refineSnapshotPoses(buf, snapshots, views, intrs, atlases)
-    refinedSnapshots = poseRefinement.snapshots
-    views = poseRefinement.views
-    camPositions = refinedSnapshots.map(s => [s.transform[12], s.transform[13], s.transform[14]])
-    atlases = await buildVisibilityAtlases(buf, views, intrs)
-  } catch (err) {
-    console.warn('[photoMesh] Pose refinement failed, using original poses:', err)
-  }
-
+  const atlases = await buildVisibilityAtlases(buf, views, intrs)
   const roomFrame = estimateRoomFrame(buf)
-
-  // ── STRATEGY 2: Build dynamic object masks for each snapshot ─────────────
-  const dynamicMasks = pixMaps.map((pm, si) => {
-    try {
-      return detectDynamicObjectMask(pm.data, pm.width, pm.height)
-    } catch (err) {
-      console.warn(`[photoMesh] Dynamic masking failed for snapshot ${si}`)
-      return null
-    }
-  })
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -928,12 +495,9 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     ambiguousRejected: 0,
     planeRejected: 0,
     structureDownWeighted: 0,
-    robustFusionPoints: 0,
-    maskedRejected: 0,
-    lowConfidenceFallback: 0,
   } : null
 
-  // ── STRATEGY 3: Per-point robust fusion with multiple candidates in Lab space ────
+  // Per-point single-view assignment with ambiguity rejection.
   for (let i = 0; i < n; i++) {
     if (i > 0 && i % YIELD_EVERY === 0) {
       await new Promise(r => setTimeout(r, 0))
@@ -944,7 +508,9 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     const or = D[b+3], og = D[b+4], ob = D[b+5]   // depth-sensor fallback colour
     const plane = classifyPlaneNormal(wx, wy, wz, roomFrame)
 
-    const candidates = []
+    let best = null
+    let second = null
+    const ranked = []
 
     for (let si = 0; si < S; si++) {
       let proj
@@ -1008,59 +574,54 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         continue
       }
 
-      // ─ STRATEGY 2 continued: Apply dynamic mask if available ──────────────
       const px = pixMaps[si]
-      const mask = dynamicMasks[si]
-      let color = bilinearSampleRGBAMasked(px.data, px.width, px.height, proj.u, proj.v, mask)
-      
-      if (color === null) {
-        // Masked out by dynamic object detection
-        if (stats) stats.maskedRejected++
-        continue
-      }
-
+      const color = bilinearSampleRGBA(px.data, px.width, px.height, proj.u, proj.v)
       const candidate = { si, score: weightedScore, depthResidual, proj, color }
-      updateBestCandidates(candidates, candidate, FUSION_MAX_CANDIDATES)
+      insertTopByScore(ranked, candidate)
+
+      if (!best || candidate.score > best.score || (Math.abs(candidate.score - best.score) < 1e-9 && candidate.depthResidual < best.depthResidual)) {
+        second = best
+        best = candidate
+      } else if (!second || candidate.score > second.score || (Math.abs(candidate.score - second.score) < 1e-9 && candidate.depthResidual < second.depthResidual)) {
+        second = candidate
+      }
     }
 
-    if (candidates.length > 0) {
-      // ─ STRATEGY 3: Robust weighted median fusion in Lab color space ───────
-      const fusion = robustWeightedMedianLab(candidates)
-      if (fusion) {
-        if (fusion.confidence < FUSION_MIN_CONFIDENCE) {
+    if (best) {
+      const bestConsensus = consensusSupport(best, ranked)
+      const bestConsensusRel = bestConsensus / (best.score + 1e-6)
+      // If two views are similarly plausible but disagree in colour, projection is ambiguous.
+      // Keep fallback colour here to avoid duplicate/ghost overlays.
+      if (second) {
+        const secondConsensus = consensusSupport(second, ranked)
+        const ratio = second.score / (best.score + 1e-6)
+        const ratioGate = Math.max(0.9, AMBIGUITY_SCORE_RATIO - Math.min(0.05, bestConsensusRel * 0.03))
+        const disagreement =
+          Math.abs(best.color[0] - second.color[0]) +
+          Math.abs(best.color[1] - second.color[1]) +
+          Math.abs(best.color[2] - second.color[2])
+        const consensusDelta = (bestConsensus - secondConsensus) / (best.score + second.score + 1e-6)
+        const canRelieveByConsensus = consensusDelta >= CONSENSUS_AMBIGUITY_RELIEF
+        if (ratio >= ratioGate && disagreement >= AMBIGUITY_COLOR_L1 && !canRelieveByConsensus) {
           newColors[i*3] = or
           newColors[i*3+1] = og
           newColors[i*3+2] = ob
           if (stats) {
+            stats.ambiguousRejected++
             stats.fallback++
-            stats.lowConfidenceFallback++
           }
-        } else {
-          const blended = blendColorRGB(
-            [or, og, ob],
-            fusion.color,
-            FUSION_CONFIDENCE_BLEND_FLOOR + (1 - FUSION_CONFIDENCE_BLEND_FLOOR) * fusion.confidence,
-          )
-          newColors[i*3] = blended[0]
-          newColors[i*3+1] = blended[1]
-          newColors[i*3+2] = blended[2]
-          confidenceMap[i] = fusion.confidence
-          if (stats) {
-            stats.accepted++
-            stats.multiView += candidates.length > 1 ? 1 : 0
-            stats.singleView += candidates.length === 1 ? 1 : 0
-            if (candidates.length > 1) stats.robustFusionPoints++
-          }
+          continue
         }
-      } else {
-        // Fallback if fusion fails
-        newColors[i*3] = or
-        newColors[i*3+1] = og
-        newColors[i*3+2] = ob
-        if (stats) stats.fallback++
+      }
+
+      newColors[i*3] = best.color[0]
+      newColors[i*3+1] = best.color[1]
+      newColors[i*3+2] = best.color[2]
+      if (stats) {
+        stats.accepted++
+        stats.singleView++
       }
     } else {
-      // No valid candidates
       newColors[i*3] = or
       newColors[i*3+1] = og
       newColors[i*3+2] = ob
@@ -1087,9 +648,6 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       ambiguousRejected: stats.ambiguousRejected,
       planeRejected: stats.planeRejected,
       structureDownWeighted: stats.structureDownWeighted,
-      robustFusionPoints: stats.robustFusionPoints,
-      maskedRejected: stats.maskedRejected,
-      lowConfidenceFallback: stats.lowConfidenceFallback,
     })
   }
 
