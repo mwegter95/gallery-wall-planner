@@ -1405,12 +1405,19 @@ kbd {
 }
 
 .ws-svg {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
+  display: block;
   border-radius: 8px;
   overflow: visible;
+  pointer-events: auto;
+  /* inline via style attribute on element — position kept relative via JSX */
+}
+
+.ws-lidar-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-lt, #22d3ee);
+  margin-left: 4px;
+  opacity: 0.85;
 }
 
 /* Draggable corner handles — small dots */

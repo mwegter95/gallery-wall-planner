@@ -11,6 +11,7 @@ import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, sliderToRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
+import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -859,8 +860,9 @@ export default function SpaceBuilderCanvas({
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
-        const voxelCounts = new Map()
-        const voxelKeys   = new Int32Array(n)
+        const voxelCounts    = new Map()
+        const voxelColorSums = new Map()  // key → [rSum, gSum, bSum]
+        const voxelKeys      = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
         let   minZ = Infinity, maxZ = -Infinity
@@ -877,6 +879,12 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
+
+          // Accumulate colour sums for per-voxel averaging
+          const cs = voxelColorSums.get(key)
+          const rv = rawData[b+3], gv = rawData[b+4], bv = rawData[b+5]
+          if (cs) { cs[0] += rv; cs[1] += gv; cs[2] += bv }
+          else    voxelColorSums.set(key, [rv, gv, bv])
 
           if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
             reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
@@ -937,10 +945,18 @@ export default function SpaceBuilderCanvas({
           positions[vi*3]   = sx
           positions[vi*3+1] = sy + yOffset
           positions[vi*3+2] = sz
-          colors[vi*3]      = rawData[b+3]
-          colors[vi*3+1]    = rawData[b+4]
-          colors[vi*3+2]    = rawData[b+5]
-          splatScales[vi] = 1.0
+
+          // Use per-voxel averaged colour for smoother, less noisy appearance
+          const cs  = voxelColorSums.get(key)
+          const inv = cs ? 1 / cnt : 1
+          colors[vi*3]   = cs ? cs[0] * inv : rawData[b+3]
+          colors[vi*3+1] = cs ? cs[1] * inv : rawData[b+4]
+          colors[vi*3+2] = cs ? cs[2] * inv : rawData[b+5]
+
+          // Gentle adaptive splat scale: dense voxels shrink slightly so fine
+          // detail stays sharp; sparse voxels grow slightly to fill gaps.
+          // Narrow range (0.88–1.14) avoids the lattice artifact seen with wider ranges.
+          splatScales[vi] = cnt >= 8 ? 0.88 : cnt <= 2 ? 1.14 : 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0
@@ -1449,7 +1465,14 @@ export default function SpaceBuilderCanvas({
             // Force a render so the canvas buffer is fresh
             t.renderer.render(t.scene, t.camera)
             const dataUrl = t.renderer.domElement.toDataURL('image/jpeg', 0.88)
-            onSurfaceFromView(dataUrl)
+            // Capture camera matrices for LiDAR-based dimension measurement in WallSetup
+            const cam = t.camera
+            onSurfaceFromView(dataUrl, {
+              fov: fov,
+              projectionMatrixElements: Array.from(cam.projectionMatrix.elements),
+              viewMatrixElements:       Array.from(cam.matrixWorldInverse.elements),
+              yOffset:                  yOffsetRef.current ?? 0,
+            })
           }}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -1467,10 +1490,7 @@ export default function SpaceBuilderCanvas({
 // ── 2D crop-corner editor (overlay on top of 3D canvas) ──────────────────────
 // Each corner's handle is offset diagonally outward so the finger/cursor
 // never obscures the exact point being controlled.
-const HANDLE_OFFSET = 28   // SVG-viewBox units (offset from actual corner)
-const HANDLE_PAD    = HANDLE_OFFSET + 15  // = 43 — padding on all sides of viewBox so handles never leave SVG bounds
-const HANDLE_DIR    = { tl: [-1,-1], tr: [1,-1], br: [1,1], bl: [-1,1] }
-const HANDLE_COLORS = { tl:'#f97316', tr:'#22d3ee', br:'#a78bfa', bl:'#34d399' }
+// HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS imported from ../utils/warpHandles
 
 function CropOverlay({ surfaceId, space, onUpdateSurface, onClose }) {
   const surface = space.surfaces.find(s => s.id === surfaceId)

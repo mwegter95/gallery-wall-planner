@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { BASE as API_BASE } from '../utils/api'
 import { inToCmInt, cmToIn } from '../utils/units'
+import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS, WARP_SVG_W, computeLidarDims } from '../utils/warpHandles'
 
 const DEFAULT_CORNERS = [
   [0.05, 0.05],   // TL
@@ -117,14 +118,15 @@ async function anyImageToJpeg(file) {
 }
 
 
-export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 120, wallHeight = 96, existingImageUrl = null, unitSystem = 'imperial' }) {
-  const imgRef            = useRef(null)
+export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWidth = 120, wallHeight = 96, existingImageUrl = null, unitSystem = 'imperial', cameraData = null, pointCloud = null }) {
+  const svgRef            = useRef(null)
   const fileInputRef      = useRef(null)
   const photoWrapRef      = useRef(null)
-  const [rawPhoto,        setRawPhoto]        = useState(existingImageUrl)   // data URL or existing URL
+  const [rawPhoto,        setRawPhoto]        = useState(existingImageUrl)
   const [loadingPhoto,    setLoadingPhoto]    = useState(false)
   const [photoError,      setPhotoError]      = useState('')
-  const [imgSize,         setImgSize]         = useState({ w: 0, h: 0 })
+  const [imgNaturalSize,  setImgNaturalSize]  = useState({ w: 0, h: 0 })
+  const [lidarMeasured,   setLidarMeasured]   = useState(false)
   const [corners,         setCorners]         = useState(DEFAULT_CORNERS)
   const [progress,        setProgress]        = useState(0)
   const [isProcessing,    setIsProcessing]    = useState(false)
@@ -171,54 +173,64 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
     }
   }, [])
 
-  /* ── Measure the displayed image (re-runs when rawPhoto changes) ── */
+  /* ── Natural image dimensions (drive SVG viewBox height) ── */
   useEffect(() => {
-    if (!rawPhoto) return
-    const measure = () => {
-      if (!imgRef.current) return
-      setImgSize({ w: imgRef.current.offsetWidth, h: imgRef.current.offsetHeight })
-    }
-    // Small delay so the img element has been rendered into the DOM
-    const raf = requestAnimationFrame(() => {
-      const img = imgRef.current
-      if (!img) return
-      if (img.complete && img.naturalWidth) measure()
-      else img.addEventListener('load', measure)
-      const ro = new ResizeObserver(measure)
-      ro.observe(img)
-      return () => { img.removeEventListener('load', measure); ro.disconnect() }
-    })
-    return () => cancelAnimationFrame(raf)
+    if (!rawPhoto) { setImgNaturalSize({ w: 0, h: 0 }); return }
+    const img = new Image()
+    img.onload = () => setImgNaturalSize({ w: img.naturalWidth, h: img.naturalHeight })
+    img.src = rawPhoto
   }, [rawPhoto])
 
-  /* ── Shared corner-move logic ───────────────────────── */
-  const moveCorner = useCallback((clientX, clientY, idx) => {
-    if (!imgRef.current) return
-    const rect = imgRef.current.getBoundingClientRect()
-    const nx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    const ny = Math.max(0, Math.min(1, (clientY - rect.top)  / rect.height))
-    setCorners(c => c.map((pt, i) => i === idx ? [nx, ny] : pt))
-  }, [])
+  /* ── LiDAR-based live dimension update ──────────────── */
+  useEffect(() => {
+    if (!cameraData || !pointCloud || pointCloud._len === 0 || !rawPhoto) return
+    const tid = setTimeout(() => {
+      const dims = computeLidarDims(corners, cameraData, pointCloud)
+      if (dims) {
+        if (unitSystem === 'metric') {
+          setEditWidth(inToCmInt(dims.widthIn))
+          setEditHeight(inToCmInt(dims.heightIn))
+        } else {
+          setEditWidth(dims.widthIn)
+          setEditHeight(dims.heightIn)
+        }
+        setLidarMeasured(true)
+      }
+    }, 120)
+    return () => clearTimeout(tid)
+  }, [corners, cameraData, pointCloud, rawPhoto, unitSystem])
 
-  /* ── Drag a corner handle (mouse) ───────────────────── */
-  const handleMouseDown = useCallback((e, idx) => {
-    if (e.button !== 0) return
+  /* ── SVG pointer-capture drag ───────────────────────── */
+  const startDrag = useCallback((idx, e) => {
     e.stopPropagation(); e.preventDefault()
-    const move = (ev) => moveCorner(ev.clientX, ev.clientY, idx)
-    const up   = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
-  }, [moveCorner])
-
-  /* ── Drag a corner handle (touch) ───────────────────── */
-  const handleTouchStart = useCallback((e, idx) => {
-    if (e.touches.length !== 1) return
-    e.stopPropagation(); e.preventDefault()
-    const move = (ev) => { ev.preventDefault(); if (ev.touches[0]) moveCorner(ev.touches[0].clientX, ev.touches[0].clientY, idx) }
-    const up   = () => { window.removeEventListener('touchmove', move); window.removeEventListener('touchend', up) }
-    window.addEventListener('touchmove', move, { passive: false })
-    window.addEventListener('touchend',  up,   { passive: true })
-  }, [moveCorner])
+    const captureEl = e.currentTarget
+    captureEl.setPointerCapture(e.pointerId)
+    const k = ['tl','tr','br','bl'][idx]
+    const [ddx, ddy] = HANDLE_DIR[k]
+    const ox = ddx * HANDLE_OFFSET
+    const oy = ddy * HANDLE_OFFSET
+    const svgH = imgNaturalSize.h > 0 ? Math.round(WARP_SVG_W * imgNaturalSize.h / imgNaturalSize.w) : 360
+    const onMove = (ev) => {
+      const svg = svgRef.current
+      if (!svg) return
+      const svgPt = svg.createSVGPoint()
+      svgPt.x = ev.clientX; svgPt.y = ev.clientY
+      const sp = svgPt.matrixTransform(svg.getScreenCTM().inverse())
+      setCorners(prev => prev.map((c, i) => i === idx
+        ? [Math.max(0, Math.min(1, (sp.x - ox) / WARP_SVG_W)),
+           Math.max(0, Math.min(1, (sp.y - oy) / svgH))]
+        : c
+      ))
+    }
+    const onUp = () => {
+      captureEl.removeEventListener('pointermove',   onMove)
+      captureEl.removeEventListener('pointerup',     onUp)
+      captureEl.removeEventListener('pointercancel', onUp)
+    }
+    captureEl.addEventListener('pointermove',   onMove)
+    captureEl.addEventListener('pointerup',     onUp)
+    captureEl.addEventListener('pointercancel', onUp)
+  }, [imgNaturalSize])
 
   /* ── Apply the perspective warp ─────────────────────── */
   const handleApply = useCallback(async () => {
@@ -281,21 +293,24 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
     }
   }, [corners, rawPhoto, wallWidth, wallHeight])
 
+  /* ── SVG coordinate space ───────────────────────────── */
+  const SVG_H = imgNaturalSize.h > 0 ? Math.round(WARP_SVG_W * imgNaturalSize.h / imgNaturalSize.w) : 360
+
   /* ── Compute SVG polygon from current handles ──────── */
   const polyPoints = corners
-    .map(([nx, ny]) => `${nx * imgSize.w},${ny * imgSize.h}`)
+    .map(([nx, ny]) => `${nx * WARP_SVG_W},${ny * SVG_H}`)
     .join(' ')
 
   // Edge midpoints for labels
   const edgeLabels = [
     {
-      x: ((corners[0][0] + corners[1][0]) / 2) * imgSize.w,
-      y: ((corners[0][1] + corners[1][1]) / 2) * imgSize.h - 14,
+      x: ((corners[0][0] + corners[1][0]) / 2) * WARP_SVG_W,
+      y: ((corners[0][1] + corners[1][1]) / 2) * SVG_H - 14,
       text: unitSystem === 'metric' ? `← ${editWidth} cm →` : `← ${editWidth}" →`,
     },
     {
-      x: ((corners[1][0] + corners[2][0]) / 2) * imgSize.w + 14,
-      y: ((corners[1][1] + corners[2][1]) / 2) * imgSize.h,
+      x: ((corners[1][0] + corners[2][0]) / 2) * WARP_SVG_W + 14,
+      y: ((corners[1][1] + corners[2][1]) / 2) * SVG_H,
       text: unitSystem === 'metric' ? `${editHeight} cm` : `${editHeight}"`,
     },
   ]
@@ -370,81 +385,123 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
         <div className="ws-body">
           {!showPreview ? (
             /* ── Corner picker ── */
-              <div className="ws-photo-wrap" ref={photoWrapRef}>
-              <img
-                ref={imgRef}
-                src={rawPhoto}
-                className="ws-photo"
-                alt="Wall photo"
-                draggable={false}
-              />
+          <div className="ws-photo-wrap" ref={photoWrapRef}>
+            {imgNaturalSize.w > 0 && (
+              <svg
+                ref={svgRef}
+                viewBox={`${-HANDLE_PAD} ${-HANDLE_PAD} ${WARP_SVG_W + 2*HANDLE_PAD} ${SVG_H + 2*HANDLE_PAD}`}
+                className="ws-svg"
+                style={{
+                  display: 'block',
+                  position: 'relative',
+                  width: '100%',
+                  maxHeight: 'calc(96vh - 240px)',
+                  touchAction: 'none',
+                  aspectRatio: `${WARP_SVG_W + 2*HANDLE_PAD} / ${SVG_H + 2*HANDLE_PAD}`,
+                }}
+              >
+                <defs>
+                  <clipPath id="ws-photo-clip">
+                    <rect x="0" y="0" width={WARP_SVG_W} height={SVG_H} />
+                  </clipPath>
+                </defs>
 
-              {/* SVG quad overlay */}
-              {imgSize.w > 0 && (
-                <svg
-                  className="ws-svg"
-                  width={imgSize.w}
-                  height={imgSize.h}
-                >
-                  <polygon
-                    points={polyPoints}
-                    fill="rgba(124,111,247,0.10)"
-                    stroke="rgba(124,111,247,0.55)"
-                    strokeWidth="2"
-                    strokeDasharray="6 3"
-                  />
-                  {edgeLabels.map((el, i) => (
-                    <text
-                      key={i}
-                      x={el.x} y={el.y}
-                      textAnchor="middle"
-                      dominantBaseline="central"
-                      fill="rgba(255,255,255,0.8)"
-                      fontSize="13"
-                      fontWeight="600"
-                      stroke="rgba(0,0,0,0.6)"
-                      strokeWidth="3"
-                      paintOrder="stroke"
-                    >
-                      {el.text}
-                    </text>
-                  ))}
-                </svg>
-              )}
-
-              {/* Draggable corner handles — small dots */}
-              {imgSize.w > 0 && CORNER_META.map((meta, idx) => (
-                <div
-                  key={idx}
-                  className="ws-handle"
-                  data-label={meta.full}
-                  style={{
-                    left:            corners[idx][0] * imgSize.w,
-                    top:             corners[idx][1] * imgSize.h,
-                    backgroundColor: meta.color + '55',
-                    borderColor:     meta.color,
-                    boxShadow:       `0 0 0 2px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.5)`,
-                    touchAction:     'none',
-                  }}
-                  onMouseDown={(e) => handleMouseDown(e, idx)}
-                  onTouchStart={(e) => handleTouchStart(e, idx)}
-                  onContextMenu={(e) => e.preventDefault()}
+                {/* Photo */}
+                <image
+                  href={rawPhoto}
+                  x="0" y="0"
+                  width={WARP_SVG_W} height={SVG_H}
+                  preserveAspectRatio="xMidYMid meet"
+                  clipPath="url(#ws-photo-clip)"
                 />
-              ))}
 
-              {/* Progress bar while processing */}
-              {isProcessing && (
-                <div className="ws-progress-overlay">
-                  <div className="ws-progress-bar">
-                    <div className="ws-progress-fill" style={{ width: `${progress * 100}%` }} />
-                  </div>
-                  <span className="ws-progress-text">{statusMsg}</span>
+                {/* Selection polygon */}
+                <polygon
+                  points={polyPoints}
+                  fill="rgba(124,111,247,0.10)"
+                  stroke="rgba(124,111,247,0.55)"
+                  strokeWidth="2"
+                  strokeDasharray="6 3"
+                  clipPath="url(#ws-photo-clip)"
+                  style={{ pointerEvents: 'none' }}
+                />
+
+                {/* Edge labels */}
+                {edgeLabels.map((el, i) => (
+                  <text
+                    key={i}
+                    x={el.x} y={el.y}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="rgba(255,255,255,0.8)"
+                    fontSize="13"
+                    fontWeight="600"
+                    stroke="rgba(0,0,0,0.6)"
+                    strokeWidth="3"
+                    paintOrder="stroke"
+                    style={{ pointerEvents: 'none' }}
+                  >
+                    {el.text}
+                  </text>
+                ))}
+
+                {/* Corner handles — offset ring + dashed connector + crosshair */}
+                {CORNER_META.map((meta, idx) => {
+                  const k   = ['tl','tr','br','bl'][idx]
+                  const hx  = corners[idx][0] * WARP_SVG_W
+                  const hy  = corners[idx][1] * SVG_H
+                  const [ddx, ddy] = HANDLE_DIR[k]
+                  const hpx = hx + ddx * HANDLE_OFFSET
+                  const hpy = hy + ddy * HANDLE_OFFSET
+                  const CX  = 6
+                  const color = HANDLE_COLORS[k]
+                  return (
+                    <g key={k}>
+                      {/* Black backing on connector */}
+                      <line x1={hx} y1={hy} x2={hpx} y2={hpy}
+                        stroke="rgba(0,0,0,0.55)" strokeWidth="3"
+                        style={{ pointerEvents: 'none' }} />
+                      {/* Dashed coloured connector */}
+                      <line x1={hx} y1={hy} x2={hpx} y2={hpy}
+                        stroke={color} strokeWidth="1.5" strokeDasharray="4 3"
+                        style={{ pointerEvents: 'none' }} />
+                      {/* Crosshair at the exact corner */}
+                      <line x1={hx-CX} y1={hy} x2={hx+CX} y2={hy}
+                        stroke={color} strokeWidth="1.5" style={{ pointerEvents: 'none' }} />
+                      <line x1={hx} y1={hy-CX} x2={hx} y2={hy+CX}
+                        stroke={color} strokeWidth="1.5" style={{ pointerEvents: 'none' }} />
+                      {/* Draggable hollow ring */}
+                      <g onPointerDown={e => startDrag(idx, e)}
+                        style={{ cursor: 'grab', touchAction: 'none' }}>
+                        <circle cx={hpx} cy={hpy} r={26} fill="transparent" />
+                        <circle cx={hpx} cy={hpy} r={12}
+                          fill="rgba(0,0,0,0.35)" stroke={color} strokeWidth="2" />
+                        <text x={hpx} y={hpy}
+                          textAnchor="middle" dominantBaseline="central"
+                          fontSize="8" fill={color} fontWeight="800" opacity="0.9"
+                          style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                          {meta.label}
+                        </text>
+                      </g>
+                    </g>
+                  )
+                })}
+              </svg>
+            )}
+
+            {/* Progress bar while processing */}
+            {isProcessing && (
+              <div className="ws-progress-overlay">
+                <div className="ws-progress-bar">
+                  <div className="ws-progress-fill" style={{ width: `${progress * 100}%` }} />
                 </div>
-              )}
-              {errorMsg && !isProcessing && (
-                <div className="ws-error-banner">{errorMsg}</div>
-              )}
-            </div>
+                <span className="ws-progress-text">{statusMsg}</span>
+              </div>
+            )}
+            {errorMsg && !isProcessing && (
+              <div className="ws-error-banner">{errorMsg}</div>
+            )}
+          </div>
           ) : (
             /* ── Preview of warped result ── */
             <div className="ws-preview-wrap">
@@ -473,7 +530,11 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
           {/* Editable wall dimensions */}
           <div className="ws-dims-row">
-            <label className="ws-dims-label">Wall size ({unitSystem === 'metric' ? 'cm' : 'inches'}):</label>
+            <label className="ws-dims-label">
+              Wall size ({unitSystem === 'metric' ? 'cm' : 'inches'})
+              {lidarMeasured && <span className="ws-lidar-badge" title="Estimated from LiDAR scan geometry"> · from scan</span>}
+              :
+            </label>
             <div className="ws-dims-inputs">
               <input
                 className="ws-dim-input"
