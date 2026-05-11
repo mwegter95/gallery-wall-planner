@@ -128,6 +128,11 @@ const STRUCTURE_NEAR_M = 0.12
 const STRUCTURE_FAR_M = 1.6
 const STRUCTURE_MIN_WEIGHT = 0.82
 const MAX_DEPTH_RESIDUAL_REJECT = 0.06
+const PLANE_CELL_SIZE_M = 0.24
+const PLANE_PREF_MAX_SAMPLES = 450_000
+const PLANE_PREF_DOMINANCE_RATIO = 1.18
+const PLANE_PREF_MATCH_BONUS = 1.16
+const PLANE_PREF_MISMATCH_PENALTY = 0.72
 
 function estimateRoomFrame(buf) {
   const D = buf._data
@@ -238,7 +243,106 @@ function classifyPlaneNormal(wx, wy, wz, frame) {
   const cornerStrength =
     Math.max(0, Math.min(1, 1 - best / CORNER_DISTANCE_SOFT)) *
     Math.max(0, Math.min(1, 1 - second / CORNER_DISTANCE_SOFT))
-  return { normal: normals[bestIdx], confidence, bestDistance: best, secondDistance: second, cornerStrength }
+  let localU = 0
+  let localV = 0
+  if (bestIdx === 0 || bestIdx === 1) {
+    localU = u
+    localV = v
+  } else if (bestIdx === 2 || bestIdx === 3) {
+    localU = v
+    localV = wy
+  } else {
+    localU = u
+    localV = wy
+  }
+  return {
+    normal: normals[bestIdx],
+    confidence,
+    bestDistance: best,
+    secondDistance: second,
+    cornerStrength,
+    planeIndex: bestIdx,
+    localU,
+    localV,
+  }
+}
+
+function planeCellKey(plane, cellSize = PLANE_CELL_SIZE_M) {
+  if (!plane || !Number.isFinite(plane.localU) || !Number.isFinite(plane.localV)) return null
+  const qu = Math.round(plane.localU / cellSize)
+  const qv = Math.round(plane.localV / cellSize)
+  return `${plane.planeIndex}:${qu}:${qv}`
+}
+
+async function buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame, {
+  maxSamples = PLANE_PREF_MAX_SAMPLES,
+  yieldEvery = 120_000,
+} = {}) {
+  const n = buf.pointCount
+  const D = buf._data
+  const S = views.length
+  const stride = Math.max(1, Math.ceil(n / Math.max(1, maxSamples)))
+  const scoresByCell = new Map()
+
+  for (let i = 0; i < n; i += stride) {
+    if (i > 0 && i % yieldEvery === 0) await new Promise(r => setTimeout(r, 0))
+
+    const b = i * 6
+    const wx = D[b]
+    const wy = D[b + 1]
+    const wz = D[b + 2]
+    const plane = classifyPlaneNormal(wx, wy, wz, roomFrame)
+    if (!plane || plane.confidence < 0.35) continue
+    const key = planeCellKey(plane)
+    if (!key) continue
+
+    let cellScores = scoresByCell.get(key)
+    if (!cellScores) {
+      cellScores = new Float32Array(S)
+      scoresByCell.set(key, cellScores)
+    }
+
+    for (let si = 0; si < S; si++) {
+      const proj = projectToSnapshot(wx, wy, wz, views[si], intrs[si])
+      if (!proj) continue
+      const center = edgeCentralityWeight(intrs[si], proj.u, proj.v)
+      if (center.weight <= 0) continue
+
+      const atlas = atlases[si]
+      const ax = Math.min(atlas.width - 1, Math.max(0, proj.u * atlas.invW | 0))
+      const ay = Math.min(atlas.height - 1, Math.max(0, proj.v * atlas.invH | 0))
+      const depthRef = atlas.depth[ay * atlas.width + ax]
+      if (!isDepthVisible(proj.depth, depthRef, STRICT_VISIBILITY_REL_TOL, STRICT_VISIBILITY_ABS_TOL)) continue
+
+      const depthResidual = Math.max(0, proj.depth - depthRef)
+      if (depthResidual > MAX_DEPTH_RESIDUAL_REJECT) continue
+
+      // Build a stable dominant-view map in plane-local cells.
+      cellScores[si] += proj.score * center.weight * (1 / (1 + 6 * depthResidual))
+    }
+  }
+
+  const preferredByCell = new Map()
+  for (const [key, scores] of scoresByCell.entries()) {
+    let bestSi = -1
+    let bestScore = 0
+    let secondScore = 0
+    for (let si = 0; si < scores.length; si++) {
+      const s = scores[si]
+      if (s > bestScore) {
+        secondScore = bestScore
+        bestScore = s
+        bestSi = si
+      } else if (s > secondScore) {
+        secondScore = s
+      }
+    }
+    if (bestSi >= 0 && bestScore > 0 && bestScore >= secondScore * PLANE_PREF_DOMINANCE_RATIO) {
+      preferredByCell.set(key, bestSi)
+    }
+  }
+
+  return preferredByCell
 }
 
 function structureWeightFromDistance(distanceToEnvelope) {
@@ -482,6 +586,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
   const intrs = snapshots.map((s, index) => normalizeIntrinsicsForImage(s.intrinsics, pixMaps[index].width, pixMaps[index].height))
   const atlases = await buildVisibilityAtlases(buf, views, intrs)
   const roomFrame = estimateRoomFrame(buf)
+  const preferredSnapshotByPlaneCell = await buildPlaneCellSnapshotPreference(buf, views, intrs, atlases, roomFrame)
 
   const stats = options?.onDiagnostics ? {
     points: n,
@@ -499,6 +604,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
     planeRejected: 0,
     structureDownWeighted: 0,
     depthResidualRejected: 0,
+    planeCellPenaltyApplied: 0,
   } : null
 
   // Per-point single-view assignment with ambiguity rejection.
@@ -574,7 +680,19 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
         ? (0.82 + 0.18 * plane.confidence) * facingSoft * (1 + 0.14 * cornerStrength)
         : 1
       const structureWeight = structureWeightFromDistance(plane?.bestDistance)
-      const weightedScore = proj.score * center.weight * planeWeight * structureWeight * depthResidualWeight
+      let weightedScore = proj.score * center.weight * planeWeight * structureWeight * depthResidualWeight
+      if (plane) {
+        const cellKey = planeCellKey(plane)
+        const preferredSi = cellKey ? preferredSnapshotByPlaneCell.get(cellKey) : null
+        if (preferredSi !== undefined && preferredSi !== null) {
+          if (preferredSi === si) {
+            weightedScore *= PLANE_PREF_MATCH_BONUS
+          } else {
+            weightedScore *= PLANE_PREF_MISMATCH_PENALTY
+            if (stats) stats.planeCellPenaltyApplied++
+          }
+        }
+      }
       if (stats && structureWeight < 0.9) stats.structureDownWeighted++
 
       if (weightedScore < MIN_PROJECTION_SCORE) {
@@ -657,6 +775,7 @@ export async function buildPhotoColors(buf, snapshots, options = {}) {
       planeRejected: stats.planeRejected,
       structureDownWeighted: stats.structureDownWeighted,
       depthResidualRejected: stats.depthResidualRejected,
+      planeCellPenaltyApplied: stats.planeCellPenaltyApplied,
     })
   }
 
