@@ -5457,6 +5457,78 @@ kbd {
   background: rgba(74,158,255,0.18); border-color: #4a9eff; color: #a8d8ff;
 }
 
+/* ── Scan Diagnostics overlay ─────────────────────────────── */
+.sbc-diag-panel {
+  position: absolute;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(5, 10, 18, 0.90);
+  border: 1px solid rgba(74,158,255,0.30);
+  border-radius: 10px;
+  padding: 10px 14px;
+  min-width: 280px;
+  max-width: calc(100vw - 24px);
+  backdrop-filter: blur(8px);
+  z-index: 60;
+  pointer-events: auto;
+}
+.sbc-diag-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #4a9eff;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sbc-diag-modes {
+  display: flex;
+  gap: 4px;
+}
+.sbc-diag-mode-btn {
+  background: rgba(74,158,255,0.10);
+  border: 1px solid rgba(74,158,255,0.25);
+  border-radius: 4px;
+  color: #6aacee;
+  font-size: 0.6rem;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.sbc-diag-mode-btn.active {
+  background: rgba(74,158,255,0.35);
+  border-color: #4a9eff;
+  color: #cce4ff;
+}
+.sbc-diag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.68rem;
+  color: #9ab8d4;
+}
+.sbc-diag-table td {
+  padding: 2px 4px;
+  vertical-align: top;
+}
+.sbc-diag-table td:first-child {
+  color: #6a88a4;
+  white-space: nowrap;
+  padding-right: 10px;
+  width: 45%;
+}
+.sbc-diag-table td:last-child {
+  color: #d0e6f8;
+  font-variant-numeric: tabular-nums;
+}
+.sbc-diag-dim {
+  color: #5a7890;
+  font-size: 0.62rem;
+}
+
 /* ── Save Room popover ───────────────────────────────────── */
 .sb-save-wrap { position: relative; }
 

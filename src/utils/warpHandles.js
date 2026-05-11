@@ -110,10 +110,21 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
 
   const toNDC = ([fx, fy]) => [fx * 2 - 1, 1 - fy * 2]
 
+  // TOP_K: for each anchor we keep the K nearest projected points by NDC
+  // distance.  After the search we pick the median view-space depth among
+  // those K candidates.  This rejects:
+  //   • single-point outliers (sensor noise that projects close but is far off
+  //     the wall surface in depth)
+  //   • foreground objects (furniture etc.) that are closer in depth but whose
+  //     surface is not the wall we are measuring
+  // The median tends to land on the dominant surface at that screen location,
+  // which for edge-center anchors is the wall.
+  const TOP_K = 7
+
   const measure = (anchorSet, mode) => {
     const anchorNDC = anchorSet.map(toNDC)
-    const bestPoints = [null, null, null, null]
-    const bestDists  = [Infinity, Infinity, Infinity, Infinity]
+    // top-K candidates per anchor: [{ d2, vz, wx, wy, wz }]
+    const topK = [[], [], [], []]
 
     for (let i = 0; i < n; i += step) {
       const b  = i * 6
@@ -133,17 +144,31 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
       for (let c = 0; c < 4; c++) {
         const [cnx, cny] = anchorNDC[c]
         const d2 = (nx - cnx) ** 2 + (ny - cny) ** 2
-        if (d2 < bestDists[c]) {
-          bestDists[c]  = d2
-          bestPoints[c] = [wx, wy, wz]
+        const bucket = topK[c]
+        if (bucket.length < TOP_K) {
+          bucket.push({ d2, vz, wx, wy, wz })
+          if (bucket.length === TOP_K) bucket.sort((a, b) => a.d2 - b.d2)
+        } else if (d2 < bucket[TOP_K - 1].d2) {
+          bucket[TOP_K - 1] = { d2, vz, wx, wy, wz }
+          bucket.sort((a, b) => a.d2 - b.d2)
         }
       }
     }
 
-    // Reject if any anchor has no match, or if its nearest point is farther
-    // than MAX_NDC_DIST away (corners dragged completely off the scan area).
+    // For each anchor: from top-K candidates, pick the one with median vz
+    // (view-space Z, most-negative = farthest).  Sorting by vz ascending
+    // means index 0 is farthest (most negative).  The median is the dominant
+    // surface at that screen position, filtering out stray foreground hits.
     const maxAllowed = MAX_NDC_DIST ** 2
-    if (bestPoints.some((p, c) => p === null || bestDists[c] > maxAllowed)) return null
+    const bestPoints = topK.map(bucket => {
+      if (bucket.length === 0 || bucket[0].d2 > maxAllowed) return null
+      // Sort by view-space depth: ascending vz = farthest-first (vz is negative).
+      bucket.sort((a, b) => a.vz - b.vz)
+      const pick = bucket[Math.floor(bucket.length / 2)]
+      return [pick.wx, pick.wy, pick.wz]
+    })
+
+    if (bestPoints.some(p => p === null)) return null
 
     const [a0, a1, a2, a3] = bestPoints
     const dist3 = (a, b) => Math.hypot(b[0]-a[0], b[1]-a[1], b[2]-a[2])
@@ -160,7 +185,8 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
     }
   }
 
-  // Subsample to ~40 000 points for real-time performance without missing wall clusters
-  const step = Math.max(1, Math.floor(n / 40_000))
+  // Subsample to ~200 000 points — 5× more than before for better spatial
+  // coverage of wall edges without sacrificing real-time response.
+  const step = Math.max(1, Math.floor(n / 200_000))
   return measure(edgeAnchors, 'edges')
 }
