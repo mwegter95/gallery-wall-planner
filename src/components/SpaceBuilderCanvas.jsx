@@ -132,7 +132,14 @@ const SPLAT_FRAG = /* glsl */`
     // This gives clean circular discs with no semi-transparent halos.
     vec2 uv = gl_PointCoord - 0.5;
     if (dot(uv, uv) > 0.25) discard;
-    gl_FragColor = vec4(vColor, 1.0);
+
+    // Colour grading: boost saturation 20 % and apply a gentle gamma lift
+    // so LiDAR colours look richer and more picture-like without blurring.
+    vec3 col  = vColor;
+    float luma = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(vec3(luma), col, 1.2);                    // +20 % saturation
+    col = pow(clamp(col, 0.0, 1.0), vec3(0.88));        // mild gamma lift
+    gl_FragColor = vec4(col, 1.0);
   }
 `
 
@@ -860,9 +867,8 @@ export default function SpaceBuilderCanvas({
         const hashXYZ = (ix, iy, iz) =>
           (ix * 92837111 + iy * 689287499 + iz * 283923481) | 0
 
-        const voxelCounts    = new Map()
-        const voxelColorSums = new Map()  // key → [rSum, gSum, bSum]
-        const voxelKeys      = new Int32Array(n)
+        const voxelCounts = new Map()
+        const voxelKeys   = new Int32Array(n)
         let   minY = Infinity, maxY = -Infinity
         let   minX = Infinity, maxX = -Infinity
         let   minZ = Infinity, maxZ = -Infinity
@@ -879,12 +885,6 @@ export default function SpaceBuilderCanvas({
           const key = hashXYZ(ix, iy, iz)
           voxelKeys[i] = key
           voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
-
-          // Accumulate colour sums for per-voxel averaging
-          const cs = voxelColorSums.get(key)
-          const rv = rawData[b+3], gv = rawData[b+4], bv = rawData[b+5]
-          if (cs) { cs[0] += rv; cs[1] += gv; cs[2] += bv }
-          else    voxelColorSums.set(key, [rv, gv, bv])
 
           if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
             reportRoomLoad(42 + (18 * i / n), 'Building voxel map')
@@ -945,18 +945,10 @@ export default function SpaceBuilderCanvas({
           positions[vi*3]   = sx
           positions[vi*3+1] = sy + yOffset
           positions[vi*3+2] = sz
-
-          // Use per-voxel averaged colour for smoother, less noisy appearance
-          const cs  = voxelColorSums.get(key)
-          const inv = cs ? 1 / cnt : 1
-          colors[vi*3]   = cs ? cs[0] * inv : rawData[b+3]
-          colors[vi*3+1] = cs ? cs[1] * inv : rawData[b+4]
-          colors[vi*3+2] = cs ? cs[2] * inv : rawData[b+5]
-
-          // Gentle adaptive splat scale: dense voxels shrink slightly so fine
-          // detail stays sharp; sparse voxels grow slightly to fill gaps.
-          // Narrow range (0.88–1.14) avoids the lattice artifact seen with wider ranges.
-          splatScales[vi] = cnt >= 8 ? 0.88 : cnt <= 2 ? 1.14 : 1.0
+          colors[vi*3]      = rawData[b+3]
+          colors[vi*3+1]    = rawData[b+4]
+          colors[vi*3+2]    = rawData[b+5]
+          splatScales[vi] = 1.0
 
           if (sy <= floorTop) {
             normals[vi*3] = 0;  normals[vi*3+1] = 1;  normals[vi*3+2] = 0

@@ -268,7 +268,7 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
 
       // Output at wallWidth:wallHeight ratio, 1280px wide
       const outW = 1280
-      const outH = Math.round(outW * wallHeight / wallWidth)
+      const outH = Math.round(outW * editHeight / editWidth)
 
       setStatusMsg('Warping perspective…')
 
@@ -528,27 +528,51 @@ export default function WallSetup({ onApply, onClose, wallName = 'Wall', wallWid
             ))}
           </div>
 
+          {/* Live LiDAR scan measurement banner */}
+          {cameraData && (
+            <div className={`ws-scan-measure ${lidarMeasured ? 'ws-scan-measure--ready' : ''}`}>
+              {lidarMeasured ? (
+                <>
+                  <span className="ws-scan-measure__icon">⌖</span>
+                  <span className="ws-scan-measure__dims">
+                    {unitSystem === 'metric'
+                      ? `${editWidth} × ${editHeight} cm`
+                      : `${editWidth}" × ${editHeight}"`
+                    }
+                  </span>
+                  <span className="ws-scan-measure__label">from LiDAR scan</span>
+                </>
+              ) : (
+                <>
+                  <span className="ws-scan-measure__spinner" />
+                  <span className="ws-scan-measure__label">Measuring from LiDAR scan…</span>
+                </>
+              )}
+            </div>
+          )}
+
           {/* Editable wall dimensions */}
           <div className="ws-dims-row">
             <label className="ws-dims-label">
               Wall size ({unitSystem === 'metric' ? 'cm' : 'inches'})
-              {lidarMeasured && <span className="ws-lidar-badge" title="Estimated from LiDAR scan geometry"> · from scan</span>}
               :
             </label>
             <div className="ws-dims-inputs">
               <input
                 className="ws-dim-input"
-                type="number" min="1" max={unitSystem === 'metric' ? 1500 : 600} step="1"
+                type="number" min="1" max={unitSystem === 'metric' ? 1500 : 600}
+                step={unitSystem === 'metric' ? '1' : '0.5'}
                 value={editWidth}
-                onChange={e => setEditWidth(Math.max(1, parseInt(e.target.value, 10) || editWidth))}
+                onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setEditWidth(v) }}
                 aria-label={`Width in ${unitSystem === 'metric' ? 'cm' : 'inches'}`}
               />
               <span className="ws-dims-sep">×</span>
               <input
                 className="ws-dim-input"
-                type="number" min="1" max={unitSystem === 'metric' ? 1500 : 600} step="1"
+                type="number" min="1" max={unitSystem === 'metric' ? 1500 : 600}
+                step={unitSystem === 'metric' ? '1' : '0.5'}
                 value={editHeight}
-                onChange={e => setEditHeight(Math.max(1, parseInt(e.target.value, 10) || editHeight))}
+                onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setEditHeight(v) }}
                 aria-label={`Height in ${unitSystem === 'metric' ? 'cm' : 'inches'}`}
               />
               <span className="ws-dims-unit">{unitSystem === 'metric' ? 'cm' : 'in'}</span>

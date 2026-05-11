@@ -53,8 +53,15 @@ export function m4v(e, x, y, z) {
 }
 
 const M_TO_IN    = 39.3701
-/** Max squared NDC distance to accept a point as matching a corner (~10 % of screen) */
-const MAX_DIST2  = 0.04   // = 0.2 NDC²
+/**
+ * Max NDC distance to accept a corner match.  0.7 NDC = 35 % of screen —
+ * generous enough that dragging a handle near a wall surface always finds a
+ * match, but large enough to reject corners deliberately placed in empty space.
+ */
+const MAX_NDC_DIST = 0.7
+
+/** Round a value to the nearest 0.5 */
+const roundHalf = (v) => Math.round(v * 2) / 2
 
 /**
  * Estimate the real-world width and height (inches) of the surface whose four
@@ -64,8 +71,11 @@ const MAX_DIST2  = 0.04   // = 0.2 NDC²
  * Algorithm:
  *   For each corner (fractional screen position), project every LiDAR point
  *   into NDC using the camera matrices captured at screenshot time.  Find the
- *   nearest projected point to each corner.  Compute pairwise 3-D distances
- *   to derive width (top + bottom average) and height (left + right average).
+ *   nearest projected point to each corner (no hard distance cutoff — just
+ *   best-nearest).  Reject the whole result only if any corner's nearest
+ *   match is farther than MAX_NDC_DIST (corner placed way off the point cloud).
+ *   Compute pairwise 3-D distances: width = average(top-edge, bottom-edge),
+ *   height = average(left-edge, right-edge).
  *
  * @param {Array<[number, number]>} corners
  *   [[fx,fy], …] — TL / TR / BR / BL in [0,1] fractions of the screenshot
@@ -87,16 +97,16 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
   const bestPoints = [null, null, null, null]
   const bestDists  = [Infinity, Infinity, Infinity, Infinity]
 
-  // Subsample to ~25 000 points for real-time performance
-  const step = Math.max(1, Math.floor(n / 25_000))
+  // Subsample to ~40 000 points for real-time performance without missing wall clusters
+  const step = Math.max(1, Math.floor(n / 40_000))
 
   for (let i = 0; i < n; i += step) {
     const b  = i * 6
     const wx = data[b]
-    const wy = data[b + 1] + yOffset   // offset matches scene/camera coordinate frame
+    const wy = data[b + 1] + yOffset   // apply scene floor-offset to match camera space
     const wz = data[b + 2]
 
-    // World → camera space via view matrix
+    // World → camera space via view matrix (matrixWorldInverse)
     const [vx, vy, vz] = m4v(viewE, wx, wy, wz)
     if (vz >= 0) continue   // behind camera (Three.js looks down −Z)
 
@@ -105,32 +115,30 @@ export function computeLidarDims(corners, cameraData, pointCloud) {
     if (cw <= 0) continue
     const nx = cx / cw
     const ny = cy / cw
-    if (nx < -1.05 || nx > 1.05 || ny < -1.05 || ny > 1.05) continue
+    if (nx < -1.1 || nx > 1.1 || ny < -1.1 || ny > 1.1) continue
 
     for (let c = 0; c < 4; c++) {
       const [cnx, cny] = cornerNDC[c]
       const d2 = (nx - cnx) ** 2 + (ny - cny) ** 2
       if (d2 < bestDists[c]) {
-        bestDists[c] = d2
-        bestPoints[c] = [wx, wy, wz]   // world-space (y-offset already applied)
+        bestDists[c]  = d2
+        bestPoints[c] = [wx, wy, wz]   // world-space (yOffset already applied to wy)
       }
     }
   }
 
-  // All four corners must have a point within the search radius
-  if (bestPoints.some((p, c) => p === null || bestDists[c] > MAX_DIST2)) return null
+  // Reject if any corner has no match or is placed far off the point cloud
+  const maxAllowed = MAX_NDC_DIST ** 2
+  if (bestPoints.some((p, c) => p === null || bestDists[c] > maxAllowed)) return null
 
   const [tl, tr, br, bl] = bestPoints
-  const topW    = Math.hypot(tr[0]-tl[0], tr[1]-tl[1], tr[2]-tl[2])
-  const bottomW = Math.hypot(br[0]-bl[0], br[1]-bl[1], br[2]-bl[2])
-  const leftH   = Math.hypot(bl[0]-tl[0], bl[1]-tl[1], bl[2]-tl[2])
-  const rightH  = Math.hypot(br[0]-tr[0], br[1]-tr[1], br[2]-tr[2])
+  const dist3 = (a, b) => Math.hypot(b[0]-a[0], b[1]-a[1], b[2]-a[2])
 
-  const widthM  = (topW + bottomW) / 2
-  const heightM = (leftH + rightH) / 2
+  const widthM  = (dist3(tl, tr) + dist3(bl, br)) / 2
+  const heightM = (dist3(tl, bl) + dist3(tr, br)) / 2
 
   return {
-    widthIn:  Math.max(1, Math.round(widthM  * M_TO_IN)),
-    heightIn: Math.max(1, Math.round(heightM * M_TO_IN)),
+    widthIn:  Math.max(6, roundHalf(widthM  * M_TO_IN)),
+    heightIn: Math.max(6, roundHalf(heightM * M_TO_IN)),
   }
 }
