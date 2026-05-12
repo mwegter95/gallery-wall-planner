@@ -865,118 +865,152 @@ export default function SpaceBuilderCanvas({
       const pc = roomScan.pointCloud
       reportRoomLoad(3, 'Preparing room scan')
 
-      // ── Try server-built Poisson GLB first ──────────────────────────────
-      // The server builds a Poisson mesh in a background thread after upload.
-      // If it's ready, load it with GLTFLoader — zero JS processing, full
-      // Poisson fidelity.  If still processing or unavailable, fall through to
-      // the spherical triangulation pipeline.
       const roomId = space?.id
+
+      // ── Poisson GLB path (any room that exists on the server) ────────────
+      // For server-backed rooms we always prefer the Poisson mesh.
+      // If it's still building we poll and show live progress rather than
+      // falling back to the slow JS pipeline.  JS triangulation is only used
+      // for rooms that have no server ID (pure local/anonymous scans).
       if (roomId) {
-        try {
-          reportRoomLoad(5, 'Checking for pre-built mesh…')
-          const jwt    = getJwt()
-          const device = getDeviceToken()
-          const meshResp = await fetch(`${BASE}/api/rooms/${roomId}/mesh`, {
-            signal: AbortSignal.timeout(6000),
-            headers: {
-              'X-Device-Token': device,
-              ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-            },
+        const jwt    = getJwt()
+        const device = getDeviceToken()
+        const authHeaders = {
+          'X-Device-Token': device,
+          ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+        }
+
+        // Helper: load a ready GLB URL into the scene
+        async function loadGLB(url) {
+          reportRoomLoad(20, 'Loading Poisson mesh…')
+          const loader = new GLTFLoader()
+          const gltf   = await new Promise((resolve, reject) => {
+            loader.load(
+              `${BASE}${url}`,
+              resolve,
+              xhr => { if (!cancelled) reportRoomLoad(20 + (70 * xhr.loaded / (xhr.total || 1)), 'Loading mesh…') },
+              reject,
+            )
           })
-          if (meshResp.ok) {
-            const meshMeta = await meshResp.json()
-            if (meshMeta.status === 'ready' && meshMeta.url) {
-              reportRoomLoad(20, 'Loading Poisson mesh…')
-              const loader = new GLTFLoader()
-              const gltf   = await new Promise((resolve, reject) => {
-                loader.load(
-                  `${BASE}${meshMeta.url}`,
-                  resolve,
-                  xhr => { if (!cancelled) reportRoomLoad(20 + (70 * xhr.loaded / (xhr.total || 1)), 'Loading mesh…') },
-                  reject,
-                )
-              })
-              if (cancelled) return
+          if (cancelled) return
 
-              // Apply colour grading via vertex shader to match point-cloud look
-              const yOffset = (() => {
-                let minY = Infinity
-                gltf.scene.traverse(obj => {
-                  if (obj.isMesh) {
-                    const pos = obj.geometry.attributes.position
-                    for (let i = 0; i < pos.count; i++) {
-                      const y = pos.getY(i)
-                      if (y < minY) minY = y
-                    }
-                  }
-                })
-                return isFinite(minY) ? -minY : 0
-              })()
-              yOffsetRef.current = yOffset
-
-              gltf.scene.traverse(obj => {
-                if (!obj.isMesh) return
-                obj.material = new THREE.ShaderMaterial({
-                  vertexColors: true,
-                  side: THREE.DoubleSide,
-                  vertexShader: MESH_VERT,
-                  fragmentShader: MESH_FRAG,
-                  uniforms: {
-                    uYOffset:  { value: yOffset },
-                    uDiagMode: { value: 0 },
-                  },
-                })
-              })
-
-              t.scene.add(gltf.scene)
-              pointCloudMeshRef.current = gltf.scene
-
-              // Keep rawBufferRef null — no point cloud buffer loaded
-              rawBufferRef.current = null
-
-              // Count total triangles for diagnostics
-              let totalVerts = 0, totalTris = 0
-              gltf.scene.traverse(obj => {
-                if (obj.isMesh) {
-                  totalVerts += obj.geometry.attributes.position.count
-                  totalTris  += (obj.geometry.index?.count ?? 0) / 3
+          const yOffset = (() => {
+            let minY = Infinity
+            gltf.scene.traverse(obj => {
+              if (obj.isMesh) {
+                const pos = obj.geometry.attributes.position
+                for (let i = 0; i < pos.count; i++) {
+                  const y = pos.getY(i); if (y < minY) minY = y
                 }
-              })
-              const fboW = t.renderer?.domElement?.width  ?? 0
-              const fboH = t.renderer?.domElement?.height ?? 0
-              diagStatsRef.current = {
-                rawPts: totalVerts,
-                renderedPts: totalVerts,
-                triCount: totalTris,
-                fboW, fboH,
-                dpr: Math.min(window.devicePixelRatio, 2),
-                meshSource: 'poisson-glb',
               }
+            })
+            return isFinite(minY) ? -minY : 0
+          })()
+          yOffsetRef.current = yOffset
 
-              // Auto-frame
-              try {
-                const box = new THREE.Box3().setFromObject(gltf.scene)
-                const center = new THREE.Vector3()
-                box.getCenter(center)
-                t.orbit.center.set(center.x, 1.6, center.z)
-                t.orbit.phi   = Math.PI / 2
-                t.orbit.theta = 0.4
-                t.applyOrbit()
-              } catch { /* ignore */ }
+          gltf.scene.traverse(obj => {
+            if (!obj.isMesh) return
+            obj.material = new THREE.ShaderMaterial({
+              vertexColors: true,
+              side: THREE.DoubleSide,
+              vertexShader: MESH_VERT,
+              fragmentShader: MESH_FRAG,
+              uniforms: {
+                uYOffset:  { value: yOffset },
+                uDiagMode: { value: 0 },
+              },
+            })
+          })
 
-              reportRoomLoad(100, 'Scan ready', false)
-              return  // ← done, skip the JS triangulation entirely
-            } else if (meshMeta.status === 'processing') {
-              reportRoomLoad(8, 'Mesh building on server… loading point cloud')
+          t.scene.add(gltf.scene)
+          pointCloudMeshRef.current = gltf.scene
+          rawBufferRef.current = null
+
+          let totalVerts = 0, totalTris = 0
+          gltf.scene.traverse(obj => {
+            if (obj.isMesh) {
+              totalVerts += obj.geometry.attributes.position.count
+              totalTris  += (obj.geometry.index?.count ?? 0) / 3
+            }
+          })
+          const fboW = t.renderer?.domElement?.width  ?? 0
+          const fboH = t.renderer?.domElement?.height ?? 0
+          diagStatsRef.current = {
+            rawPts: totalVerts, renderedPts: totalVerts, triCount: totalTris,
+            fboW, fboH, dpr: Math.min(window.devicePixelRatio, 2),
+            meshSource: 'poisson-glb',
+          }
+
+          try {
+            const box = new THREE.Box3().setFromObject(gltf.scene)
+            const center = new THREE.Vector3()
+            box.getCenter(center)
+            t.orbit.center.set(center.x, 1.6, center.z)
+            t.orbit.phi   = Math.PI / 2
+            t.orbit.theta = 0.4
+            t.applyOrbit()
+          } catch { /* ignore */ }
+
+          reportRoomLoad(100, 'Scan ready', false)
+        }
+
+        // Helper: check mesh status once
+        async function checkMeshStatus() {
+          try {
+            const resp = await fetch(`${BASE}/api/rooms/${roomId}/mesh`, {
+              signal: AbortSignal.timeout(8000),
+              headers: authHeaders,
+            })
+            if (!resp.ok) return null
+            return await resp.json()
+          } catch { return null }
+        }
+
+        // Initial check
+        reportRoomLoad(5, 'Checking for pre-built mesh…')
+        let meta = await checkMeshStatus()
+        if (cancelled) return
+
+        if (meta?.status === 'unavailable' || meta === null) {
+          // Server doesn't know about this scan — fall through to JS pipeline
+        } else if (meta?.status === 'ready' && meta.url) {
+          await loadGLB(meta.url)
+          return
+        } else {
+          // 'processing' or 'failed' — if failed, re-trigger and wait
+          if (meta?.status === 'failed') {
+            reportRoomLoad(8, 'Re-triggering mesh build…')
+            await fetch(`${BASE}/api/rooms/${roomId}/mesh?rebuild=1`, { headers: authHeaders }).catch(() => {})
+          }
+
+          // Poll until ready, showing progress
+          const POLL_MS      = 4000
+          const MAX_ATTEMPTS = 60   // 4 min max wait
+          let   dots         = 0
+          for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            if (cancelled) return
+            const elapsed = attempt * POLL_MS / 1000
+            const pct = Math.min(18, 8 + attempt * 0.4)   // slow crawl 8→18%
+            dots = (dots + 1) % 4
+            reportRoomLoad(pct, `Building mesh on server… ${Math.floor(elapsed)}s${'.'.repeat(dots)}`)
+            await new Promise(r => setTimeout(r, POLL_MS))
+            if (cancelled) return
+            meta = await checkMeshStatus()
+            if (meta?.status === 'ready' && meta.url) {
+              await loadGLB(meta.url)
+              return
+            }
+            if (meta?.status === 'failed') {
+              reportRoomLoad(100, 'Mesh build failed', false)
+              return
             }
           }
-        } catch (e) {
-          // Non-fatal — fall through to JS pipeline
-          console.info('[SpaceBuilderCanvas] Mesh check failed, using JS pipeline:', e.message)
+          reportRoomLoad(100, 'Mesh timed out', false)
+          return
         }
       }
 
-      // ── Fall back: load raw point cloud + JS spherical triangulation ────
+      // ── JS spherical triangulation (local/anonymous scans only) ──────────
       let buf
       try {
         if (pc?._buffer) {
@@ -1800,22 +1834,12 @@ export default function SpaceBuilderCanvas({
                             'X-Device-Token': device,
                             ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
                           }
-                          // Kick the rebuild
                           await fetch(`${BASE}/api/rooms/${space.id}/mesh?rebuild=1`, { headers })
-                          // Poll every 3 s until the server says ready or failed
-                          for (let attempt = 0; attempt < 40; attempt++) {
-                            await new Promise(r => setTimeout(r, 3000))
-                            const res  = await fetch(`${BASE}/api/rooms/${space.id}/mesh`, { headers })
-                            const meta = await res.json()
-                            if (meta.status === 'ready') {
-                              setMeshGeneration(g => g + 1)  // re-run buildCloud → loads new GLB
-                              break
-                            }
-                            if (meta.status === 'failed') break
-                          }
+                          // buildCloud will poll and show progress when meshGeneration changes
+                          setMeshGeneration(g => g + 1)
                         } finally { setMeshRebuilding(false) }
                       }}
-                    >{meshRebuilding ? 'Building…' : 'Rebuild'}</button>
+                    >{meshRebuilding ? 'Queuing…' : 'Rebuild'}</button>
                   )}
                 </td></tr>
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
