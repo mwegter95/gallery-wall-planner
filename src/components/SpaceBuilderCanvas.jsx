@@ -983,27 +983,29 @@ export default function SpaceBuilderCanvas({
             await fetch(`${BASE}/api/rooms/${roomId}/mesh?rebuild=1`, { headers: authHeaders }).catch(() => {})
           }
 
-          // Poll until ready, showing progress
-          const POLL_MS      = 4000
-          const MAX_ATTEMPTS = 60   // 4 min max wait
-          let   dots         = 0
+          // Poll until ready, showing real server-reported stage + pct
+          const POLL_MS      = 3000
+          const MAX_ATTEMPTS = 80   // 4 min max wait
           for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
             if (cancelled) return
-            const elapsed = attempt * POLL_MS / 1000
-            const pct = Math.min(18, 8 + attempt * 0.4)   // slow crawl 8→18%
-            dots = (dots + 1) % 4
-            reportRoomLoad(pct, `Building mesh on server… ${Math.floor(elapsed)}s${'.'.repeat(dots)}`)
             await new Promise(r => setTimeout(r, POLL_MS))
             if (cancelled) return
             meta = await checkMeshStatus()
-            if (meta?.status === 'ready' && meta.url) {
+            if (!meta) continue  // transient network hiccup — keep waiting
+            if (meta.status === 'ready' && meta.url) {
               await loadGLB(meta.url)
               return
             }
-            if (meta?.status === 'failed') {
-              reportRoomLoad(100, 'Mesh build failed', false)
+            if (meta.status === 'failed') {
+              reportRoomLoad(100, 'Mesh build failed — check server logs', false)
               return
             }
+            // Map server's 0-100 pct into the 5-19% band of our loading bar
+            // (20-90 is reserved for the GLB download itself)
+            const serverPct = meta.pct ?? 0
+            const barPct    = 5 + Math.round(serverPct * 0.14)  // 5%…19%
+            const phase     = meta.phase || 'Building mesh on server…'
+            reportRoomLoad(barPct, phase)
           }
           reportRoomLoad(100, 'Mesh timed out', false)
           return
