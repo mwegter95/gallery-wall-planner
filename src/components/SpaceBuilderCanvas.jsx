@@ -184,7 +184,7 @@ const MESH_VERT = /* glsl */`
   uniform float uYOffset;
   varying vec3  vColor;
   void main() {
-    vColor = color;
+    vColor = color.rgb;
     gl_Position = projectionMatrix * modelViewMatrix *
       vec4(position.x, position.y + uYOffset, position.z, 1.0);
   }
