@@ -36,7 +36,7 @@ const MIN_DEPTH = 0.15
 // Maximum depth (m) — ignore beyond this (large open spaces, windows to sky)
 const MAX_DEPTH = 12
 
-export default function LidarScanner({ onComplete, onCancel, onSnapshot = null }) {
+export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, onPointChunk = null }) {
   const [status,    setStatus]    = useState('checking') // checking | unsupported | starting | scanning | processing | error
   const [progress,  setProgress]  = useState(0)   // 0-100 while scanning
   const [pointCount, setPointCount] = useState(0)
@@ -85,6 +85,7 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null }
           const decoded = atob(result.data)
           const bytes = new Uint8Array(decoded.length)
           for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i)
+          if (onPointChunk) onPointChunk(bytes)
           nativeBufRef.current.addChunk(new Float32Array(bytes.buffer))
           const n = nativeBufRef.current.pointCount
           setPointCount(n)

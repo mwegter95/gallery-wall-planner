@@ -19,7 +19,12 @@ import {
 } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { cloneRoomForEditing } from '../utils/roomScanPersistence'
-import { uploadPointCloudChunked, uploadSnapshot, uploadSnapshots } from '../utils/api'
+import {
+  finalizePointCloudStream,
+  uploadPointCloudStreamChunk,
+  uploadSnapshot,
+  uploadSnapshots,
+} from '../utils/api'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -91,6 +96,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const fileInputRef  = useRef(null)
   const warpQueueRef  = useRef(new Set())
   const snapshotUploadsRef = useRef(new Set())
+  const pointCloudStreamRef = useRef(null)
 
   /* ── LiDAR scan complete ───────────────────────────────────────────────── */
   const handleScanSnapshot = useCallback((snapshot, index) => {
@@ -103,12 +109,40 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     snapshotUploadsRef.current.add(uploadPromise)
   }, [space?.id])
 
+  const handleScanPointChunk = useCallback((chunkBytes) => {
+    if (!space?.id || !chunkBytes?.byteLength) return
+
+    let stream = pointCloudStreamRef.current
+    if (!stream || stream.roomId !== space.id || stream.finalized) {
+      stream = {
+        roomId: space.id,
+        uploadId: crypto.randomUUID(),
+        nextIndex: 0,
+        chain: Promise.resolve(),
+        finalized: false,
+      }
+      pointCloudStreamRef.current = stream
+    }
+
+    const idx = stream.nextIndex++
+    const payload = chunkBytes instanceof Uint8Array ? chunkBytes : new Uint8Array(chunkBytes)
+    stream.chain = stream.chain
+      .then(() => uploadPointCloudStreamChunk(space.id, stream.uploadId, idx, payload))
+      .catch(err => {
+        console.warn('[scan] streaming chunk upload failed', idx, err)
+        // Keep chain alive so later finalize can still run/fallback path can recover.
+      })
+  }, [space?.id])
+
   const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
     const nextPointCloud = { ...pointCloud }
-    if (space?.id && pointCloud?._buffer) {
-      const usedFloats = (pointCloud._buffer.pointCount || 0) * 6
-      const binaryPayload = pointCloud._buffer._data.subarray(0, usedFloats)
-      nextPointCloud._uploadPromise = uploadPointCloudChunked(space.id, binaryPayload)
+    const stream = pointCloudStreamRef.current
+    if (space?.id && stream && stream.roomId === space.id && stream.nextIndex > 0 && !stream.finalized) {
+      stream.finalized = true
+      nextPointCloud._uploadPromise = Promise
+        .allSettled(Array.from(snapshotUploadsRef.current))
+        .then(() => stream.chain)
+        .then(() => finalizePointCloudStream(space.id, stream.uploadId))
         .then(({ url }) => {
           if (url) {
             setSpace(prev => {
@@ -120,7 +154,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                   pointCloud: {
                     ...prev.roomScan.pointCloud,
                     url,
-                    _preuploaded: true,
                     _uploadPromise: null,
                   },
                 },
@@ -130,10 +163,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           return url || null
         })
         .catch(err => {
-          console.warn('[scan] background point cloud upload failed', err)
+          console.warn('[scan] stream finalize failed, save will fallback to direct upload', err)
           return null
         })
     }
+    pointCloudStreamRef.current = null
 
     setSpace(prev => ({ ...prev, roomScan: { pointCloud: nextPointCloud, planes, capturedAt } }))
     setShowLidarScanner(false)
@@ -880,6 +914,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       {showLidarScanner && (
         <LidarScanner
           onComplete={handleScanComplete}
+          onPointChunk={handleScanPointChunk}
           onSnapshot={handleScanSnapshot}
           onCancel={() => setShowLidarScanner(false)}
         />

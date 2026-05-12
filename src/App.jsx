@@ -518,12 +518,20 @@ export default function App() {
     report(12)
 
     if (pendingPointCloudUpload) {
+      let anim = 12
+      const t = setInterval(() => {
+        anim = Math.min(64, anim + 2)
+        report(anim)
+      }, 350)
       try {
         const uploadedUrl = await pendingPointCloudUpload
         if (uploadedUrl) pointCloudUrl = uploadedUrl
       } catch (err) {
         console.warn('[handleSaveSpace] background point cloud upload failed', err)
+      } finally {
+        clearInterval(t)
       }
+      if (pointCloudUrl) report(68)
     }
 
     // ── Upload binary point cloud separately (12% → 68%) ──────────────────────

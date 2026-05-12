@@ -318,6 +318,67 @@ export function uploadPointCloud(roomId, binaryPayload, onProgress) {
 }
 
 /**
+ * Stream one live point-cloud chunk while scanning.
+ * Chunks must be uploaded in-order for a given uploadId.
+ */
+export async function uploadPointCloudStreamChunk(roomId, uploadId, chunkIndex, chunkBuffer) {
+  const jwt = getJwt()
+  const device = getDeviceToken()
+  const bytes = toByteView(chunkBuffer)
+
+  const headers = {
+    'Content-Type': 'application/octet-stream',
+    'X-Device-Token': device,
+    'X-Upload-Id': String(uploadId),
+    'X-Chunk-Index': String(chunkIndex),
+    ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
+  }
+
+  const res = await fetch(`${BASE}/api/rooms/${roomId}/pointcloud/stream-chunk`, {
+    method: 'POST',
+    headers,
+    body: bytes,
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Point cloud stream chunk failed ${res.status}: ${text}`)
+  }
+
+  return res.json()
+}
+
+/**
+ * Finalize a live streaming point-cloud upload and trigger mesh build.
+ */
+export async function finalizePointCloudStream(roomId, uploadId) {
+  const jwt = getJwt()
+  const device = getDeviceToken()
+
+  const headers = {
+    'X-Device-Token': device,
+    'X-Upload-Id': String(uploadId),
+    ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
+  }
+
+  const res = await fetch(`${BASE}/api/rooms/${roomId}/pointcloud/stream-finalize`, {
+    method: 'POST',
+    headers,
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Point cloud stream finalize failed ${res.status}: ${text}`)
+  }
+
+  const data = await res.json()
+  return {
+    ...data,
+    url: data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url,
+  }
+}
+
+/**
  * Upload a raw point cloud using chunked transfer to improve reliability on large files.
  * Falls back to the legacy single-request upload if the backend chunk endpoint is unavailable.
  */
