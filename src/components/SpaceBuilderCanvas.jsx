@@ -14,15 +14,6 @@ import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
 import { BASE, getJwt, getDeviceToken } from '../utils/api'
-import { buildPhotoColors } from '../utils/photoMesh'
-
-/** Invert a rigid-body (R + t) 4×4 column-major matrix — mirrors photoMesh.js. */
-function _invertRigid(t) {
-  const r00=t[0],r10=t[1],r20=t[2], r01=t[4],r11=t[5],r21=t[6], r02=t[8],r12=t[9],r22=t[10]
-  const px=t[12],py=t[13],pz=t[14]
-  const itx=-(r00*px+r10*py+r20*pz), ity=-(r01*px+r11*py+r21*pz), itz=-(r02*px+r12*py+r22*pz)
-  return new Float32Array([r00,r01,r02,0, r10,r11,r12,0, r20,r21,r22,0, itx,ity,itz,1])
-}
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -980,61 +971,9 @@ export default function SpaceBuilderCanvas({
 
           reportRoomLoad(100, 'Scan ready', false)
 
-          // ── Photo-retexture the GLB mesh (async, after it's already visible) ──
-          // Project each snapshot's high-res JPEG onto the mesh vertices using the
-          // snapshot camera's intrinsics + extrinsics — same algorithm as the point
-          // cloud photo retexture, applied per-vertex instead of per-point.
-          // This replaces the IDW-blurred depth-sensor colours with actual photo pixels.
-          const photoSnaps = roomScan?.snapshots?.filter(s => s.intrinsics?.length === 6)
-          if (photoSnaps?.length) {
-            reportRoomLoad(100, `Projecting ${photoSnaps.length} photos onto mesh…`, true)
-            ;(async () => {
-              try {
-                // Collect all mesh objects from the GLB scene
-                const meshObjs = []
-                gltf.scene.traverse(obj => { if (obj.isMesh) meshObjs.push(obj) })
-
-                let projectedAny = false
-                for (const meshObj of meshObjs) {
-                  if (cancelled) break
-                  const geo = meshObj.geometry
-                  const posAttr = geo.attributes.position
-                  const colAttr = geo.attributes.color
-                  const nVerts  = posAttr.count
-
-                  // Pack vertices into the [x,y,z,r,g,b] Float32Array format
-                  // that buildPhotoColors expects.  Positions are in raw ARKit world
-                  // space (yOffset applied only in the shader, not in the GLB).
-                  const data = new Float32Array(nVerts * 6)
-                  for (let i = 0; i < nVerts; i++) {
-                    data[i*6]   = posAttr.getX(i)
-                    data[i*6+1] = posAttr.getY(i)
-                    data[i*6+2] = posAttr.getZ(i)
-                    data[i*6+3] = colAttr ? colAttr.getX(i) : 0.5
-                    data[i*6+4] = colAttr ? colAttr.getY(i) : 0.5
-                    data[i*6+5] = colAttr ? colAttr.getZ(i) : 0.5
-                  }
-
-                  const newColors = await buildPhotoColors({ _data: data, pointCount: nVerts }, photoSnaps)
-                  if (cancelled || !newColors) continue
-
-                  // Replace the colour attribute with a new RGB-only one so we
-                  // don't have to deal with RGBA vs RGB stride mismatches from trimesh.
-                  geo.setAttribute('color', new THREE.BufferAttribute(newColors, 3))
-                  projectedAny = true
-                }
-
-                if (projectedAny && !cancelled && diagStatsRef.current) {
-                  diagStatsRef.current.colourMethod =
-                    `photo projected (${photoSnaps.length} snapshot${photoSnaps.length > 1 ? 's' : ''})`
-                }
-              } catch (err) {
-                console.warn('[SpaceBuilderCanvas] GLB photo retexture failed:', err)
-              } finally {
-                reportRoomLoad(100, 'Scan ready', false)
-              }
-            })()
-          }
+          // Photo coloring is handled server-side during Poisson reconstruction
+          // (IDW color transfer from the full point cloud in mesh_worker.py).
+          // The GLB already has baked vertex colors — no client-side retexture needed.
         }
 
         // Helper: check mesh status once
