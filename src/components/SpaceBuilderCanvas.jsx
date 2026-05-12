@@ -877,6 +877,7 @@ export default function SpaceBuilderCanvas({
           const jwt    = getJwt()
           const device = getDeviceToken()
           const meshResp = await fetch(`${BASE}/api/rooms/${roomId}/mesh`, {
+            signal: AbortSignal.timeout(6000),
             headers: {
               'X-Device-Token': device,
               ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
