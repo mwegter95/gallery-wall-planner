@@ -14,6 +14,15 @@ import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
 import { BASE, getJwt, getDeviceToken } from '../utils/api'
+import { buildPhotoColors } from '../utils/photoMesh'
+
+/** Invert a rigid-body (R + t) 4×4 column-major matrix — mirrors photoMesh.js. */
+function _invertRigid(t) {
+  const r00=t[0],r10=t[1],r20=t[2], r01=t[4],r11=t[5],r21=t[6], r02=t[8],r12=t[9],r22=t[10]
+  const px=t[12],py=t[13],pz=t[14]
+  const itx=-(r00*px+r10*py+r20*pz), ity=-(r01*px+r11*py+r21*pz), itz=-(r02*px+r12*py+r22*pz)
+  return new Float32Array([r00,r01,r02,0, r10,r11,r12,0, r20,r21,r22,0, itx,ity,itz,1])
+}
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -948,12 +957,15 @@ export default function SpaceBuilderCanvas({
           diagStatsRef.current = {
             // meta.rawPts / poissonPts come from the build stats written by mesh_worker.
             // Fall back to mesh vertex count if the build pre-dates this feature.
-            rawPts:     meta?.rawPts     ?? totalVerts,
-            poissonPts: meta?.poissonPts ?? null,
-            renderedPts: totalVerts,
-            triCount: totalTris,
+            rawPts:       meta?.rawPts       ?? totalVerts,
+            poissonPts:   meta?.poissonPts   ?? null,
+            voxelMm:      meta?.voxelMm      ?? null,
+            poissonDepth: meta?.poissonDepth ?? null,
+            renderedPts:  totalVerts,
+            triCount:     totalTris,
             fboW, fboH, dpr: Math.min(window.devicePixelRatio, 2),
-            meshSource: 'poisson-glb',
+            meshSource:   'poisson-glb',
+            colourMethod: 'LiDAR sensor (IDW)',
           }
 
           try {
@@ -967,6 +979,62 @@ export default function SpaceBuilderCanvas({
           } catch { /* ignore */ }
 
           reportRoomLoad(100, 'Scan ready', false)
+
+          // ── Photo-retexture the GLB mesh (async, after it's already visible) ──
+          // Project each snapshot's high-res JPEG onto the mesh vertices using the
+          // snapshot camera's intrinsics + extrinsics — same algorithm as the point
+          // cloud photo retexture, applied per-vertex instead of per-point.
+          // This replaces the IDW-blurred depth-sensor colours with actual photo pixels.
+          const photoSnaps = roomScan?.snapshots?.filter(s => s.intrinsics?.length === 6)
+          if (photoSnaps?.length) {
+            reportRoomLoad(100, `Projecting ${photoSnaps.length} photos onto mesh…`, true)
+            ;(async () => {
+              try {
+                // Collect all mesh objects from the GLB scene
+                const meshObjs = []
+                gltf.scene.traverse(obj => { if (obj.isMesh) meshObjs.push(obj) })
+
+                let projectedAny = false
+                for (const meshObj of meshObjs) {
+                  if (cancelled) break
+                  const geo = meshObj.geometry
+                  const posAttr = geo.attributes.position
+                  const colAttr = geo.attributes.color
+                  const nVerts  = posAttr.count
+
+                  // Pack vertices into the [x,y,z,r,g,b] Float32Array format
+                  // that buildPhotoColors expects.  Positions are in raw ARKit world
+                  // space (yOffset applied only in the shader, not in the GLB).
+                  const data = new Float32Array(nVerts * 6)
+                  for (let i = 0; i < nVerts; i++) {
+                    data[i*6]   = posAttr.getX(i)
+                    data[i*6+1] = posAttr.getY(i)
+                    data[i*6+2] = posAttr.getZ(i)
+                    data[i*6+3] = colAttr ? colAttr.getX(i) : 0.5
+                    data[i*6+4] = colAttr ? colAttr.getY(i) : 0.5
+                    data[i*6+5] = colAttr ? colAttr.getZ(i) : 0.5
+                  }
+
+                  const newColors = await buildPhotoColors({ _data: data, pointCount: nVerts }, photoSnaps)
+                  if (cancelled || !newColors) continue
+
+                  // Replace the colour attribute with a new RGB-only one so we
+                  // don't have to deal with RGBA vs RGB stride mismatches from trimesh.
+                  geo.setAttribute('color', new THREE.BufferAttribute(newColors, 3))
+                  projectedAny = true
+                }
+
+                if (projectedAny && !cancelled && diagStatsRef.current) {
+                  diagStatsRef.current.colourMethod =
+                    `photo projected (${photoSnaps.length} snapshot${photoSnaps.length > 1 ? 's' : ''})`
+                }
+              } catch (err) {
+                console.warn('[SpaceBuilderCanvas] GLB photo retexture failed:', err)
+              } finally {
+                reportRoomLoad(100, 'Scan ready', false)
+              }
+            })()
+          }
         }
 
         // Helper: check mesh status once
@@ -1000,7 +1068,7 @@ export default function SpaceBuilderCanvas({
 
           // Poll until ready, showing real server-reported stage + pct
           const POLL_MS      = 3000
-          const MAX_ATTEMPTS = 80   // 4 min max wait
+          const MAX_ATTEMPTS = 240  // 12 min max — depth=11 builds can take 7-10 min
           for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
             if (cancelled) return
             await new Promise(r => setTimeout(r, POLL_MS))
@@ -1834,7 +1902,11 @@ export default function SpaceBuilderCanvas({
               <tbody>
                 <tr><td>Raw scan pts</td><td>{s.rawPts.toLocaleString()}</td></tr>
                 {s.poissonPts != null && (
-                  <tr><td>Poisson input</td><td>{s.poissonPts.toLocaleString()} <span className="sbc-diag-dim">({((s.poissonPts/s.rawPts)*100).toFixed(1)}% of raw)</span></td></tr>
+                  <tr><td>Poisson input</td><td>
+                    {s.poissonPts.toLocaleString()}{' '}
+                    <span className="sbc-diag-dim">({((s.poissonPts/s.rawPts)*100).toFixed(1)}% of raw)</span>
+                    {s.voxelMm != null && <span className="sbc-diag-dim"> · {s.voxelMm} mm voxel</span>}
+                  </td></tr>
                 )}
                 <tr><td>Mesh vertices</td><td>{s.renderedPts.toLocaleString()}</td></tr>
                 <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
@@ -1861,10 +1933,11 @@ export default function SpaceBuilderCanvas({
                       }}
                     >{meshRebuilding ? 'Queuing…' : 'Rebuild'}</button>
                   )}
+                  {s.poissonDepth != null && <span className="sbc-diag-dim" style={{marginLeft:8}}>depth={s.poissonDepth}</span>}
                 </td></tr>
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
                 <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
-                <tr><td>Colour method</td><td>raw RGB sensor values</td></tr>
+                <tr><td>Colour method</td><td>{s.colourMethod ?? 'LiDAR sensor (IDW)'}</td></tr>
               </tbody>
             </table>
           </div>

@@ -19,6 +19,6 @@ export function applyOrbitJoystickStep(orbit, joyX, joyY, speed) {
   if (!orbit) return false
   if (!joyX && !joyY) return false
   orbit.theta -= joyX * speed
-  orbit.phi += joyY * speed
+  orbit.phi   -= joyY * speed   // inverted: joystick-up (joyY<0) → phi increases → look down; user confirmed this feels correct
   return true
 }
