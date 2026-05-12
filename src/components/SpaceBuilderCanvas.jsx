@@ -946,7 +946,12 @@ export default function SpaceBuilderCanvas({
           const fboW = t.renderer?.domElement?.width  ?? 0
           const fboH = t.renderer?.domElement?.height ?? 0
           diagStatsRef.current = {
-            rawPts: totalVerts, renderedPts: totalVerts, triCount: totalTris,
+            // meta.rawPts / poissonPts come from the build stats written by mesh_worker.
+            // Fall back to mesh vertex count if the build pre-dates this feature.
+            rawPts:     meta?.rawPts     ?? totalVerts,
+            poissonPts: meta?.poissonPts ?? null,
+            renderedPts: totalVerts,
+            triCount: totalTris,
             fboW, fboH, dpr: Math.min(window.devicePixelRatio, 2),
             meshSource: 'poisson-glb',
           }
@@ -1827,8 +1832,11 @@ export default function SpaceBuilderCanvas({
             </div>
             <table className="sbc-diag-table">
               <tbody>
-                <tr><td>Raw points</td><td>{s.rawPts.toLocaleString()}</td></tr>
-                <tr><td>Vertices</td><td>{s.renderedPts.toLocaleString()} <span className="sbc-diag-dim">({pct}% / {dedupX}× reduction)</span></td></tr>
+                <tr><td>Raw scan pts</td><td>{s.rawPts.toLocaleString()}</td></tr>
+                {s.poissonPts != null && (
+                  <tr><td>Poisson input</td><td>{s.poissonPts.toLocaleString()} <span className="sbc-diag-dim">({((s.poissonPts/s.rawPts)*100).toFixed(1)}% of raw)</span></td></tr>
+                )}
+                <tr><td>Mesh vertices</td><td>{s.renderedPts.toLocaleString()}</td></tr>
                 <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
                 <tr><td>Mesh source</td><td>
                   {s.meshSource === 'poisson-glb' ? 'Poisson (server)' : 'spherical grid (JS)'}
