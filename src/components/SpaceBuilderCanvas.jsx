@@ -867,7 +867,7 @@ export default function SpaceBuilderCanvas({
       // If it's ready, load it with GLTFLoader — zero JS processing, full
       // Poisson fidelity.  If still processing or unavailable, fall through to
       // the spherical triangulation pipeline.
-      const roomId = roomScan.id
+      const roomId = space?.id
       if (roomId) {
         try {
           reportRoomLoad(5, 'Checking for pre-built mesh…')
