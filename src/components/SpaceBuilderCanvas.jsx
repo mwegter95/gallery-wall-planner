@@ -829,21 +829,31 @@ export default function SpaceBuilderCanvas({
     const t = threeRef.current
     if (!t) return
 
+    // Deeply dispose a Three.js object (handles plain Mesh OR a GLB Group)
+    function deepDispose(obj) {
+      obj.traverse(o => {
+        if (o.geometry) o.geometry.dispose()
+        if (o.material) {
+          const mats = Array.isArray(o.material) ? o.material : [o.material]
+          mats.forEach(m => { if (m.map) m.map.dispose(); m.dispose() })
+        }
+      })
+    }
+
     // Remove old point cloud + plane meshes
     if (pointCloudMeshRef.current) {
       t.scene.remove(pointCloudMeshRef.current)
-      pointCloudMeshRef.current.geometry.dispose()
-      pointCloudMeshRef.current.material.dispose()
+      deepDispose(pointCloudMeshRef.current)
       pointCloudMeshRef.current = null
     }
     for (const m of planeMeshesRef.current) {
       t.scene.remove(m)
-      m.geometry.dispose(); m.material.dispose()
+      deepDispose(m)
     }
     planeMeshesRef.current = []
     for (const m of reconstructionMeshesRef.current) {
       t.scene.remove(m)
-      m.geometry.dispose(); m.material.dispose()
+      deepDispose(m)
     }
     reconstructionMeshesRef.current = []
 
