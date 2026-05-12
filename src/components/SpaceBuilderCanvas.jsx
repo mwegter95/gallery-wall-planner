@@ -13,6 +13,7 @@ import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
+import { BASE, getJwt, getDeviceToken } from '../utils/api'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -871,8 +872,13 @@ export default function SpaceBuilderCanvas({
       if (roomId) {
         try {
           reportRoomLoad(5, 'Checking for pre-built mesh…')
-          const meshResp = await fetch(`/api/rooms/${roomId}/mesh`, {
-            headers: { Authorization: `Bearer ${localStorage.getItem('gwp-jwt') || ''}` },
+          const jwt    = getJwt()
+          const device = getDeviceToken()
+          const meshResp = await fetch(`${BASE}/api/rooms/${roomId}/mesh`, {
+            headers: {
+              'X-Device-Token': device,
+              ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+            },
           })
           if (meshResp.ok) {
             const meshMeta = await meshResp.json()
@@ -881,7 +887,7 @@ export default function SpaceBuilderCanvas({
               const loader = new GLTFLoader()
               const gltf   = await new Promise((resolve, reject) => {
                 loader.load(
-                  meshMeta.url,
+                  `${BASE}${meshMeta.url}`,
                   resolve,
                   xhr => { if (!cancelled) reportRoomLoad(20 + (70 * xhr.loaded / (xhr.total || 1)), 'Loading mesh…') },
                   reject,
