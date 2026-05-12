@@ -19,6 +19,7 @@ import {
 } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { cloneRoomForEditing } from '../utils/roomScanPersistence'
+import { uploadSnapshot, uploadSnapshots } from '../utils/api'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -91,13 +92,27 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const warpQueueRef  = useRef(new Set())
 
   /* ── LiDAR scan complete ───────────────────────────────────────────────── */
-  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt }) => {
+  const handleScanSnapshot = useCallback((snapshot, index) => {
+    if (!snapshot || !space?.id) return
+    const idx = Number.isFinite(index) ? index : Date.now()
+    uploadSnapshot(space.id, idx, snapshot)
+      .then(() => console.log('[snapshots] uploaded incremental snapshot', idx))
+      .catch(e => console.warn('[snapshots] incremental upload failed', idx, e))
+  }, [space?.id])
+
+  const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
     setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt } }))
     setShowLidarScanner(false)
+    // Legacy fallback path: older native builds may only send snapshots at done.
+    if (snapshots?.length && space?.id) {
+      uploadSnapshots(space.id, snapshots)
+        .then(r => console.log('[snapshots] uploaded', r?.count, 'snaps'))
+        .catch(e => console.warn('[snapshots] upload failed', e))
+    }
     // Prompt to save with a name — pre-fill current space name
     setPostScanName(spaceNameRef.current?.trim() || 'Scanned Room')
     setShowPostScanSave(true)
-  }, [])
+  }, [space?.id])
 
   /* ── Add Surface from 3D view (perspective-warp workflow) ─────────────── */
   const handleSurfaceFromView = useCallback((dataUrl, cameraData) => {
@@ -828,6 +843,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       {showLidarScanner && (
         <LidarScanner
           onComplete={handleScanComplete}
+          onSnapshot={handleScanSnapshot}
           onCancel={() => setShowLidarScanner(false)}
         />
       )}

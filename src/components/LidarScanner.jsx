@@ -36,7 +36,7 @@ const MIN_DEPTH = 0.15
 // Maximum depth (m) — ignore beyond this (large open spaces, windows to sky)
 const MAX_DEPTH = 12
 
-export default function LidarScanner({ onComplete, onCancel }) {
+export default function LidarScanner({ onComplete, onCancel, onSnapshot = null }) {
   const [status,    setStatus]    = useState('checking') // checking | unsupported | starting | scanning | processing | error
   const [progress,  setProgress]  = useState(0)   // 0-100 while scanning
   const [pointCount, setPointCount] = useState(0)
@@ -92,6 +92,13 @@ export default function LidarScanner({ onComplete, onCancel }) {
           setProgress(Math.min(99, Math.round((n / 500_000) * 80)))
           return
         }
+        if (result.status === 'snapshot') {
+          const snap = result.snapshot
+          if (snap && onSnapshot) {
+            onSnapshot(snap, Number.isFinite(result.index) ? result.index : undefined)
+          }
+          return
+        }
         if (result.status === 'progress') {
           // Legacy progress events (older Swift builds without chunk streaming)
           setPointCount(result.pointCount)
@@ -111,7 +118,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
             setProgress(100)
             const pointCloud = { pointCount: buf.pointCount, _buffer: buf }
             nativeBufRef.current = null
-            onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
+            onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt,
+                         snapshots: result.snapshots || [] })
 
           } else if (result.data) {
             // ── Fallback: old Swift build sent full blob in 'done' ────────────
@@ -132,7 +140,8 @@ export default function LidarScanner({ onComplete, onCancel }) {
                 const fallback = PointCloudBuffer.fromFloat32Array(arr, result.pointCount)
                 setProgress(100)
                 const pointCloud = { pointCount: result.pointCount, _buffer: fallback }
-                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt })
+                onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt,
+                             snapshots: result.snapshots || [] })
               }
             }
             setTimeout(decodeStep, 0)

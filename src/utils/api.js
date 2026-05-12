@@ -406,6 +406,29 @@ export async function getRoom(roomId) {
 }
 
 /**
+ * Upload one snapshot during scanning (incremental upload).
+ * snapshot: { jpeg, c2w, K, fw, fh }
+ */
+export async function uploadSnapshot(roomId, index, snapshot) {
+  return apiFetch(`/api/rooms/${roomId}/snapshots/${index}`, {
+    method: 'POST',
+    body: JSON.stringify({ snapshot }),
+  })
+}
+
+/**
+ * Upload snapshot bundles (fallback path for older native builds).
+ * snapshots: Array<{ jpeg, c2w, K, fw, fh }>
+ */
+export async function uploadSnapshots(roomId, snapshots) {
+  if (!snapshots?.length) return { count: 0 }
+  return apiFetch(`/api/rooms/${roomId}/snapshots`, {
+    method: 'POST',
+    body: JSON.stringify({ snapshots }),
+  })
+}
+
+/**
  * Upload a perspective-warped surface image and return the server URL.
  * Stores under uploads/walls/<roomId>_<faceId>.<ext>
  */
