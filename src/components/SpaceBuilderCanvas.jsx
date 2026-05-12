@@ -811,6 +811,7 @@ export default function SpaceBuilderCanvas({
   const [diagVisible,     setDiagVisible]  = useState(false)
   const [diagMode,        setDiagMode]     = useState(0)  // 0=color, 1=depth, 2=normals
   const [meshRebuilding,  setMeshRebuilding] = useState(false)
+  const [meshGeneration,  setMeshGeneration] = useState(0)  // bump to re-run buildCloud
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
     if (!onRoomScanLoadProgress) return
@@ -1383,7 +1384,7 @@ export default function SpaceBuilderCanvas({
 
     buildCloud()
     return () => { cancelled = true }
-  }, [roomScan, reportRoomLoad]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roomScan, reportRoomLoad, meshGeneration]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Composite piece overlays onto surface textures ───────────────────────
   useEffect(() => {
@@ -1794,15 +1795,26 @@ export default function SpaceBuilderCanvas({
                         try {
                           const jwt    = getJwt()
                           const device = getDeviceToken()
-                          await fetch(`${BASE}/api/rooms/${space.id}/mesh?rebuild=1`, {
-                            headers: {
-                              'X-Device-Token': device,
-                              ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-                            },
-                          })
+                          const headers = {
+                            'X-Device-Token': device,
+                            ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+                          }
+                          // Kick the rebuild
+                          await fetch(`${BASE}/api/rooms/${space.id}/mesh?rebuild=1`, { headers })
+                          // Poll every 3 s until the server says ready or failed
+                          for (let attempt = 0; attempt < 40; attempt++) {
+                            await new Promise(r => setTimeout(r, 3000))
+                            const res  = await fetch(`${BASE}/api/rooms/${space.id}/mesh`, { headers })
+                            const meta = await res.json()
+                            if (meta.status === 'ready') {
+                              setMeshGeneration(g => g + 1)  // re-run buildCloud → loads new GLB
+                              break
+                            }
+                            if (meta.status === 'failed') break
+                          }
                         } finally { setMeshRebuilding(false) }
                       }}
-                    >{meshRebuilding ? 'Queued…' : 'Rebuild'}</button>
+                    >{meshRebuilding ? 'Building…' : 'Rebuild'}</button>
                   )}
                 </td></tr>
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
