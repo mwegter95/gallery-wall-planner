@@ -810,6 +810,7 @@ export default function SpaceBuilderCanvas({
   const diagStatsRef      = useRef(null)  // { rawPts, renderedPts, fboW, fboH, dpr }
   const [diagVisible,     setDiagVisible]  = useState(false)
   const [diagMode,        setDiagMode]     = useState(0)  // 0=color, 1=depth, 2=normals
+  const [meshRebuilding,  setMeshRebuilding] = useState(false)
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
     if (!onRoomScanLoadProgress) return
@@ -1781,7 +1782,29 @@ export default function SpaceBuilderCanvas({
                 <tr><td>Raw points</td><td>{s.rawPts.toLocaleString()}</td></tr>
                 <tr><td>Vertices</td><td>{s.renderedPts.toLocaleString()} <span className="sbc-diag-dim">({pct}% / {dedupX}× reduction)</span></td></tr>
                 <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
-                <tr><td>Mesh source</td><td>{s.meshSource === 'poisson-glb' ? 'Poisson (server)' : 'spherical grid (JS)'}</td></tr>
+                <tr><td>Mesh source</td><td>
+                  {s.meshSource === 'poisson-glb' ? 'Poisson (server)' : 'spherical grid (JS)'}
+                  {space?.id && (
+                    <button
+                      className="sbc-diag-mode-btn"
+                      style={{ marginLeft: 8 }}
+                      disabled={meshRebuilding}
+                      onClick={async () => {
+                        setMeshRebuilding(true)
+                        try {
+                          const jwt    = getJwt()
+                          const device = getDeviceToken()
+                          await fetch(`${BASE}/api/rooms/${space.id}/mesh?rebuild=1`, {
+                            headers: {
+                              'X-Device-Token': device,
+                              ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+                            },
+                          })
+                        } finally { setMeshRebuilding(false) }
+                      }}
+                    >{meshRebuilding ? 'Queued…' : 'Rebuild'}</button>
+                  )}
+                </td></tr>
                 <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
                 <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
                 <tr><td>Colour method</td><td>raw RGB sensor values</td></tr>
