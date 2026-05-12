@@ -400,6 +400,11 @@ export async function deleteRoom(roomId) {
   return apiFetch(`/api/rooms/${roomId}`, { method: 'DELETE' })
 }
 
+/** Fetch full room data for a single room (lazy-loaded after init). */
+export async function getRoom(roomId) {
+  return apiFetch(`/api/rooms/${roomId}`)
+}
+
 /**
  * Upload a perspective-warped surface image and return the server URL.
  * Stores under uploads/walls/<roomId>_<faceId>.<ext>

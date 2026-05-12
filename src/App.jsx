@@ -457,12 +457,28 @@ export default function App() {
     }
   }, [activeRoomId])
 
+  /** Open 3D room tour — lazy-loads full room data if only a summary is in state */
+  const loadFullRoom = useCallback(async (roomId) => {
+    if (!roomId) return null
+    const existing = rooms[roomId]
+    if (existing && !existing._summary) return existing  // already fully loaded
+    try {
+      const full = await api.getRoom(roomId)
+      setRooms(prev => ({ ...prev, [roomId]: full }))
+      return full
+    } catch (err) {
+      console.error('[loadFullRoom] failed for', roomId, err)
+      return rooms[roomId] ?? null
+    }
+  }, [rooms])
+
   /** Open 3D room tour */
-  const handleViewRoom = useCallback((roomId) => {
+  const handleViewRoom = useCallback(async (roomId) => {
+    await loadFullRoom(roomId)
     setActiveRoomId(roomId)
     setShowRoomView(true)
     setShowRoomMgr(false)
-  }, [])
+  }, [loadFullRoom])
 
   /** User clicked a face inside the 3D viewer — open setup wizard for that room */
   const handleEditRoomFace = useCallback((_faceId) => {
@@ -1683,7 +1699,8 @@ export default function App() {
       {showSpaceMgr && (
         <SpacesManager
           spaces={rooms}
-          onEdit={(id) => {
+          onEdit={async (id) => {
+            await loadFullRoom(id)
             setEditingSpaceId(id)
             setShowSpaceBuilder(true)
             setShowSpaceMgr(false)
@@ -1706,6 +1723,7 @@ export default function App() {
           allLayouts={allLayouts}
           walls={walls}
           rooms={rooms}
+          loadRoom={loadFullRoom}
           onSave={handleSaveSpace}
           onClose={() => { setShowSpaceBuilder(false); setEditingSpaceId(null) }}
         />

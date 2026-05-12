@@ -26,7 +26,7 @@ const MAX_HISTORY = 50
 // Properties that count as "moveable" actions worth undo-ing
 const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
 
-export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, walls = {}, rooms = {} }) {
+export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, walls = {}, rooms = {}, loadRoom = null }) {
   const [space, setSpace]                 = useState(() => {
     if (!existingSpace) return createSpace()
     return cloneRoomForEditing(existingSpace)
@@ -530,9 +530,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   }, [postScanName, isSaving, handleSave])
 
   // ── Load a different room ────────────────────────────────────────────────
-  const doLoadRoom = (roomId) => {
-    const room = rooms[roomId]
+  const doLoadRoom = async (roomId) => {
+    let room = rooms[roomId]
     if (!room) return
+    // If only a summary is in state (no surfaces), fetch the full room first
+    if (room._summary && loadRoom) {
+      room = await loadRoom(roomId)
+      if (!room) return
+    }
     const hasScan = !!room.roomScan?.pointCloud
     setScanLoadState(
       hasScan
