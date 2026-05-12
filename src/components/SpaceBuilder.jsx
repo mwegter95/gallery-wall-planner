@@ -19,7 +19,7 @@ import {
 } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { cloneRoomForEditing } from '../utils/roomScanPersistence'
-import { uploadSnapshot, uploadSnapshots } from '../utils/api'
+import { uploadPointCloudChunked, uploadSnapshot, uploadSnapshots } from '../utils/api'
 
 const EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -104,7 +104,38 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   }, [space?.id])
 
   const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
-    setSpace(prev => ({ ...prev, roomScan: { pointCloud, planes, capturedAt } }))
+    const nextPointCloud = { ...pointCloud }
+    if (space?.id && pointCloud?._buffer) {
+      const usedFloats = (pointCloud._buffer.pointCount || 0) * 6
+      const binaryPayload = pointCloud._buffer._data.subarray(0, usedFloats)
+      nextPointCloud._uploadPromise = uploadPointCloudChunked(space.id, binaryPayload)
+        .then(({ url }) => {
+          if (url) {
+            setSpace(prev => {
+              if (prev?.id !== space.id || prev?.roomScan?.capturedAt !== capturedAt) return prev
+              return {
+                ...prev,
+                roomScan: {
+                  ...prev.roomScan,
+                  pointCloud: {
+                    ...prev.roomScan.pointCloud,
+                    url,
+                    _preuploaded: true,
+                    _uploadPromise: null,
+                  },
+                },
+              }
+            })
+          }
+          return url || null
+        })
+        .catch(err => {
+          console.warn('[scan] background point cloud upload failed', err)
+          return null
+        })
+    }
+
+    setSpace(prev => ({ ...prev, roomScan: { pointCloud: nextPointCloud, planes, capturedAt } }))
     setShowLidarScanner(false)
     // Legacy fallback path: older native builds may only send snapshots at done.
     if (snapshots?.length && space?.id) {

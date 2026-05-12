@@ -499,6 +499,7 @@ export default function App() {
     const hasBinary = pc && (pc._buffer || pc.data)  // in-memory scan OR legacy base64
     const previousUrl = pc?.url || null
     let pointCloudUrl = previousUrl
+    const pendingPointCloudUpload = pc?._uploadPromise || null
 
     const initialRoomMeta = space.roomScan
       ? {
@@ -516,8 +517,17 @@ export default function App() {
     setRooms(prev => ({ ...prev, [space.id]: { ...space, roomScan: initialRoomMeta } }))
     report(12)
 
+    if (pendingPointCloudUpload) {
+      try {
+        const uploadedUrl = await pendingPointCloudUpload
+        if (uploadedUrl) pointCloudUrl = uploadedUrl
+      } catch (err) {
+        console.warn('[handleSaveSpace] background point cloud upload failed', err)
+      }
+    }
+
     // ── Upload binary point cloud separately (12% → 68%) ──────────────────────
-    if (hasBinary) {
+    if (hasBinary && !pointCloudUrl) {
       try {
         let binaryPayload
         if (pc._buffer) {
