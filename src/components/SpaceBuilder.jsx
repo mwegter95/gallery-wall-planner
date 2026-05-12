@@ -90,14 +90,17 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const historyRef   = useRef({ stack: [], index: -1, timer: null })
   const fileInputRef  = useRef(null)
   const warpQueueRef  = useRef(new Set())
+  const snapshotUploadsRef = useRef(new Set())
 
   /* ── LiDAR scan complete ───────────────────────────────────────────────── */
   const handleScanSnapshot = useCallback((snapshot, index) => {
     if (!snapshot || !space?.id) return
     const idx = Number.isFinite(index) ? index : Date.now()
-    uploadSnapshot(space.id, idx, snapshot)
+    const uploadPromise = uploadSnapshot(space.id, idx, snapshot)
       .then(() => console.log('[snapshots] uploaded incremental snapshot', idx))
       .catch(e => console.warn('[snapshots] incremental upload failed', idx, e))
+      .finally(() => snapshotUploadsRef.current.delete(uploadPromise))
+    snapshotUploadsRef.current.add(uploadPromise)
   }, [space?.id])
 
   const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
@@ -494,12 +497,12 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   }
 
   // ── Save ─────────────────────────────────────────────────────────────────
-  const handleSave = async (overrideName) => {
+  const handleSave = async (overrideName, { saveAsNew = false } = {}) => {
     const nameToUse = (overrideName || space.name).trim()
     if (!nameToUse) return
-    const spaceToSave = overrideName
+    const spaceToSave = saveAsNew
       ? { ...space, id: genId(), name: overrideName }  // save-as-new: fresh id + new name
-      : space
+      : { ...space, name: nameToUse }
     setIsSaving(true)
     setSaveProgress(0)
     setSaveErrorMsg('')
@@ -508,13 +511,16 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     setSaveAsName('')
     let ok = false
     try {
+      const pendingSnapshotUploads = Array.from(snapshotUploadsRef.current)
+      if (pendingSnapshotUploads.length) {
+        await Promise.allSettled(pendingSnapshotUploads)
+      }
       await onSave(spaceToSave, (pct) => setSaveProgress(Math.round(pct)))
       setSaveProgress(100)
       setSavedSnapshot(JSON.stringify(spaceToSave.surfaces))
       setSavedRoomScanAt(spaceToSave.roomScan?.capturedAt ?? null)
       setScanSaveToast(false)
-      // If saved as new, switch to that space
-      if (overrideName) setSpace(spaceToSave)
+      setSpace(spaceToSave)
       ok = true
       return true
     } catch (err) {
@@ -973,7 +979,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 <button className="sb-guard-btn sb-guard-btn--saveas" onClick={() => {
                   // prompt for new name via saveAs flow then load
                   const name = window.prompt('Save current room as:', space.name + ' copy')
-                  if (name?.trim()) handleSave(name.trim()).then((ok) => { if (ok) doLoadRoom(pendingRoomId) })
+                  if (name?.trim()) handleSave(name.trim(), { saveAsNew: true }).then((ok) => { if (ok) doLoadRoom(pendingRoomId) })
                 }} disabled={isSaving}>
                   Save as New
                 </button>
@@ -1164,14 +1170,14 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                       value={saveAsName}
                       onChange={e => setSaveAsName(e.target.value)}
                       onKeyDown={e => {
-                        if (e.key === 'Enter' && saveAsName.trim()) handleSave(saveAsName.trim())
+                        if (e.key === 'Enter' && saveAsName.trim()) handleSave(saveAsName.trim(), { saveAsNew: true })
                       }}
                       autoFocus
                     />
                     <button
                       className="sb-save-menu-go"
                       disabled={!saveAsName.trim()}
-                      onClick={() => handleSave(saveAsName.trim())}
+                      onClick={() => handleSave(saveAsName.trim(), { saveAsNew: true })}
                     >Save</button>
                   </div>
                 </div>
