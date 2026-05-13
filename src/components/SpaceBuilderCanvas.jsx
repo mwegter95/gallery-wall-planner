@@ -1042,7 +1042,12 @@ export default function SpaceBuilderCanvas({
         } else if (pc?.url) {
           const resp = await fetch(pc.url)
           if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
-          const totalBytes = Number(resp.headers.get('content-length') || 0)
+          // Prefer X-Uncompressed-Length (set when server gzip-encodes) so the
+          // streaming buffer is sized for the decoded bytes, not the wire bytes.
+          const totalBytes = Number(
+            resp.headers.get('x-uncompressed-length') ||
+            resp.headers.get('content-length') || 0
+          )
           let ab
           if (resp.body?.getReader && totalBytes > 0) {
             const reader = resp.body.getReader()
@@ -1059,9 +1064,11 @@ export default function SpaceBuilderCanvas({
                 reportRoomLoad(4 + (34 * received / totalBytes), 'Downloading scan')
               }
             }
-            ab = received === totalBytes
+            // Use slice() so ab is a correctly-sized copy rather than the full
+            // backing buffer (subarray().buffer returns the original full buffer).
+            ab = received >= totalBytes
               ? merged.buffer
-              : merged.subarray(0, Math.max(0, Math.min(received, totalBytes))).buffer
+              : merged.slice(0, Math.max(0, Math.min(received, totalBytes))).buffer
           } else {
             reportRoomLoad(14, 'Downloading scan')
             ab = await resp.arrayBuffer()

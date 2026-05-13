@@ -168,9 +168,11 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
         // This replaces ~84 sequential HTTP chunk requests with a single large request.
         const buf = pointCloud._buffer
         if (buf?.pointCount > 0) {
-          const rawBytes = buf._data.subarray(0, buf.pointCount * 6)
+          // Use .slice() so we get a correctly-sized typed-array view (not the full
+          // backing buffer which may be 2-4× larger due to doubling growth).
+          const rawBytes = buf._data.slice(0, buf.pointCount * 6)
           const roomId = space.id
-          nextPointCloud._uploadPromise = uploadPointCloud(roomId, rawBytes.buffer)
+          nextPointCloud._uploadPromise = uploadPointCloud(roomId, rawBytes)
             .then(({ url }) => {
               if (url) {
                 setSpace(prev => {
@@ -603,7 +605,21 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
       setSavedSnapshot(JSON.stringify(spaceToSave.surfaces))
       setSavedRoomScanAt(spaceToSave.roomScan?.capturedAt ?? null)
       setScanSaveToast(false)
-      setSpace(spaceToSave)
+      // Preserve any URL that the background _uploadPromise.then() already wrote
+      // to state — setSpace(spaceToSave) was captured before that ran.
+      setSpace(prev => {
+        const prevUrl = prev.roomScan?.pointCloud?.url
+        if (prevUrl && spaceToSave.roomScan?.pointCloud && !spaceToSave.roomScan.pointCloud.url) {
+          return {
+            ...spaceToSave,
+            roomScan: {
+              ...spaceToSave.roomScan,
+              pointCloud: { ...spaceToSave.roomScan.pointCloud, url: prevUrl },
+            },
+          }
+        }
+        return spaceToSave
+      })
       ok = true
       return true
     } catch (err) {
@@ -616,21 +632,25 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     }
   }
 
-  const handlePostScanSave = useCallback(async () => {
+  const handlePostScanSave = useCallback(() => {
     const name = postScanName.trim()
     if (!name || isSaving) return
     if (postScanCloseTimerRef.current) {
       clearTimeout(postScanCloseTimerRef.current)
       postScanCloseTimerRef.current = null
     }
-    const ok = await handleSave(name)
-    if (!ok) return
-    setSaveSuccessMsg('Saved successfully')
-    postScanCloseTimerRef.current = setTimeout(() => {
-      setShowPostScanSave(false)
-      setSaveSuccessMsg('')
-      setSaveProgress(0)
-    }, 1800)
+    // Close modal immediately so user can view the scan while save runs.
+    // The toolbar Save button shows isSaving progress.
+    setShowPostScanSave(false)
+    handleSave(name).then(ok => {
+      if (ok) {
+        setSaveSuccessMsg('Room saved!')
+        postScanCloseTimerRef.current = setTimeout(() => {
+          setSaveSuccessMsg('')
+          setSaveProgress(0)
+        }, 2500)
+      }
+    })
   }, [postScanName, isSaving, handleSave])
 
   // ── Load a different room ────────────────────────────────────────────────
@@ -1229,6 +1249,15 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               {isSaving && saveProgress > 0 && (
                 <div className="sb-toolbar-progress">
                   <div className="sb-toolbar-progress-fill" style={{ width: `${saveProgress}%` }} />
+                </div>
+              )}
+              {saveSuccessMsg && !isSaving && (
+                <div className="sb-save-success" role="status">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                    <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2"/>
+                    <path d="M3.5 6l1.5 1.5 3.5-3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  <span>{saveSuccessMsg}</span>
                 </div>
               )}
               {showSaveMenu && (
