@@ -49,8 +49,9 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
   const sessionRef    = useRef(null)
   const rafRef        = useRef(null)
   const bufferRef     = useRef(null)
-  const nativeBufRef       = useRef(null)   // accumulates streaming chunks from native bridge
-  const postProjectionRef  = useRef(false)  // true while iOS is streaming post-projection colored cloud
+  const nativeBufRef            = useRef(null)   // accumulates streaming chunks from native bridge
+  const postProjectionRef       = useRef(false)  // true while iOS is streaming post-projection colored cloud
+  const directUploadResolveRef  = useRef(null)   // resolve fn for the iOS direct-upload promise
   const planesRef     = useRef([])
   const camCtxRef     = useRef(null)  // 2D canvas ctx for sampling camera color
   const glRef         = useRef(null)  // WebGL context
@@ -120,6 +121,16 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
           setProgress(Math.min(99, Math.round((result.pointCount / 100_000) * 100)))
           return
         }
+        // ── iOS direct upload complete ──────────────────────────────────────
+        // Swift uploaded the point cloud directly and is telling us the URL.
+        // Resolve the pending promise so SpaceBuilder can skip the browser XHR.
+        if (result.status === 'uploadComplete') {
+          if (directUploadResolveRef.current) {
+            directUploadResolveRef.current(result.url || null)
+            directUploadResolveRef.current = null
+          }
+          return
+        }
         if (result.status === 'done') {
           postProjectionRef.current = false
           setStatus('processing')
@@ -133,6 +144,14 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
             // can render it without any serialization overhead.
             setProgress(100)
             const pointCloud = { pointCount: buf.pointCount, _buffer: buf }
+            // If the iOS app is uploading the point cloud directly, attach a promise
+            // that resolves when 'uploadComplete' arrives — SpaceBuilder will wait
+            // on this instead of starting a browser XHR upload.
+            if (window.__stageARNative) {
+              pointCloud._directUploadPromise = new Promise(resolve => {
+                directUploadResolveRef.current = resolve
+              })
+            }
             nativeBufRef.current = null
             onComplete({ pointCloud, planes: [], capturedAt: result.capturedAt,
                          snapshots: result.snapshots || [] })

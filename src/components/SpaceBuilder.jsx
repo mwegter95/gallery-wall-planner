@@ -20,6 +20,7 @@ import {
 import { warpPerspectiveAsync } from '../utils/homography'
 import { cloneRoomForEditing } from '../utils/roomScanPersistence'
 import {
+  BASE,
   finalizePointCloudStream,
   uploadPointCloudStreamChunk,
   uploadPointCloud,
@@ -140,54 +141,74 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
     const stream = pointCloudStreamRef.current
     const hasPreProjectionStream = stream && stream.roomId === space?.id && stream.nextIndex > 0 && !stream.finalized
 
-    if (space?.id) {
-      if (hasPreProjectionStream) {
-        // Legacy path: chunks were streamed to backend during live scan (before projection).
-        // Finalize the streaming upload.
-        stream.finalized = true
-        nextPointCloud._uploadPromise = Promise
-          .allSettled(Array.from(snapshotUploadsRef.current))
-          .then(() => stream.chain)
-          .then(() => finalizePointCloudStream(space.id, stream.uploadId))
-          .then(({ url }) => {
-            if (url) {
-              setSpace(prev => {
-                if (prev?.id !== space.id || prev?.roomScan?.capturedAt !== capturedAt) return prev
-                return { ...prev, roomScan: { ...prev.roomScan, pointCloud: { ...prev.roomScan.pointCloud, url, _uploadPromise: null } } }
-              })
-            }
-            return url || null
-          })
-          .catch(err => {
-            console.warn('[scan] stream finalize failed', err)
-            return null
-          })
-      } else {
-        // New path: iOS projected on-device and streamed everything after projection.
-        // The full colored cloud is already in buf._buffer — upload as ONE binary POST.
-        // This replaces ~84 sequential HTTP chunk requests with a single large request.
-        const buf = pointCloud._buffer
-        if (buf?.pointCount > 0) {
-          // Use .slice() so we get a correctly-sized typed-array view (not the full
-          // backing buffer which may be 2-4× larger due to doubling growth).
-          const rawBytes = buf._data.slice(0, buf.pointCount * 6)
-          const roomId = space.id
-          nextPointCloud._uploadPromise = uploadPointCloud(roomId, rawBytes)
+    try {
+      if (space?.id) {
+        if (hasPreProjectionStream) {
+          // Legacy path: chunks were streamed to backend during live scan (before projection).
+          // Finalize the streaming upload.
+          stream.finalized = true
+          nextPointCloud._uploadPromise = Promise
+            .allSettled(Array.from(snapshotUploadsRef.current))
+            .then(() => stream.chain)
+            .then(() => finalizePointCloudStream(space.id, stream.uploadId))
             .then(({ url }) => {
               if (url) {
                 setSpace(prev => {
-                  if (prev?.id !== roomId || prev?.roomScan?.capturedAt !== capturedAt) return prev
+                  if (prev?.id !== space.id || prev?.roomScan?.capturedAt !== capturedAt) return prev
                   return { ...prev, roomScan: { ...prev.roomScan, pointCloud: { ...prev.roomScan.pointCloud, url, _uploadPromise: null } } }
                 })
               }
               return url || null
             })
             .catch(err => {
-              console.warn('[scan] direct upload failed', err)
+              console.warn('[scan] stream finalize failed', err)
               return null
             })
+        } else {
+          // New path: iOS projected on-device and streamed everything after projection.
+          const buf = pointCloud._buffer
+          if (buf?.pointCount > 0) {
+            // Trim the backing buffer in-place: PointCloudBuffer doubles capacity on
+            // each grow so buf._data may be 2-4× larger than the valid data.
+            // toFloat32Array() makes one correctly-sized copy; replacing buf._data lets
+            // the oversized backing buffer be GC'd, halving peak memory.
+            // Both the upload and the WebGL render share this one trimmed array.
+            const trimmed = buf.toFloat32Array()
+            buf._data = trimmed
+            buf._cap  = buf._len
+            const roomId = space.id
+
+            const makeSetUrl = (uploadPromise) => uploadPromise
+              .then(resolvedUrl => {
+                const url = resolvedUrl?.url ?? resolvedUrl
+                if (url) {
+                  const absUrl = typeof url === 'string' && url.startsWith('/') ? `${BASE}${url}` : url
+                  setSpace(prev => {
+                    if (prev?.id !== roomId || prev?.roomScan?.capturedAt !== capturedAt) return prev
+                    return { ...prev, roomScan: { ...prev.roomScan, pointCloud: { ...prev.roomScan.pointCloud, url: absUrl, _uploadPromise: null } } }
+                  })
+                  return absUrl
+                }
+                return null
+              })
+              .catch(err => {
+                console.warn('[scan] upload failed', err)
+                return null
+              })
+
+            if (pointCloud._directUploadPromise) {
+              // iOS is uploading directly via URLSession — no browser XHR needed.
+              // _directUploadPromise resolves with the URL when the iOS upload completes.
+              nextPointCloud._uploadPromise = makeSetUrl(pointCloud._directUploadPromise)
+            } else {
+              // Browser XHR fallback (non-iOS or no apiBase configured).
+              nextPointCloud._uploadPromise = makeSetUrl(uploadPointCloud(roomId, trimmed))
+            }
+          }
         }
       }
+    } catch (err) {
+      console.warn('[scan] upload setup failed — scan will display but not be saved:', err)
     }
     pointCloudStreamRef.current = null
 
