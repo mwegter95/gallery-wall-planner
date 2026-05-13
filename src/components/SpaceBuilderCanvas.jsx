@@ -339,13 +339,27 @@ function applyUvOrientation(u0, v0, ori) {
 const MAX_PROJ_CAMS  = 16
 const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate }) {
-  const data = await getSnapshots(roomId)
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress }) {
+  onProgress?.(5, 'Loading snapshots…')
+  let data
+  try {
+    data = await getSnapshots(roomId)
+  } catch (err) {
+    console.warn('[projective] snapshot fetch failed:', err)
+    if (diagRef) diagRef.current = { ...diagRef.current, projStatus: `Snapshot fetch failed: ${err.message}` }
+    onDiagUpdate?.()
+    onProgress?.(100, 'Snapshot fetch failed', false)
+    return null
+  }
   const allSnaps = data?.snapshots
   if (!allSnaps?.length) {
     console.warn('[projective] no snapshots for room', roomId)
+    if (diagRef) diagRef.current = { ...diagRef.current, projStatus: 'No snapshots on server' }
+    onDiagUpdate?.()
+    onProgress?.(100, 'No snapshots found', false)
     return null
   }
+  onProgress?.(10, `Loading ${Math.min(allSnaps.length, MAX_PROJ_CAMS)} photo textures…`)
 
   let snaps = allSnaps
   if (snaps.length > MAX_PROJ_CAMS) {
@@ -354,14 +368,22 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
 
   const loader   = new THREE.TextureLoader()
+  let texLoaded  = 0
   const textures = await Promise.all(snaps.map(s => new Promise((res, rej) => {
     loader.load(
       BASE + s.url,
-      tex => { tex.flipY = false; res(tex) },
+      tex => {
+        tex.flipY = false
+        texLoaded++
+        onProgress?.(10 + Math.round(55 * texLoaded / snaps.length), `Loading textures (${texLoaded}/${snaps.length})…`)
+        res(tex)
+      },
       undefined,
       rej,
     )
   })))
+
+  onProgress?.(68, 'Computing photo projection…')
 
   const nCams   = snaps.length
   const w2cMats = snaps.map(s => new THREE.Matrix4().fromArray(c2wToW2c(s.c2w)))
@@ -370,7 +392,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const camFxArr = new Float32Array(snaps.map(({ K }) => K[0]))
 
   const oldUni = points.material?.uniforms
-  if (!oldUni) return null  // mesh was disposed while textures loaded
+  if (!oldUni) {
+    onProgress?.(100, 'Scene changed — retry', false)
+    return null  // mesh was disposed while textures loaded
+  }
 
   // ── Orientation from image dimensions ───────────────────────────────────
   // ARKit intrinsics (K) are in the native sensor frame (landscape).
@@ -489,6 +514,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
+  onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
   console.info(`[projective] ${nCams} cams loaded, ${usedCamCount} cover points, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
 
   if (diagRef) {
@@ -500,10 +526,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projUsed:        usedCamCount,
       projCoverage:    coveragePct,
       wegterSpacingMm: medSpacingMm,
+      projStatus:      null,
       colourMethod:    `Photo projection (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
     }
   }
   onDiagUpdate?.()
+  onProgress?.(100, 'Photo projection complete', false)
   return { nCams, projTotal: allSnaps.length, coveragePct, projUsed: usedCamCount }
 }
 
@@ -1581,8 +1609,15 @@ export default function SpaceBuilderCanvas({
           // Async upgrade: swap vertex-colour material for photo-projective texturing.
           // Fire-and-forget so the scan is immediately visible while textures load.
           if (roomId && !cancelled) {
-            upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef: diagStatsRef, onDiagUpdate: () => setDiagVersion(v => v + 1) })
-              .catch(err => console.warn('[projective] upgrade error:', err))
+            upgradeProjectiveTexturing({
+              points, yOffset, roomId,
+              diagRef: diagStatsRef,
+              onDiagUpdate: () => setDiagVersion(v => v + 1),
+              onProgress: reportRoomLoad,
+            }).catch(err => {
+              console.warn('[projective] upgrade error:', err)
+              reportRoomLoad(100, 'Photo projection failed', false)
+            })
           }
           return
         } catch (err) {
@@ -2381,6 +2416,11 @@ export default function SpaceBuilderCanvas({
                     </td></tr>
                   </>
                 )}
+                {!s.projective && s.projStatus != null && (
+                  <tr><td>Photo proj.</td><td>
+                    <span className="sbc-diag-dim">{s.projStatus}</span>
+                  </td></tr>
+                )}
                 {!s.projective && s.photoCoveragePct != null && (
                   <tr><td>Photo coverage</td><td>
                     {`${Math.round(s.photoCoveragePct)}%`}
@@ -2411,9 +2451,11 @@ export default function SpaceBuilderCanvas({
                         roomId: space.id,
                         diagRef: diagStatsRef,
                         onDiagUpdate: () => setDiagVersion(v => v + 1),
+                        onProgress: reportRoomLoad,
                       })
                     } catch (err) {
                       console.warn('[rebuild] projection error:', err)
+                      reportRoomLoad(100, 'Rebuild failed', false)
                     } finally {
                       setMeshRebuilding(false)
                     }
