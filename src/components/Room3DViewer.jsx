@@ -180,8 +180,28 @@ export default function Room3DViewer({ room, onEditFace, onClose }) {
           const geo = new THREE.BufferGeometry()
           geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
           geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
-          const mat = new THREE.PointsMaterial({
-            size: 0.006, vertexColors: true, sizeAttenuation: true,
+          const mat = new THREE.ShaderMaterial({
+            vertexColors: true,
+            transparent: false,
+            depthWrite: true,
+            depthTest: true,
+            vertexShader: /* glsl */`
+              varying vec3 vColor;
+              void main() {
+                vColor = color.rgb;
+                vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = clamp(6.0 * projectionMatrix[1][1] / -mvPos.z, 1.0, 20.0);
+                gl_Position  = projectionMatrix * mvPos;
+              }
+            `,
+            fragmentShader: /* glsl */`
+              varying vec3 vColor;
+              void main() {
+                vec2 uv = gl_PointCoord - 0.5;
+                if (dot(uv, uv) > 0.25) discard;
+                gl_FragColor = vec4(vColor, 1.0);
+              }
+            `,
           })
           pointsMesh = new THREE.Points(geo, mat)
           scene.add(pointsMesh)

@@ -168,9 +168,7 @@ const SPLAT_FRAG = /* glsl */`
       col = pow(clamp(col, 0.0, 1.0), vec3(0.88));
     }
 
-    // Soft alphaToCoverage edge — inner 72% solid, outer 28% feathers.
-    float alpha = r2 < 0.18 ? 1.0 : smoothstep(0.25, 0.18, r2);
-    gl_FragColor = vec4(col, alpha);
+    gl_FragColor = vec4(col, 1.0);
   }
 `
 
@@ -1139,7 +1137,7 @@ export default function SpaceBuilderCanvas({
 
           const mat = new THREE.ShaderMaterial({
             vertexColors: true,
-            transparent: true,
+            transparent: false,
             depthWrite: true,
             depthTest: true,
             vertexShader: SPLAT_VERT,
@@ -1162,15 +1160,18 @@ export default function SpaceBuilderCanvas({
 
           const fboW = t.renderer?.domElement?.width ?? 0
           const fboH = t.renderer?.domElement?.height ?? 0
+          // Estimate photo-projected points: if roomScan has a pointCloud with
+          // pointCount, compare rendered vi against that to infer coverage.
+          const savedPtCount = roomScan?.pointCloud?.pointCount ?? 0
+          const snapshotCount = roomScan?.snapshots?.length ?? roomScan?.snapshotCount ?? 0
           diagStatsRef.current = {
             rawPts: n,
             renderedPts: vi,
-            triCount: 0,
             fboW,
             fboH,
             dpr: Math.min(window.devicePixelRatio, 2),
-            meshSource: 'raw-points',
-            colourMethod: 'LiDAR sensor (raw points)',
+            colourMethod: savedPtCount > 0 ? 'On-device photo projection (iOS)' : 'LiDAR sensor (device)',
+            snapshotCount,
           }
 
           try {
@@ -1938,8 +1939,7 @@ export default function SpaceBuilderCanvas({
       {/* ── Diagnostics overlay ───────────────────────────────────── */}
       {diagVisible && diagStatsRef.current && (() => {
         const s = diagStatsRef.current
-        const pct = ((s.renderedPts / s.rawPts) * 100).toFixed(1)
-        const dedupX = (s.rawPts / s.renderedPts).toFixed(0)
+        const renderedPct = s.rawPts > 0 ? ((s.renderedPts / s.rawPts) * 100).toFixed(1) : '—'
         return (
           <div className="sbc-diag-panel">
             <div className="sbc-diag-title">
@@ -1957,61 +1957,15 @@ export default function SpaceBuilderCanvas({
             <table className="sbc-diag-table">
               <tbody>
                 <tr><td>Raw scan pts</td><td>{s.rawPts.toLocaleString()}</td></tr>
-                {s.poissonPts != null && (
-                  <tr><td>Poisson input</td><td>
-                    {s.poissonPts.toLocaleString()}{' '}
-                    <span className="sbc-diag-dim">({((s.poissonPts/s.rawPts)*100).toFixed(1)}% of raw)</span>
-                    {s.voxelMm != null && <span className="sbc-diag-dim"> · {s.voxelMm} mm voxel</span>}
-                  </td></tr>
-                )}
-                <tr><td>Mesh vertices</td><td>{s.renderedPts.toLocaleString()}</td></tr>
-                <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
-                <tr><td>Mesh source</td><td>
-                  {s.meshSource === 'poisson-glb'
-                    ? 'Poisson (server)'
-                    : (s.meshSource === 'raw-points' ? 'Raw points (no meshing)' : 'spherical grid (JS)')}
-                  {space?.id && (
-                    <button
-                      className="sbc-diag-mode-btn"
-                      style={{ marginLeft: 8 }}
-                      disabled={meshRebuilding}
-                      onClick={async () => {
-                        setMeshRebuilding(true)
-                        try {
-                          const jwt    = getJwt()
-                          const device = getDeviceToken()
-                          const headers = {
-                            'X-Device-Token': device,
-                            ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-                          }
-                          await fetch(`${BASE}/api/rooms/${space.id}/mesh?rebuild=1`, { headers })
-                          // buildCloud will poll and show progress when meshGeneration changes
-                          setMeshGeneration(g => g + 1)
-                        } finally { setMeshRebuilding(false) }
-                      }}
-                    >{meshRebuilding ? 'Queuing…' : 'Rebuild'}</button>
-                  )}
-                  {roomScan && (
-                    <>
-                      <button
-                        className="sbc-diag-mode-btn"
-                        style={{ marginLeft: 8 }}
-                        disabled={scanRenderMode === 'raw-points'}
-                        onClick={() => setScanRenderMode('raw-points')}
-                      >Raw</button>
-                      <button
-                        className="sbc-diag-mode-btn"
-                        style={{ marginLeft: 6 }}
-                        disabled={scanRenderMode === 'poisson-glb'}
-                        onClick={() => setScanRenderMode('poisson-glb')}
-                      >Poisson</button>
-                    </>
-                  )}
-                  {s.poissonDepth != null && <span className="sbc-diag-dim" style={{marginLeft:8}}>depth={s.poissonDepth}</span>}
+                <tr><td>Rendered pts</td><td>
+                  {s.renderedPts.toLocaleString()}
+                  <span className="sbc-diag-dim"> ({renderedPct}% of raw)</span>
                 </td></tr>
-                <tr><td>FBO resolution</td><td>{s.fboW} × {s.fboH} px</td></tr>
-                <tr><td>Device pixel ratio</td><td>{s.dpr.toFixed(1)}×</td></tr>
-                <tr><td>Colour method</td><td>{s.colourMethod ?? 'LiDAR sensor (IDW)'}</td></tr>
+                {s.snapshotCount > 0 && (
+                  <tr><td>Photo snapshots</td><td>{s.snapshotCount}</td></tr>
+                )}
+                <tr><td>Colour method</td><td>{s.colourMethod ?? 'LiDAR sensor (device)'}</td></tr>
+                <tr><td>Render resolution</td><td>{s.fboW} × {s.fboH} <span className="sbc-diag-dim">@ {s.dpr.toFixed(1)}×</span></td></tr>
               </tbody>
             </table>
           </div>
