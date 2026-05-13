@@ -23,6 +23,7 @@ import {
   extractPlanes,
   planesToJSON,
 } from '../utils/pointCloud'
+import { BASE, getJwt, getDeviceToken } from '../utils/api'
 
 // How many depth samples to take per frame (spread across the depth image).
 // Higher = denser cloud but heavier CPU/memory.
@@ -36,7 +37,7 @@ const MIN_DEPTH = 0.15
 // Maximum depth (m) — ignore beyond this (large open spaces, windows to sky)
 const MAX_DEPTH = 12
 
-export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, onPointChunk = null }) {
+export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, onPointChunk = null, roomId = null }) {
   const [status,    setStatus]    = useState('checking') // checking | unsupported | starting | scanning | processing | error
   const [progress,  setProgress]  = useState(0)   // 0-100 while scanning
   const [pointCount, setPointCount] = useState(0)
@@ -48,7 +49,8 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
   const sessionRef    = useRef(null)
   const rafRef        = useRef(null)
   const bufferRef     = useRef(null)
-  const nativeBufRef  = useRef(null)  // accumulates streaming chunks from native bridge
+  const nativeBufRef       = useRef(null)   // accumulates streaming chunks from native bridge
+  const postProjectionRef  = useRef(false)  // true while iOS is streaming post-projection colored cloud
   const planesRef     = useRef([])
   const camCtxRef     = useRef(null)  // 2D canvas ctx for sampling camera color
   const glRef         = useRef(null)  // WebGL context
@@ -78,22 +80,26 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
           return
         }
         // ── On-device photo projection in progress ──────────────────────────
-        // Swift buffers everything during the scan, projects on-device, then
-        // streams the colored cloud.  While projecting, show a holding state.
+        // Swift projects colors on-device, then streams the full colored cloud.
+        // Set a flag so subsequent 'chunk' events are NOT forwarded to onPointChunk
+        // (which would trigger per-chunk HTTP uploads). We buffer locally only and
+        // do a single bulk upload when 'done' fires.
         if (result.status === 'projecting') {
+          postProjectionRef.current = true
           setStatus('projecting')
           setProgress(0)
           return
         }
         // ── Real-time chunk from Swift ──────────────────────────────────────
-        // Swift streams each batch (~2 000 pts, ~48 KB base64) as it is captured.
-        // We decode and accumulate into nativeBufRef so "done" requires no transfer.
+        // Accumulate into the local buffer always.  Only call onPointChunk for
+        // live-streaming chunks (before projection starts) — post-projection chunks
+        // are uploaded as a single batch on 'done' to avoid hundreds of HTTP calls.
         if (result.status === 'chunk') {
           if (!nativeBufRef.current) nativeBufRef.current = new PointCloudBuffer(2_000_000)
           const decoded = atob(result.data)
           const bytes = new Uint8Array(decoded.length)
           for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i)
-          if (onPointChunk) onPointChunk(bytes)
+          if (!postProjectionRef.current && onPointChunk) onPointChunk(bytes)
           nativeBufRef.current.addChunk(new Float32Array(bytes.buffer))
           const n = nativeBufRef.current.pointCount
           setPointCount(n)
@@ -115,6 +121,7 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
           return
         }
         if (result.status === 'done') {
+          postProjectionRef.current = false
           setStatus('processing')
           setProgress(0)
 
@@ -258,7 +265,14 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
 
     // ── Native ARKit bridge ───────────────────────────────────────────────────
     if (window.__stageARNative) {
-      window.webkit.messageHandlers.stageAR.postMessage({ action: 'startScan' })
+      const jwt = getJwt()
+      window.webkit.messageHandlers.stageAR.postMessage({
+        action: 'startScan',
+        apiBase: BASE || window.location.origin,
+        roomId: roomId ?? '',
+        authToken: jwt ? `Bearer ${jwt}` : '',
+        deviceToken: getDeviceToken() ?? '',
+      })
       return
     }
 

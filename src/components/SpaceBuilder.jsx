@@ -22,6 +22,7 @@ import { cloneRoomForEditing } from '../utils/roomScanPersistence'
 import {
   finalizePointCloudStream,
   uploadPointCloudStreamChunk,
+  uploadPointCloud,
   uploadSnapshot,
   uploadSnapshots,
 } from '../utils/api'
@@ -137,47 +138,64 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
   const handleScanComplete = useCallback(({ pointCloud, planes, capturedAt, snapshots }) => {
     const nextPointCloud = { ...pointCloud }
     const stream = pointCloudStreamRef.current
-    if (space?.id && stream && stream.roomId === space.id && stream.nextIndex > 0 && !stream.finalized) {
-      stream.finalized = true
-      nextPointCloud._uploadPromise = Promise
-        .allSettled(Array.from(snapshotUploadsRef.current))
-        .then(() => stream.chain)
-        .then(() => finalizePointCloudStream(space.id, stream.uploadId))
-        .then(({ url }) => {
-          if (url) {
-            setSpace(prev => {
-              if (prev?.id !== space.id || prev?.roomScan?.capturedAt !== capturedAt) return prev
-              return {
-                ...prev,
-                roomScan: {
-                  ...prev.roomScan,
-                  pointCloud: {
-                    ...prev.roomScan.pointCloud,
-                    url,
-                    _uploadPromise: null,
-                  },
-                },
+    const hasPreProjectionStream = stream && stream.roomId === space?.id && stream.nextIndex > 0 && !stream.finalized
+
+    if (space?.id) {
+      if (hasPreProjectionStream) {
+        // Legacy path: chunks were streamed to backend during live scan (before projection).
+        // Finalize the streaming upload.
+        stream.finalized = true
+        nextPointCloud._uploadPromise = Promise
+          .allSettled(Array.from(snapshotUploadsRef.current))
+          .then(() => stream.chain)
+          .then(() => finalizePointCloudStream(space.id, stream.uploadId))
+          .then(({ url }) => {
+            if (url) {
+              setSpace(prev => {
+                if (prev?.id !== space.id || prev?.roomScan?.capturedAt !== capturedAt) return prev
+                return { ...prev, roomScan: { ...prev.roomScan, pointCloud: { ...prev.roomScan.pointCloud, url, _uploadPromise: null } } }
+              })
+            }
+            return url || null
+          })
+          .catch(err => {
+            console.warn('[scan] stream finalize failed', err)
+            return null
+          })
+      } else {
+        // New path: iOS projected on-device and streamed everything after projection.
+        // The full colored cloud is already in buf._buffer — upload as ONE binary POST.
+        // This replaces ~84 sequential HTTP chunk requests with a single large request.
+        const buf = pointCloud._buffer
+        if (buf?.pointCount > 0) {
+          const rawBytes = buf._data.subarray(0, buf.pointCount * 6)
+          const roomId = space.id
+          nextPointCloud._uploadPromise = uploadPointCloud(roomId, rawBytes.buffer)
+            .then(({ url }) => {
+              if (url) {
+                setSpace(prev => {
+                  if (prev?.id !== roomId || prev?.roomScan?.capturedAt !== capturedAt) return prev
+                  return { ...prev, roomScan: { ...prev.roomScan, pointCloud: { ...prev.roomScan.pointCloud, url, _uploadPromise: null } } }
+                })
               }
+              return url || null
             })
-          }
-          return url || null
-        })
-        .catch(err => {
-          console.warn('[scan] stream finalize failed, save will fallback to direct upload', err)
-          return null
-        })
+            .catch(err => {
+              console.warn('[scan] direct upload failed', err)
+              return null
+            })
+        }
+      }
     }
     pointCloudStreamRef.current = null
 
     setSpace(prev => ({ ...prev, roomScan: { pointCloud: nextPointCloud, planes, capturedAt } }))
     setShowLidarScanner(false)
-    // Legacy fallback path: older native builds may only send snapshots at done.
     if (snapshots?.length && space?.id) {
       uploadSnapshots(space.id, snapshots)
         .then(r => console.log('[snapshots] uploaded', r?.count, 'snaps'))
         .catch(e => console.warn('[snapshots] upload failed', e))
     }
-    // Prompt to save with a name — pre-fill current space name
     setPostScanName(spaceNameRef.current?.trim() || 'Scanned Room')
     setShowPostScanSave(true)
   }, [space?.id])
@@ -917,6 +935,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
           onPointChunk={handleScanPointChunk}
           onSnapshot={handleScanSnapshot}
           onCancel={() => setShowLidarScanner(false)}
+          roomId={space?.id ?? null}
         />
       )}
       {/* Scan-complete save reminder toast */}

@@ -136,11 +136,13 @@ const SPLAT_VERT = /* glsl */`
     float cosView   = max(0.30, abs(mvN.z));
     float angleFactor = min(2.0, 1.0 / cosView);
 
-    // Empirically-tuned sizing (same as ba2bae2, verified to look solid):
-    // 8.0 * cot(FOV/2) / z → ~5 fb-px at 3 m / 55° FOV.
-    // No uViewH needed — scales naturally with depth and FOV only.
-    // Max 28 px handles grazing walls; min 1.2 keeps far points visible.
-    gl_PointSize = clamp(8.0 * angleFactor * projectionMatrix[1][1] / -mvPos.z, 1.2, 28.0);
+    // Wegter Equation: density-adaptive splat sizing.
+    // uSpacing = 6 × √(S_room / N_rendered) is precomputed on the CPU from the
+    // actual scan bounding box and rendered point count — fills all surface gaps
+    // including density-variation outliers while scaling automatically to scan density.
+    // angleFactor enlarges grazing-angle discs to cover oblique surfaces.
+    uniform float uSpacing;
+    gl_PointSize = clamp(uSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -1090,8 +1092,8 @@ export default function SpaceBuilderCanvas({
           const rawData = buf._data
           const n = buf.pointCount
 
-          // Keep GPU load sane on mobile while preserving geometry.
-          const stride = Math.max(1, Math.floor(n / 1_600_000))
+          // Render up to 8 M points at stride=1; stride up only for truly huge scans.
+          const stride = Math.max(1, Math.floor(n / 8_000_000))
           const est = Math.max(1, Math.ceil(n / stride))
           const positions = new Float32Array(est * 3)
           const colors = new Float32Array(est * 3)
@@ -1131,6 +1133,17 @@ export default function SpaceBuilderCanvas({
           const yOffset = isFinite(minY) ? -minY : 0
           yOffsetRef.current = yOffset
 
+          // Wegter Equation: derive optimal splat diameter from scan geometry.
+          // Model: room surface area ≈ 2(W·D + W·H + D·H) from bounding box.
+          // Mean inter-point surface spacing: d = √(S / N_rendered)
+          // uSpacing = 6 × d ensures coverage at density variation outliers.
+          const W = Math.max(0.1, maxX - minX)
+          const H = Math.max(0.1, maxY - minY)
+          const D = Math.max(0.1, maxZ - minZ)
+          const roomSurfaceM2 = 2 * (W * D + W * H + D * H)
+          const wegterSpacing = 6.0 * Math.sqrt(roomSurfaceM2 / Math.max(1, vi))
+          const uSpacing = Math.max(0.004, Math.min(0.10, wegterSpacing))
+
           const geo = new THREE.BufferGeometry()
           geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vi * 3), 3))
           geo.setAttribute('color', new THREE.BufferAttribute(colors.subarray(0, vi * 3), 3))
@@ -1143,12 +1156,13 @@ export default function SpaceBuilderCanvas({
             vertexShader: SPLAT_VERT,
             fragmentShader: SPLAT_FRAG,
             uniforms: {
-              uViewH: { value: t.renderer?.domElement?.height ?? 1 },
+              uViewH:   { value: t.renderer?.domElement?.height ?? 1 },
+              uSpacing: { value: uSpacing },
               uYOffset: { value: yOffset },
-              uFloorY: { value: isFinite(minY) ? minY + 0.02 : 0 },
-              uCeilY: { value: isFinite(maxY) ? maxY - 0.02 : 2 },
-              uRoomCX: { value: (minX + maxX) * 0.5 },
-              uRoomCZ: { value: (minZ + maxZ) * 0.5 },
+              uFloorY:  { value: isFinite(minY) ? minY + 0.02 : 0 },
+              uCeilY:   { value: isFinite(maxY) ? maxY - 0.02 : 2 },
+              uRoomCX:  { value: (minX + maxX) * 0.5 },
+              uRoomCZ:  { value: (minZ + maxZ) * 0.5 },
               uDiagMode: { value: 0 },
             },
           })
@@ -1172,6 +1186,7 @@ export default function SpaceBuilderCanvas({
             dpr: Math.min(window.devicePixelRatio, 2),
             colourMethod: savedPtCount > 0 ? 'On-device photo projection (iOS)' : 'LiDAR sensor (device)',
             snapshotCount,
+            wegterSpacingMm: Math.round(uSpacing * 1000),
           }
 
           try {
@@ -1963,6 +1978,9 @@ export default function SpaceBuilderCanvas({
                 </td></tr>
                 {s.snapshotCount > 0 && (
                   <tr><td>Photo snapshots</td><td>{s.snapshotCount}</td></tr>
+                )}
+                {s.wegterSpacingMm != null && (
+                  <tr><td>Wegter splat Ø</td><td>{s.wegterSpacingMm} mm <span className="sbc-diag-dim">(adaptive)</span></td></tr>
                 )}
                 <tr><td>Colour method</td><td>{s.colourMethod ?? 'LiDAR sensor (device)'}</td></tr>
                 <tr><td>Render resolution</td><td>{s.fboW} × {s.fboH} <span className="sbc-diag-dim">@ {s.dpr.toFixed(1)}×</span></td></tr>
