@@ -478,6 +478,16 @@ export async function uploadSnapshot(roomId, index, snapshot) {
 }
 
 /**
+ * Download the pre-colored point cloud binary for 3-D viewing.
+ * Returns an ArrayBuffer of interleaved Float32 [x,y,z,r,g,b …].
+ */
+export async function downloadPointCloud(roomId) {
+  const resp = await apiFetch(`/api/rooms/${roomId}/pointcloud/download`)
+  if (!resp.ok) throw new Error(`Point cloud download failed: ${resp.status}`)
+  return resp.arrayBuffer()
+}
+
+/**
  * Upload snapshot bundles (fallback path for older native builds).
  * snapshots: Array<{ jpeg, c2w, K, fw, fh }>
  */

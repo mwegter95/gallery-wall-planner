@@ -77,6 +77,14 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
           nativeBufRef.current = new PointCloudBuffer(2_000_000)  // reduce expensive growth copies on long scans
           return
         }
+        // ── On-device photo projection in progress ──────────────────────────
+        // Swift buffers everything during the scan, projects on-device, then
+        // streams the colored cloud.  While projecting, show a holding state.
+        if (result.status === 'projecting') {
+          setStatus('projecting')
+          setProgress(0)
+          return
+        }
         // ── Real-time chunk from Swift ──────────────────────────────────────
         // Swift streams each batch (~2 000 pts, ~48 KB base64) as it is captured.
         // We decode and accumulate into nativeBufRef so "done" requires no transfer.
@@ -639,6 +647,18 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
           >
             {pointCount < 500 ? 'Keep scanning…' : '✓ Done Scanning'}
           </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (status === 'projecting') {
+    return (
+      <div className="lidar-overlay">
+        <div className="lidar-card">
+          <div className="lidar-spinner" />
+          <p className="lidar-status-text">Projecting photos onto scan…</p>
+          <p className="lidar-hint">{pointCount.toLocaleString()} points · on-device coloring</p>
         </div>
       </div>
     )

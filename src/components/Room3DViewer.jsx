@@ -10,6 +10,7 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { FACES, FACE_META, getFaceGeometry, pieceToWorld } from '../utils/room3d'
+import { downloadPointCloud } from '../utils/api'
 
 // Placeholder colors for surfaces without a photo
 const PLACEHOLDER = {
@@ -143,6 +144,51 @@ export default function Room3DViewer({ room, onEditFace, onClose }) {
       })
     })
 
+    // ── Point cloud (pre-colored, loaded async) ───────────────────────────────
+    // When the room has a ready scan, fetch the Float32 [x,y,z,r,g,b …] binary,
+    // parse it into a THREE.Points object, and add it to the scene.
+    // The cloud is centered at its own centroid so the camera stays meaningful.
+    let pointsMesh = null
+    let pcAlive = true
+    if (room.roomScan?.meshStatus === 'ready' && room.id) {
+      downloadPointCloud(room.id)
+        .then(buf => {
+          if (!pcAlive) return
+          const data = new Float32Array(buf)
+          const n    = Math.floor(data.length / 6)
+          if (n === 0) return
+
+          const positions = new Float32Array(n * 3)
+          const colors    = new Float32Array(n * 3)
+          let cx = 0, cy = 0, cz = 0
+          for (let i = 0; i < n; i++) {
+            const b = i * 6
+            cx += data[b]; cy += data[b+1]; cz += data[b+2]
+          }
+          cx /= n; cy /= n; cz /= n
+
+          for (let i = 0; i < n; i++) {
+            const b = i * 6
+            positions[i*3]   = data[b]   - cx
+            positions[i*3+1] = data[b+1] - cy
+            positions[i*3+2] = data[b+2] - cz
+            colors[i*3]   = data[b+3]
+            colors[i*3+1] = data[b+4]
+            colors[i*3+2] = data[b+5]
+          }
+
+          const geo = new THREE.BufferGeometry()
+          geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+          geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
+          const mat = new THREE.PointsMaterial({
+            size: 0.006, vertexColors: true, sizeAttenuation: true,
+          })
+          pointsMesh = new THREE.Points(geo, mat)
+          scene.add(pointsMesh)
+        })
+        .catch(e => console.warn('[Room3DViewer] point cloud load failed', e))
+    }
+
     // ── Drag-to-look controls ─────────────────────────────────────────────────
     let isDragging = false
     let lastX = 0, lastY = 0
@@ -211,6 +257,11 @@ export default function Room3DViewer({ room, onEditFace, onClose }) {
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
     return () => {
+      pcAlive = false
+      if (pointsMesh) {
+        pointsMesh.geometry.dispose()
+        pointsMesh.material.dispose()
+      }
       cancelAnimationFrame(raf)
       ro.disconnect()
       canvas.removeEventListener('mousedown',  onPointerDown)
