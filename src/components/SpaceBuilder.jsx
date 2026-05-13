@@ -974,11 +974,6 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 {isSaving ? <><span className="btn-spinner"/>Saving…</> : 'Save Room'}
               </button>
             </div>
-                onClick={() => {
-                  if (isSaving) return
-                  setSaveMenuAlign('right')
-                  setShowSaveMenu(v => !v)
-                }}
             {saveSuccessMsg && (
               <div className="sb-save-success" role="status" aria-live="polite">
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">

@@ -765,11 +765,9 @@ export default function SpaceBuilderCanvas({
       }
 
       if (needsUpdate) applyOrbit()
-      // Two-pass SSDD: render scene to FBO, then blit through gap-fill shader.
-      renderer.setRenderTarget(ssdFBO)
-      renderer.render(scene, camera)
+      // Render directly to preserve geometric truth.
       renderer.setRenderTarget(null)
-      renderer.render(ssdScene, ssdCam)
+      renderer.render(scene, camera)
     }
     animate()
 
@@ -810,6 +808,7 @@ export default function SpaceBuilderCanvas({
   const diagStatsRef      = useRef(null)  // { rawPts, renderedPts, fboW, fboH, dpr }
   const [diagVisible,     setDiagVisible]  = useState(false)
   const [diagMode,        setDiagMode]     = useState(0)  // 0=color, 1=depth, 2=normals
+  const [scanRenderMode,  setScanRenderMode] = useState('raw-points') // raw-points | poisson-glb
   const [meshRebuilding,  setMeshRebuilding] = useState(false)
   const [meshGeneration,  setMeshGeneration] = useState(0)  // bump to re-run buildCloud
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
@@ -882,7 +881,7 @@ export default function SpaceBuilderCanvas({
       // If it's still building we poll and show live progress rather than
       // falling back to the slow JS pipeline.  JS triangulation is only used
       // for rooms that have no server ID (pure local/anonymous scans).
-      if (roomId) {
+      if (roomId && scanRenderMode === 'poisson-glb') {
         const jwt    = getJwt()
         const device = getDeviceToken()
         const authHeaders = {
@@ -1083,6 +1082,113 @@ export default function SpaceBuilderCanvas({
         return
       }
       if (cancelled) return
+
+      // ── Raw-point render path (no meshing) ───────────────────────────────
+      // This preserves capture geometry and avoids topological hallucinations
+      // from Poisson or spherical triangulation.
+      if (scanRenderMode === 'raw-points') {
+        try {
+          reportRoomLoad(44, 'Preparing raw points')
+          const rawData = buf._data
+          const n = buf.pointCount
+
+          // Keep GPU load sane on mobile while preserving geometry.
+          const stride = Math.max(1, Math.floor(n / 1_600_000))
+          const est = Math.max(1, Math.ceil(n / stride))
+          const positions = new Float32Array(est * 3)
+          const colors = new Float32Array(est * 3)
+
+          let minY = Infinity, maxY = -Infinity
+          let minX = Infinity, maxX = -Infinity
+          let minZ = Infinity, maxZ = -Infinity
+          let vi = 0
+
+          for (let i = 0, b = 0; i < n; i++, b += 6) {
+            const x = rawData[b]
+            const y = rawData[b + 1]
+            const z = rawData[b + 2]
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (z < minZ) minZ = z
+            if (z > maxZ) maxZ = z
+
+            if (i % stride !== 0) continue
+            positions[vi * 3] = x
+            positions[vi * 3 + 1] = y
+            positions[vi * 3 + 2] = z
+            colors[vi * 3] = rawData[b + 3]
+            colors[vi * 3 + 1] = rawData[b + 4]
+            colors[vi * 3 + 2] = rawData[b + 5]
+            vi++
+
+            if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
+              reportRoomLoad(44 + (44 * i / n), 'Sampling raw points')
+            }
+          }
+
+          if (cancelled) return
+
+          const yOffset = isFinite(minY) ? -minY : 0
+          yOffsetRef.current = yOffset
+
+          const geo = new THREE.BufferGeometry()
+          geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vi * 3), 3))
+          geo.setAttribute('color', new THREE.BufferAttribute(colors.subarray(0, vi * 3), 3))
+
+          const mat = new THREE.ShaderMaterial({
+            vertexColors: true,
+            transparent: true,
+            depthWrite: true,
+            depthTest: true,
+            vertexShader: SPLAT_VERT,
+            fragmentShader: SPLAT_FRAG,
+            uniforms: {
+              uViewH: { value: t.renderer?.domElement?.height ?? 1 },
+              uYOffset: { value: yOffset },
+              uFloorY: { value: isFinite(minY) ? minY + 0.02 : 0 },
+              uCeilY: { value: isFinite(maxY) ? maxY - 0.02 : 2 },
+              uRoomCX: { value: (minX + maxX) * 0.5 },
+              uRoomCZ: { value: (minZ + maxZ) * 0.5 },
+              uDiagMode: { value: 0 },
+            },
+          })
+
+          const points = new THREE.Points(geo, mat)
+          t.scene.add(points)
+          pointCloudMeshRef.current = points
+          rawBufferRef.current = buf
+
+          const fboW = t.renderer?.domElement?.width ?? 0
+          const fboH = t.renderer?.domElement?.height ?? 0
+          diagStatsRef.current = {
+            rawPts: n,
+            renderedPts: vi,
+            triCount: 0,
+            fboW,
+            fboH,
+            dpr: Math.min(window.devicePixelRatio, 2),
+            meshSource: 'raw-points',
+            colourMethod: 'LiDAR sensor (raw points)',
+          }
+
+          try {
+            const center = new THREE.Vector3((minX + maxX) * 0.5, 1.6, (minZ + maxZ) * 0.5)
+            t.orbit.center.copy(center)
+            t.orbit.phi = Math.PI / 2
+            t.orbit.theta = 0.4
+            t.applyOrbit()
+          } catch { /* ignore */ }
+
+          reportRoomLoad(100, 'Scan ready', false)
+          return
+        } catch (err) {
+          console.warn('[SpaceBuilderCanvas] Could not render raw points:', err)
+          reportRoomLoad(100, 'Scan load failed', false)
+          return
+        }
+      }
 
       // ── Build colored point cloud ─────────────────────────────────
       try {
@@ -1443,7 +1549,7 @@ export default function SpaceBuilderCanvas({
 
     buildCloud()
     return () => { cancelled = true }
-  }, [roomScan, reportRoomLoad, meshGeneration]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roomScan, reportRoomLoad, meshGeneration, scanRenderMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Composite piece overlays onto surface textures ───────────────────────
   useEffect(() => {
@@ -1532,8 +1638,19 @@ export default function SpaceBuilderCanvas({
 
   // Propagate diagnostics colour mode to the point cloud shader uniform
   useEffect(() => {
-    const mat = pointCloudMeshRef.current?.material
-    if (mat?.uniforms?.uDiagMode) mat.uniforms.uDiagMode.value = diagMode
+    const obj = pointCloudMeshRef.current
+    if (!obj) return
+    if (obj.material?.uniforms?.uDiagMode) {
+      obj.material.uniforms.uDiagMode.value = diagMode
+      return
+    }
+    if (obj.traverse) {
+      obj.traverse(o => {
+        if (o.material?.uniforms?.uDiagMode) {
+          o.material.uniforms.uDiagMode.value = diagMode
+        }
+      })
+    }
   }, [diagMode])
 
   // ── Joystick pointer handlers — shared helper ────────────────────────────
@@ -1850,7 +1967,9 @@ export default function SpaceBuilderCanvas({
                 <tr><td>Mesh vertices</td><td>{s.renderedPts.toLocaleString()}</td></tr>
                 <tr><td>Triangles</td><td>{(s.triCount || 0).toLocaleString()}</td></tr>
                 <tr><td>Mesh source</td><td>
-                  {s.meshSource === 'poisson-glb' ? 'Poisson (server)' : 'spherical grid (JS)'}
+                  {s.meshSource === 'poisson-glb'
+                    ? 'Poisson (server)'
+                    : (s.meshSource === 'raw-points' ? 'Raw points (no meshing)' : 'spherical grid (JS)')}
                   {space?.id && (
                     <button
                       className="sbc-diag-mode-btn"
@@ -1871,6 +1990,22 @@ export default function SpaceBuilderCanvas({
                         } finally { setMeshRebuilding(false) }
                       }}
                     >{meshRebuilding ? 'Queuing…' : 'Rebuild'}</button>
+                  )}
+                  {roomScan && (
+                    <>
+                      <button
+                        className="sbc-diag-mode-btn"
+                        style={{ marginLeft: 8 }}
+                        disabled={scanRenderMode === 'raw-points'}
+                        onClick={() => setScanRenderMode('raw-points')}
+                      >Raw</button>
+                      <button
+                        className="sbc-diag-mode-btn"
+                        style={{ marginLeft: 6 }}
+                        disabled={scanRenderMode === 'poisson-glb'}
+                        onClick={() => setScanRenderMode('poisson-glb')}
+                      >Poisson</button>
+                    </>
                   )}
                   {s.poissonDepth != null && <span className="sbc-diag-dim" style={{marginLeft:8}}>depth={s.poissonDepth}</span>}
                 </td></tr>
