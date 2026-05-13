@@ -956,7 +956,7 @@ export default function SpaceBuilderCanvas({
             triCount:     totalTris,
             fboW, fboH, dpr: Math.min(window.devicePixelRatio, 2),
             meshSource:   'poisson-glb',
-            colourMethod: 'LiDAR sensor (IDW)',
+            colourMethod: meta?.colorMethod ?? meta?.colourMethod ?? 'LiDAR sensor (IDW)',
           }
 
           try {
