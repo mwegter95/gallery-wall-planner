@@ -99,16 +99,16 @@ async function compositePiecesOntoTexture(surface, baseDataUrl, pieces) {
 //   points are still visible at maximum zoom-out.
 
 const SPLAT_VERT = /* glsl */`
-  // No per-point attribute arrays for normals or scale — saves ~270 MB of RAM.
-  // Normals are computed procedurally in the vertex shader from world position
-  // and room-bounds uniforms.  Scale is a fixed constant.
+  // aLocalSpacing: per-point adaptive splat diameter computed from local
+  // LiDAR return density.  Dense areas → tiny splats; sparse → slightly larger.
+  // Stored as a vertex attribute so the GPU can vary size per-point.
+  attribute float aLocalSpacing;
   uniform float uViewH;     // FBO height [px] — updated by ResizeObserver
   uniform float uYOffset;   // floor-lift: raw_y + uYOffset = scene_y
   uniform float uFloorY;    // raw-space Y below which points are floor
   uniform float uCeilY;     // raw-space Y above which points are ceiling
   uniform float uRoomCX;    // raw-space X centre of room
   uniform float uRoomCZ;    // raw-space Z centre of room
-  uniform float uSpacing;   // Wegter Equation: 2.5 × √(S_room / N_rendered)
 
   varying vec3 vColor;
 
@@ -131,14 +131,13 @@ const SPLAT_VERT = /* glsl */`
       norm = vec3(dx / len, 0.0, dz / len);
     }
 
-    // View-dependent disc enlargement driven by the procedural normal.
-    vec3  mvN       = normalize(normalMatrix * norm);
-    float cosView   = max(0.30, abs(mvN.z));
+    // View-dependent disc enlargement — cap at 1.4× to avoid bowling-ball look.
+    vec3  mvN         = normalize(normalMatrix * norm);
+    float cosView     = max(0.30, abs(mvN.z));
     float angleFactor = min(1.4, 1.0 / cosView);
 
-    // Wegter Equation: density-adaptive splat sizing.
-    // angleFactor enlarges grazing-angle discs to cover oblique surfaces.
-    gl_PointSize = clamp(uSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
+    // Adaptive Wegter: per-point diameter drives gl_PointSize.
+    gl_PointSize = clamp(aLocalSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -176,13 +175,13 @@ const SPLAT_FRAG = /* glsl */`
 // shader so it can project each sub-pixel of the disc onto the camera images.
 
 const SPLAT_VERT_PROJ = /* glsl */`
+  attribute float aLocalSpacing;
   uniform float uViewH;
   uniform float uYOffset;
   uniform float uFloorY;
   uniform float uCeilY;
   uniform float uRoomCX;
   uniform float uRoomCZ;
-  uniform float uSpacing;
 
   varying vec3  vColor;
   varying vec3  vWorldPos;
@@ -205,14 +204,14 @@ const SPLAT_VERT_PROJ = /* glsl */`
       norm = vec3(dx / len, 0.0, dz / len);
     }
 
-    vec3  mvN        = normalize(normalMatrix * norm);
-    float cosView    = max(0.30, abs(mvN.z));
+    vec3  mvN         = normalize(normalMatrix * norm);
+    float cosView     = max(0.30, abs(mvN.z));
     float angleFactor = min(1.4, 1.0 / cosView);
 
     vWorldPos = vec3(position.x, position.y + uYOffset, position.z);
-    vSplatR   = uSpacing * angleFactor * 0.5;
+    vSplatR   = aLocalSpacing * angleFactor * 0.5;
 
-    gl_PointSize = clamp(uSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
+    gl_PointSize = clamp(aLocalSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -230,6 +229,7 @@ function makeProjFragShader(nCams) {
     uniform mat4      uW2C[N_CAMS];
     uniform vec4      uCamK[N_CAMS];   // (fx_n, fy_n, cx_n, cy_n) — normalised
     uniform float     uCamFx[N_CAMS];  // raw fx for pixel-density score
+    uniform float     uCamOri[N_CAMS]; // 0,1,2,3 => 0/90/180/270
     uniform int       uNCams;
     uniform int       uDiagMode;
     uniform float     uYOffset;
@@ -263,8 +263,21 @@ function makeProjFragShader(nCams) {
         vec4  cp    = uW2C[i] * vec4(fragRaw, 1.0);
         if (cp.z >= -0.05) continue;
         float depth = -cp.z;
-        float u     = uCamK[i].x * cp.x / depth + uCamK[i].z;
-        float v     = uCamK[i].y * (-cp.y) / depth + uCamK[i].w;
+        float u0    = uCamK[i].x * cp.x / depth + uCamK[i].z;
+        float v0    = uCamK[i].y * (-cp.y) / depth + uCamK[i].w;
+        float u = u0;
+        float v = v0;
+        int ori = int(floor(uCamOri[i] + 0.5));
+        if (ori == 1) {
+          u = 1.0 - v0;
+          v = u0;
+        } else if (ori == 2) {
+          u = 1.0 - u0;
+          v = 1.0 - v0;
+        } else if (ori == 3) {
+          u = v0;
+          v = 1.0 - u0;
+        }
         float mg    = 0.02;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
         float r2    = dot(cp.xyz, cp.xyz);
@@ -298,19 +311,15 @@ function makeProjFragShader(nCams) {
   `
 }
 
-// c2wToW2c — rigid-body inverse of a column-major 4×4 ARKit camera-to-world matrix.
-// w2c = [ R^T | -R^T t ]   stored column-major to match WebGL / Three.js convention.
 function c2wToW2c(c2w) {
-  const tx = c2w[12], ty = c2w[13], tz = c2w[14]
-  return [
-    c2w[0], c2w[4], c2w[8],  0,
-    c2w[1], c2w[5], c2w[9],  0,
-    c2w[2], c2w[6], c2w[10], 0,
-    -(c2w[0] * tx + c2w[1] * ty + c2w[2] * tz),
-    -(c2w[4] * tx + c2w[5] * ty + c2w[6] * tz),
-    -(c2w[8] * tx + c2w[9] * ty + c2w[10] * tz),
-    1,
-  ]
+  return new THREE.Matrix4().fromArray(c2w).invert().toArray()
+}
+
+function applyUvOrientation(u0, v0, ori) {
+  if (ori === 1) return [1 - v0, u0]
+  if (ori === 2) return [1 - u0, 1 - v0]
+  if (ori === 3) return [v0, 1 - u0]
+  return [u0, v0]
 }
 
 // upgradeProjectiveTexturing — replaces vertex-colour splat material with a
@@ -348,27 +357,84 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) 
   const oldUni = points.material?.uniforms
   if (!oldUni) return null  // mesh was disposed while textures loaded
 
+  // ── Coverage analytics: sample rendered points, check each camera frustum ─
+  // Runs in JS before the material swap (~1 ms for 20 K samples × 16 cams).
+  const posAttr   = points.geometry.attributes.position
+  const nPts      = posAttr.count
+  const sampleStep = Math.max(1, Math.floor(nPts / 20000))
+  const w2cElems  = w2cMats.map(m => m.elements)
+  let covered = 0, sampled = 0
+  const camHitsByOri = Array.from({ length: nCams }, () => [0, 0, 0, 0])
+
+  for (let i = 0; i < nPts; i += sampleStep) {
+    const xr = posAttr.getX(i)
+    const yr = posAttr.getY(i)  // raw ARKit y (geometry stores pre-yOffset)
+    const zr = posAttr.getZ(i)
+    for (let ci = 0; ci < nCams; ci++) {
+      const e = w2cElems[ci]  // column-major Float32Array
+      const cpx = e[0]*xr + e[4]*yr + e[8]*zr  + e[12]
+      const cpy = e[1]*xr + e[5]*yr + e[9]*zr  + e[13]
+      const cpz = e[2]*xr + e[6]*yr + e[10]*zr + e[14]
+      if (cpz >= -0.05) continue
+      const depth = -cpz
+      const k = camKVec[ci]
+      const u0 = k.x * cpx / depth + k.z
+      const v0 = k.y * (-cpy) / depth + k.w
+      for (let ori = 0; ori < 4; ori++) {
+        const [u, v] = applyUvOrientation(u0, v0, ori)
+        if (u >= 0.02 && u <= 0.98 && v >= 0.02 && v <= 0.98) {
+          camHitsByOri[ci][ori]++
+        }
+      }
+    }
+  }
+  const camOriArr = new Float32Array(
+    camHitsByOri.map(h => h.indexOf(Math.max(h[0], h[1], h[2], h[3])))
+  )
+  const usedCamCount = camHitsByOri.reduce((acc, h) => acc + (Math.max(h[0], h[1], h[2], h[3]) > 0 ? 1 : 0), 0)
+  for (let i = 0; i < nPts; i += sampleStep) {
+    const xr = posAttr.getX(i)
+    const yr = posAttr.getY(i)
+    const zr = posAttr.getZ(i)
+    let ok = false
+    for (let ci = 0; ci < nCams && !ok; ci++) {
+      const e = w2cElems[ci]
+      const cpx = e[0]*xr + e[4]*yr + e[8]*zr  + e[12]
+      const cpy = e[1]*xr + e[5]*yr + e[9]*zr  + e[13]
+      const cpz = e[2]*xr + e[6]*yr + e[10]*zr + e[14]
+      if (cpz >= -0.05) continue
+      const depth = -cpz
+      const k = camKVec[ci]
+      const u0 = k.x * cpx / depth + k.z
+      const v0 = k.y * (-cpy) / depth + k.w
+      const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
+      if (u >= 0.02 && u <= 0.98 && v >= 0.02 && v <= 0.98) ok = true
+    }
+    if (ok) covered++
+    sampled++
+  }
+  const coveragePct = sampled > 0 ? Math.round(covered / sampled * 100) : 0
+
   const projMat = new THREE.ShaderMaterial({
     vertexColors: true,
     depthWrite:   true,
     depthTest:    true,
-    glslVersion:  THREE.GLSL3,
     vertexShader:   SPLAT_VERT_PROJ,
     fragmentShader: makeProjFragShader(nCams),
     uniforms: {
-      uViewH:    { value: oldUni.uViewH?.value   ?? 1 },
-      uSpacing:  { value: oldUni.uSpacing?.value ?? 0.02 },
+      uViewH:    { value: oldUni.uViewH?.value  ?? 1 },
       uYOffset:  { value: yOffset },
-      uFloorY:   { value: oldUni.uFloorY?.value  ?? 0 },
-      uCeilY:    { value: oldUni.uCeilY?.value   ?? 3 },
-      uRoomCX:   { value: oldUni.uRoomCX?.value  ?? 0 },
-      uRoomCZ:   { value: oldUni.uRoomCZ?.value  ?? 0 },
+      uFloorY:   { value: oldUni.uFloorY?.value ?? 0 },
+      uCeilY:    { value: oldUni.uCeilY?.value  ?? 3 },
+      uRoomCX:   { value: oldUni.uRoomCX?.value ?? 0 },
+      uRoomCZ:   { value: oldUni.uRoomCZ?.value ?? 0 },
       uDiagMode: { value: 0 },
       uNCams:    { value: nCams },
       uCamTex:   { value: textures },
       uW2C:      { value: w2cMats },
       uCamK:     { value: camKVec },
       uCamFx:    { value: camFxArr },
+      uCamOri:   { value: camOriArr },
     },
   })
 
@@ -381,10 +447,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) 
       projective:   true,
       projCams:     nCams,
       projTotal:    allSnaps.length,
-      colourMethod: `Projective texturing (${nCams}/${allSnaps.length} photos)`,
+      projUsed:     usedCamCount,
+      projCoverage: coveragePct,
+      colourMethod: `Projective texturing (${usedCamCount}/${nCams} cams used, ${coveragePct}% surface)`,
     }
   }
-  return { nCams, projTotal: allSnaps.length }
+  return { nCams, projTotal: allSnaps.length, coveragePct, projUsed: usedCamCount }
 }
 
 // ── Mesh shaders (used when point cloud is rendered as a triangle mesh) ───────
@@ -1013,20 +1081,21 @@ export default function SpaceBuilderCanvas({
   useEffect(() => { threeRef.current?.applySelection(activeSurfaceId) }, [activeSurfaceId])
 
   // ── Point cloud / room scan rendering ────────────────────────────────────
-  const pointCloudMeshRef = useRef(null)
-  const planeMeshesRef    = useRef([])
+  const pointCloudMeshRef    = useRef(null)
+  const planeMeshesRef       = useRef([])
   const reconstructionMeshesRef = useRef([])
-  const yOffsetRef        = useRef(0)
-  const rawBufferRef      = useRef(null)  // decoded PointCloudBuffer for LiDAR measurement
-  const diagStatsRef      = useRef(null)  // { rawPts, renderedPts, fboW, fboH, dpr }
+  const yOffsetRef           = useRef(0)
+  const rawBufferRef         = useRef(null)  // decoded PointCloudBuffer for LiDAR measurement
+  const diagStatsRef         = useRef(null)  // { rawPts, renderedPts, fboW, fboH, dpr }
+  const rebuildFromBufferRef = useRef(false) // set by Rebuild button to skip re-download
   const [diagVisible,     setDiagVisible]  = useState(false)
   const [diagMode,        setDiagMode]     = useState(0)  // 0=color, 1=depth, 2=normals
   const [scanRenderMode,  setScanRenderMode] = useState('raw-points') // raw-points | poisson-glb
   const [meshRebuilding,  setMeshRebuilding] = useState(false)
   const [meshGeneration,  setMeshGeneration] = useState(0)  // bump to re-run buildCloud
+  const [localLoad,       setLocalLoad] = useState({ active: false, pct: 0, phase: '' })
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
-    if (!onRoomScanLoadProgress) return
     const now = performance.now()
     const clamped = Math.max(0, Math.min(100, Math.round(pct)))
     const prev = roomLoadProgressRef.current
@@ -1035,7 +1104,10 @@ export default function SpaceBuilderCanvas({
     const enoughTime = now - prev.ts >= 120
     if (!phaseChanged && !enoughDelta && !enoughTime) return
     roomLoadProgressRef.current = { pct: clamped, phase, ts: now }
-    try { onRoomScanLoadProgress({ pct: clamped, phase, active }) } catch (err) { void err }
+    setLocalLoad({ active, pct: clamped, phase })
+    if (onRoomScanLoadProgress) {
+      try { onRoomScanLoadProgress({ pct: clamped, phase, active }) } catch (err) { void err }
+    }
   }, [onRoomScanLoadProgress])
   useEffect(() => {
     const t = threeRef.current
@@ -1084,6 +1156,15 @@ export default function SpaceBuilderCanvas({
     //   { url }          — loaded from server, fetch the binary blob
     //   { data }         — legacy base64 JSON format
     async function buildCloud() {
+      // Always clear the previous scan mesh so rebuilds don't layer on top.
+      const t = threeRef.current
+      if (t && pointCloudMeshRef.current) {
+        t.scene.remove(pointCloudMeshRef.current)
+        pointCloudMeshRef.current.geometry?.dispose()
+        pointCloudMeshRef.current.material?.dispose()
+        pointCloudMeshRef.current = null
+      }
+
       const pc = roomScan.pointCloud
       reportRoomLoad(3, 'Preparing room scan')
 
@@ -1169,6 +1250,10 @@ export default function SpaceBuilderCanvas({
             fboW, fboH, dpr: Math.min(window.devicePixelRatio, 2),
             meshSource:   'poisson-glb',
             colourMethod: meta?.colorMethod ?? meta?.colourMethod ?? 'LiDAR sensor (IDW)',
+            photoSnapshotsTotal: meta?.photoSnapshotsTotal ?? null,
+            photoSnapshotsProjected: meta?.photoSnapshotsProjected ?? null,
+            photoSnapshotsWinning: meta?.photoSnapshotsWinning ?? null,
+            photoCoveragePct: meta?.photoCoveragePct ?? null,
           }
 
           try {
@@ -1248,7 +1333,13 @@ export default function SpaceBuilderCanvas({
 
       // ── JS spherical triangulation (local/anonymous scans only) ──────────
       let buf
-      try {
+      // Rebuild path: reuse in-memory buffer to avoid re-downloading.
+      if (rebuildFromBufferRef.current && rawBufferRef.current) {
+        rebuildFromBufferRef.current = false
+        buf = rawBufferRef.current
+        reportRoomLoad(42, 'Using cached scan data')
+      }
+      if (!buf) try {
         if (pc?._buffer) {
           reportRoomLoad(24, 'Using cached scan data')
           buf = pc._buffer
@@ -1287,7 +1378,12 @@ export default function SpaceBuilderCanvas({
             ab = await resp.arrayBuffer()
             reportRoomLoad(38, 'Download complete')
           }
-          buf = PointCloudBuffer.fromFloat32Array(new Float32Array(ab), pc.pointCount)
+          const arr = new Float32Array(ab)
+          const inferredCount = Math.floor(arr.length / 6)
+          const safePointCount = Number.isFinite(pc.pointCount) && pc.pointCount > 0
+            ? pc.pointCount
+            : inferredCount
+          buf = PointCloudBuffer.fromFloat32Array(arr, safePointCount)
           reportRoomLoad(42, 'Decoding point cloud')
         } else if (pc?.data) {
           reportRoomLoad(22, 'Decoding legacy scan payload')
@@ -1308,43 +1404,62 @@ export default function SpaceBuilderCanvas({
       // from Poisson or spherical triangulation.
       if (scanRenderMode === 'raw-points') {
         try {
-          reportRoomLoad(44, 'Preparing raw points')
+          reportRoomLoad(44, 'Analysing point density')
           const rawData = buf._data
           const n = buf.pointCount
 
           // Render up to 8 M points at stride=1; stride up only for truly huge scans.
           const stride = Math.max(1, Math.floor(n / 8_000_000))
-          const est = Math.max(1, Math.ceil(n / stride))
+          const est    = Math.max(1, Math.ceil(n / stride))
           const positions = new Float32Array(est * 3)
-          const colors = new Float32Array(est * 3)
+          const colors    = new Float32Array(est * 3)
+          const spacings  = new Float32Array(est)  // per-point adaptive splat size
+
+          // ── Pass 1: bounds + density estimation via 5 cm voxel counts ─────
+          // Local density at each point tells us how tightly spaced its
+          // neighbours are.  More returns per voxel → smaller splat needed.
+          const DENS_CELL = 0.05          // 5 cm cell for density estimation
+          const DENS_INV  = 1 / DENS_CELL
+          const hashP = (ix, iy, iz) => (ix * 73856093 + iy * 19349663 + iz * 83492791) | 0
+          const voxelCounts = new Map()
 
           let minY = Infinity, maxY = -Infinity
           let minX = Infinity, maxX = -Infinity
           let minZ = Infinity, maxZ = -Infinity
-          let vi = 0
 
           for (let i = 0, b = 0; i < n; i++, b += 6) {
-            const x = rawData[b]
-            const y = rawData[b + 1]
-            const z = rawData[b + 2]
-            if (y < minY) minY = y
-            if (y > maxY) maxY = y
-            if (x < minX) minX = x
-            if (x > maxX) maxX = x
-            if (z < minZ) minZ = z
-            if (z > maxZ) maxZ = z
-
-            if (i % stride !== 0) continue
-            positions[vi * 3] = x
-            positions[vi * 3 + 1] = y
-            positions[vi * 3 + 2] = z
-            colors[vi * 3] = rawData[b + 3]
-            colors[vi * 3 + 1] = rawData[b + 4]
-            colors[vi * 3 + 2] = rawData[b + 5]
-            vi++
-
+            const x = rawData[b], y = rawData[b+1], z = rawData[b+2]
+            if (y < minY) minY = y;  if (y > maxY) maxY = y
+            if (x < minX) minX = x;  if (x > maxX) maxX = x
+            if (z < minZ) minZ = z;  if (z > maxZ) maxZ = z
+            const key = hashP(Math.floor(x * DENS_INV), Math.floor(y * DENS_INV), Math.floor(z * DENS_INV))
+            voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
             if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
-              reportRoomLoad(44 + (44 * i / n), 'Sampling raw points')
+              reportRoomLoad(44 + (12 * i / n), 'Analysing point density')
+            }
+          }
+          if (cancelled) return
+          await new Promise(r => setTimeout(r, 0))  // yield → paint progress bar
+
+          // ── Pass 2: sample + per-point spacing from density ───────────────
+          // spacing = DENS_CELL / √count:
+          //   1 return/voxel → 5 cm  |  4 → 2.5 cm  |  25 → 1 cm  |  100 → 0.5 cm
+          // Dense walls get near-invisible sub-pixel dots; sparse noise/edges
+          // get slightly larger discs to bridge the gaps — no more bowling balls.
+          let vi = 0
+          for (let i = 0, b = 0; i < n; i++, b += 6) {
+            if (i % stride !== 0) continue
+            const x = rawData[b], y = rawData[b+1], z = rawData[b+2]
+            positions[vi*3] = x;  positions[vi*3+1] = y;  positions[vi*3+2] = z
+            colors[vi*3]   = rawData[b+3]
+            colors[vi*3+1] = rawData[b+4]
+            colors[vi*3+2] = rawData[b+5]
+            const key   = hashP(Math.floor(x * DENS_INV), Math.floor(y * DENS_INV), Math.floor(z * DENS_INV))
+            const count = voxelCounts.get(key) || 1
+            spacings[vi] = Math.max(0.003, Math.min(0.08, DENS_CELL / Math.sqrt(count)))
+            vi++
+            if ((i & 0x3ffff) === 0 && i > 0 && !cancelled) {
+              reportRoomLoad(56 + (32 * i / n), 'Sampling raw points')
             }
           }
 
@@ -1353,20 +1468,10 @@ export default function SpaceBuilderCanvas({
           const yOffset = isFinite(minY) ? -minY : 0
           yOffsetRef.current = yOffset
 
-          // Wegter Equation: derive optimal splat diameter from scan geometry.
-          // Model: room surface area ≈ 2(W·D + W·H + D·H) from bounding box.
-          // Mean inter-point surface spacing: d = √(S / N_rendered)
-          // uSpacing = 2.5 × d ensures gap-free coverage without visible bowling-ball splats.
-          const W = Math.max(0.1, maxX - minX)
-          const H = Math.max(0.1, maxY - minY)
-          const D = Math.max(0.1, maxZ - minZ)
-          const roomSurfaceM2 = 2 * (W * D + W * H + D * H)
-          const wegterSpacing = 2.5 * Math.sqrt(roomSurfaceM2 / Math.max(1, vi))
-          const uSpacing = Math.max(0.004, Math.min(0.10, wegterSpacing))
-
           const geo = new THREE.BufferGeometry()
-          geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vi * 3), 3))
-          geo.setAttribute('color', new THREE.BufferAttribute(colors.subarray(0, vi * 3), 3))
+          geo.setAttribute('position',      new THREE.BufferAttribute(positions.subarray(0, vi * 3), 3))
+          geo.setAttribute('color',         new THREE.BufferAttribute(colors.subarray(0, vi * 3), 3))
+          geo.setAttribute('aLocalSpacing', new THREE.BufferAttribute(spacings.subarray(0, vi), 1))
 
           const mat = new THREE.ShaderMaterial({
             vertexColors: true,
@@ -1376,13 +1481,12 @@ export default function SpaceBuilderCanvas({
             vertexShader: SPLAT_VERT,
             fragmentShader: SPLAT_FRAG,
             uniforms: {
-              uViewH:   { value: t.renderer?.domElement?.height ?? 1 },
-              uSpacing: { value: uSpacing },
-              uYOffset: { value: yOffset },
-              uFloorY:  { value: isFinite(minY) ? minY + 0.02 : 0 },
-              uCeilY:   { value: isFinite(maxY) ? maxY - 0.02 : 2 },
-              uRoomCX:  { value: (minX + maxX) * 0.5 },
-              uRoomCZ:  { value: (minZ + maxZ) * 0.5 },
+              uViewH:    { value: t.renderer?.domElement?.height ?? 1 },
+              uYOffset:  { value: yOffset },
+              uFloorY:   { value: isFinite(minY) ? minY + 0.02 : 0 },
+              uCeilY:    { value: isFinite(maxY) ? maxY - 0.02 : 2 },
+              uRoomCX:   { value: (minX + maxX) * 0.5 },
+              uRoomCZ:   { value: (minZ + maxZ) * 0.5 },
               uDiagMode: { value: 0 },
             },
           })
@@ -1392,11 +1496,13 @@ export default function SpaceBuilderCanvas({
           pointCloudMeshRef.current = points
           rawBufferRef.current = buf
 
+          // Median spacing for diagnostics display
+          const sortedSpacings = spacings.subarray(0, vi).slice().sort()
+          const medSpacingMm   = Math.round((sortedSpacings[Math.floor(vi / 2)] ?? 0.01) * 1000)
+
           const fboW = t.renderer?.domElement?.width ?? 0
           const fboH = t.renderer?.domElement?.height ?? 0
-          // Estimate photo-projected points: if roomScan has a pointCloud with
-          // pointCount, compare rendered vi against that to infer coverage.
-          const savedPtCount = roomScan?.pointCloud?.pointCount ?? 0
+          const savedPtCount  = roomScan?.pointCloud?.pointCount ?? 0
           const snapshotCount = roomScan?.snapshots?.length ?? roomScan?.snapshotCount ?? 0
           diagStatsRef.current = {
             rawPts: n,
@@ -1406,7 +1512,7 @@ export default function SpaceBuilderCanvas({
             dpr: Math.min(window.devicePixelRatio, 2),
             colourMethod: savedPtCount > 0 ? 'On-device photo projection (iOS)' : 'LiDAR sensor (device)',
             snapshotCount,
-            wegterSpacingMm: Math.round(uSpacing * 1000),
+            wegterSpacingMm: medSpacingMm,
           }
 
           try {
@@ -2206,16 +2312,69 @@ export default function SpaceBuilderCanvas({
                 {s.snapshotCount > 0 && (
                   <tr><td>Photo snapshots</td><td>{s.snapshotCount}</td></tr>
                 )}
+                {s.photoSnapshotsTotal != null && (
+                  <tr><td>Photo snapshots</td><td>
+                    {s.photoSnapshotsProjected ?? 0}/{s.photoSnapshotsTotal}
+                    <span className="sbc-diag-dim"> projected</span>
+                  </td></tr>
+                )}
                 {s.projective && (
-                  <tr><td>Proj. cameras</td><td>{s.projCams}/{s.projTotal} <span className="sbc-diag-dim">(active)</span></td></tr>
+                  <>
+                    <tr><td>Proj. cameras</td><td>{s.projUsed ?? s.projCams}/{s.projTotal}</td></tr>
+                    <tr><td>Photo coverage</td><td>
+                      {s.projCoverage != null ? `${s.projCoverage}%` : '—'}
+                      <span className="sbc-diag-dim"> of surface pts</span>
+                    </td></tr>
+                  </>
                 )}
-                {s.wegterSpacingMm != null && (
-                  <tr><td>Wegter splat Ø</td><td>{s.wegterSpacingMm} mm <span className="sbc-diag-dim">(adaptive)</span></td></tr>
+                {!s.projective && s.photoCoveragePct != null && (
+                  <tr><td>Photo coverage</td><td>
+                    {`${Math.round(s.photoCoveragePct)}%`}
+                    <span className="sbc-diag-dim"> of mesh verts</span>
+                  </td></tr>
                 )}
+                <tr><td>Wegter splat Ø</td><td>
+                  {s.wegterSpacingMm != null ? `${s.wegterSpacingMm} mm` : 'N/A'}
+                  <span className="sbc-diag-dim"> (median, adaptive)</span>
+                </td></tr>
                 <tr><td>Colour method</td><td>{s.colourMethod ?? 'LiDAR sensor (device)'}</td></tr>
                 <tr><td>Render resolution</td><td>{s.fboW} × {s.fboH} <span className="sbc-diag-dim">@ {s.dpr.toFixed(1)}×</span></td></tr>
               </tbody>
             </table>
+            {(roomScan?.pointCloud || space?.id) && (
+              <button
+                className="sbc-diag-rebuild"
+                onClick={async () => {
+                  rebuildFromBufferRef.current = !!rawBufferRef.current
+                  if (space?.id && scanRenderMode === 'poisson-glb') {
+                    setMeshRebuilding(true)
+                    try {
+                      const jwt    = getJwt()
+                      const device = getDeviceToken()
+                      const headers = {
+                        'X-Device-Token': device,
+                        ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+                      }
+                      await fetch(`${BASE}/api/rooms/${space.id}/mesh?rebuild=1`, { headers })
+                    } finally {
+                      setMeshRebuilding(false)
+                    }
+                  }
+                  setMeshGeneration(prev => prev + 1)
+                }}
+                disabled={meshRebuilding}
+              >
+                {meshRebuilding ? 'Rebuilding…' : '↺ Rebuild from scan'}
+              </button>
+            )}
+            {localLoad.active && (
+              <div style={{ marginTop: 8 }}>
+                <div className="sbc-diag-dim" style={{ marginBottom: 4 }}>{localLoad.phase || 'Rebuilding...'}</div>
+                <div style={{ height: 6, borderRadius: 4, background: 'rgba(255,255,255,0.14)', overflow: 'hidden' }}>
+                  <div style={{ width: `${Math.max(0, Math.min(100, localLoad.pct))}%`, height: '100%', background: 'linear-gradient(90deg,#5fb4ff,#4de2c1)' }} />
+                </div>
+              </div>
+            )}
           </div>
         )
       })()}

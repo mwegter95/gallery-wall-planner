@@ -482,7 +482,14 @@ export async function uploadSnapshot(roomId, index, snapshot) {
  * Returns an ArrayBuffer of interleaved Float32 [x,y,z,r,g,b …].
  */
 export async function downloadPointCloud(roomId) {
-  const resp = await apiFetch(`/api/rooms/${roomId}/pointcloud/download`)
+  const jwt    = getJwt()
+  const device = getDeviceToken()
+  const resp = await fetch(`${BASE}/api/rooms/${roomId}/pointcloud/download`, {
+    headers: {
+      'X-Device-Token': device,
+      ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
+    },
+  })
   if (!resp.ok) throw new Error(`Point cloud download failed: ${resp.status}`)
   return resp.arrayBuffer()
 }

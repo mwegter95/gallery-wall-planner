@@ -91,10 +91,12 @@ export class PointCloudBuffer {
 
   /** Wrap an existing Float32Array directly (zero-copy). Used when Swift sends base64 binary. */
   static fromFloat32Array(arr, pointCount) {
-    const buf = new PointCloudBuffer(pointCount)
+    const inferred = Math.floor((arr?.length || 0) / FLOATS_PER_POINT)
+    const safeCount = Number.isFinite(pointCount) && pointCount > 0 ? pointCount : inferred
+    const buf = new PointCloudBuffer(safeCount)
     buf._data = arr
-    buf._len  = pointCount
-    buf._cap  = pointCount
+    buf._len  = safeCount
+    buf._cap  = safeCount
     return buf
   }
 }
