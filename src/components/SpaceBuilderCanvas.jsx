@@ -280,12 +280,14 @@ function makeProjFragShader(nCams) {
         }
         float mg    = 0.02;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
-        float r2    = dot(cp.xyz, cp.xyz);
-        float score = uCamFx[i] * depth / (r2 + 1e-4);
-        if (score <= 0.0) continue;
+        // Wegter photo-projection score: angular resolution (camFx / depth²).
+        // Squaring the score creates winner-take-most blending in a single pass:
+        // a camera at half the distance scores 4× higher linear → 16× in the blend.
+        float score = uCamFx[i] / (depth * depth + 0.01);
+        float w     = score * score;
         vec3 texCol = texture2D(uCamTex[i], vec2(u, 1.0 - v)).rgb;
-        accColor  += texCol * score;
-        accWeight += score;
+        accColor  += texCol * w;
+        accWeight += w;
       }
 
       vec3 col;
@@ -325,12 +327,25 @@ function applyUvOrientation(u0, v0, ori) {
 // upgradeProjectiveTexturing — replaces vertex-colour splat material with a
 // photo-projective ShaderMaterial that samples all available snapshot cameras.
 // Called fire-and-forget; the scan is already visible in vertex-colour mode.
-const MAX_PROJ_CAMS = 16
+//
+// Wegter Photo-Projection Equation
+// ─────────────────────────────────
+// For each 3D point, the ideal splat diameter to seamlessly fill photo coverage is:
+//   splatDiam = depth_from_best_camera / camFx_pixels * WEGTER_OVERLAP
+// where WEGTER_OVERLAP = 2.5 ensures each splat covers ~2.5 photo pixels at that depth.
+// This is depth-adaptive: close-up points get smaller splats (preserving detail),
+// distant points get larger splats (bridging the wider LiDAR return spacing).
+// Points not covered by any camera keep their geometry-density-based spacing.
+const MAX_PROJ_CAMS  = 16
+const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) {
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate }) {
   const data = await getSnapshots(roomId)
   const allSnaps = data?.snapshots
-  if (!allSnaps?.length) return null
+  if (!allSnaps?.length) {
+    console.warn('[projective] no snapshots for room', roomId)
+    return null
+  }
 
   let snaps = allSnaps
   if (snaps.length > MAX_PROJ_CAMS) {
@@ -357,50 +372,39 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) 
   const oldUni = points.material?.uniforms
   if (!oldUni) return null  // mesh was disposed while textures loaded
 
-  // ── Coverage analytics: sample rendered points, check each camera frustum ─
-  // Runs in JS before the material swap (~1 ms for 20 K samples × 16 cams).
-  const posAttr   = points.geometry.attributes.position
-  const nPts      = posAttr.count
-  const sampleStep = Math.max(1, Math.floor(nPts / 20000))
-  const w2cElems  = w2cMats.map(m => m.elements)
-  let covered = 0, sampled = 0
-  const camHitsByOri = Array.from({ length: nCams }, () => [0, 0, 0, 0])
+  // ── Orientation from image dimensions ───────────────────────────────────
+  // ARKit intrinsics (K) are in the native sensor frame (landscape).
+  // If the loaded JPEG's display height > width, the phone was held portrait
+  // and we need a 90° CW UV rotation (ori=1) to align with the K matrix.
+  const camOriArr = new Float32Array(textures.map(tex => {
+    const iw = tex.image?.naturalWidth  ?? tex.image?.width  ?? 1
+    const ih = tex.image?.naturalHeight ?? tex.image?.height ?? 1
+    return ih > iw ? 1.0 : 0.0   // portrait JPEG → ori 1 (90° CW)
+  }))
 
-  for (let i = 0; i < nPts; i += sampleStep) {
-    const xr = posAttr.getX(i)
-    const yr = posAttr.getY(i)  // raw ARKit y (geometry stores pre-yOffset)
-    const zr = posAttr.getZ(i)
-    for (let ci = 0; ci < nCams; ci++) {
-      const e = w2cElems[ci]  // column-major Float32Array
-      const cpx = e[0]*xr + e[4]*yr + e[8]*zr  + e[12]
-      const cpy = e[1]*xr + e[5]*yr + e[9]*zr  + e[13]
-      const cpz = e[2]*xr + e[6]*yr + e[10]*zr + e[14]
-      if (cpz >= -0.05) continue
-      const depth = -cpz
-      const k = camKVec[ci]
-      const u0 = k.x * cpx / depth + k.z
-      const v0 = k.y * (-cpy) / depth + k.w
-      for (let ori = 0; ori < 4; ori++) {
-        const [u, v] = applyUvOrientation(u0, v0, ori)
-        if (u >= 0.02 && u <= 0.98 && v >= 0.02 && v <= 0.98) {
-          camHitsByOri[ci][ori]++
-        }
-      }
-    }
-  }
-  const camOriArr = new Float32Array(
-    camHitsByOri.map(h => h.indexOf(Math.max(h[0], h[1], h[2], h[3])))
-  )
-  const usedCamCount = camHitsByOri.reduce((acc, h) => acc + (Math.max(h[0], h[1], h[2], h[3]) > 0 ? 1 : 0), 0)
+  // ── Wegter photo-projection spacing ────────────────────────────────────
+  // Sample ~20 K points; for each find the best camera (angular resolution
+  // score = camFx / depth²) and compute the Wegter splat diameter.
+  // un-sampled points are filled by nearest-sample propagation.
+  const posAttr    = points.geometry.attributes.position
+  const nPts       = posAttr.count
+  const sampleStep = Math.max(1, Math.floor(nPts / 20000))
+  const w2cElems   = w2cMats.map(m => m.elements)
+  const photoSpacings = new Float32Array(nPts)
+
+  let covered = 0, sampled = 0
+  let usedCamMask = 0  // bitmask of cameras that contributed ≥1 point
+
   for (let i = 0; i < nPts; i += sampleStep) {
     const xr = posAttr.getX(i)
     const yr = posAttr.getY(i)
     const zr = posAttr.getZ(i)
-    let ok = false
-    for (let ci = 0; ci < nCams && !ok; ci++) {
+    let bestScore = 0, bestDepth = 0, bestCamIdx = -1
+
+    for (let ci = 0; ci < nCams; ci++) {
       const e = w2cElems[ci]
-      const cpx = e[0]*xr + e[4]*yr + e[8]*zr  + e[12]
-      const cpy = e[1]*xr + e[5]*yr + e[9]*zr  + e[13]
+      const cpx = e[0]*xr + e[4]*yr + e[8]*zr + e[12]
+      const cpy = e[1]*xr + e[5]*yr + e[9]*zr + e[13]
       const cpz = e[2]*xr + e[6]*yr + e[10]*zr + e[14]
       if (cpz >= -0.05) continue
       const depth = -cpz
@@ -408,12 +412,56 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) 
       const u0 = k.x * cpx / depth + k.z
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (u >= 0.02 && u <= 0.98 && v >= 0.02 && v <= 0.98) ok = true
+      if (u < 0.02 || u > 0.98 || v < 0.02 || v > 0.98) continue
+      // Angular resolution score: closer, higher-fx cameras win strongly
+      const score = camFxArr[ci] / (depth * depth + 0.01)
+      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci }
     }
-    if (ok) covered++
+
+    if (bestCamIdx >= 0) {
+      // Wegter photo-projection equation:
+      //   splatDiam = depth / camFx * OVERLAP
+      // This matches the splat size to the camera pixel footprint at that depth.
+      photoSpacings[i] = Math.max(0.001, Math.min(0.08,
+        bestDepth / (camFxArr[bestCamIdx] + 1e-4) * WEGTER_OVERLAP
+      ))
+      covered++
+      if (bestCamIdx < 30) usedCamMask |= (1 << bestCamIdx)
+    }
     sampled++
   }
-  const coveragePct = sampled > 0 ? Math.round(covered / sampled * 100) : 0
+
+  // Fill un-sampled points by linear interpolation between bracketing samples
+  for (let i = 0; i < nPts; i++) {
+    if (photoSpacings[i] > 0) continue
+    const prev = Math.floor(i / sampleStep) * sampleStep
+    const next = Math.min(nPts - 1, prev + sampleStep)
+    const a    = photoSpacings[prev], b = photoSpacings[next]
+    if (a > 0 && b > 0) {
+      const t = (i - prev) / Math.max(1, next - prev)
+      photoSpacings[i] = a + (b - a) * t
+    } else {
+      photoSpacings[i] = a > 0 ? a : b > 0 ? b : 0.004  // 4 mm fallback
+    }
+  }
+
+  // ── Update geometry spacing attribute with photo-derived values ─────────
+  const oldSpacingAttr = points.geometry.attributes.aLocalSpacing
+  if (oldSpacingAttr && oldSpacingAttr.array.length === nPts) {
+    oldSpacingAttr.array.set(photoSpacings)
+    oldSpacingAttr.needsUpdate = true
+  } else {
+    points.geometry.setAttribute('aLocalSpacing',
+      new THREE.BufferAttribute(photoSpacings.slice(), 1))
+  }
+
+  const coveragePct  = sampled > 0 ? Math.round(covered / sampled * 100) : 0
+  const usedCamCount = nCams <= 30
+    ? [...Array(nCams)].filter((_, i) => usedCamMask & (1 << i)).length
+    : nCams  // if >30 cams, assume all used (bitmask overflows)
+
+  const medSpacingPx = photoSpacings.slice().sort()[Math.floor(nPts / 2)] ?? 0
+  const medSpacingMm = Math.round(medSpacingPx * 1000)
 
   const projMat = new THREE.ShaderMaterial({
     vertexColors: true,
@@ -441,17 +489,21 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) 
   points.material.dispose()
   points.material = projMat
 
+  console.info(`[projective] ${nCams} cams loaded, ${usedCamCount} cover points, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
+
   if (diagRef) {
     diagRef.current = {
       ...diagRef.current,
-      projective:   true,
-      projCams:     nCams,
-      projTotal:    allSnaps.length,
-      projUsed:     usedCamCount,
-      projCoverage: coveragePct,
-      colourMethod: `Projective texturing (${usedCamCount}/${nCams} cams used, ${coveragePct}% surface)`,
+      projective:      true,
+      projCams:        nCams,
+      projTotal:       allSnaps.length,
+      projUsed:        usedCamCount,
+      projCoverage:    coveragePct,
+      wegterSpacingMm: medSpacingMm,
+      colourMethod:    `Photo projection (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
     }
   }
+  onDiagUpdate?.()
   return { nCams, projTotal: allSnaps.length, coveragePct, projUsed: usedCamCount }
 }
 
@@ -1087,6 +1139,7 @@ export default function SpaceBuilderCanvas({
   const yOffsetRef           = useRef(0)
   const rawBufferRef         = useRef(null)  // decoded PointCloudBuffer for LiDAR measurement
   const diagStatsRef         = useRef(null)  // { rawPts, renderedPts, fboW, fboH, dpr }
+  const [diagVersion, setDiagVersion] = useState(0)  // bumped after projection stats update
   const rebuildFromBufferRef = useRef(false) // set by Rebuild button to skip re-download
   const [diagVisible,     setDiagVisible]  = useState(false)
   const [diagMode,        setDiagMode]     = useState(0)  // 0=color, 1=depth, 2=normals
@@ -1528,7 +1581,7 @@ export default function SpaceBuilderCanvas({
           // Async upgrade: swap vertex-colour material for photo-projective texturing.
           // Fire-and-forget so the scan is immediately visible while textures load.
           if (roomId && !cancelled) {
-            upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef: diagStatsRef })
+            upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef: diagStatsRef, onDiagUpdate: () => setDiagVersion(v => v + 1) })
               .catch(err => console.warn('[projective] upgrade error:', err))
           }
           return
@@ -2286,6 +2339,7 @@ export default function SpaceBuilderCanvas({
 
       {/* ── Diagnostics overlay ───────────────────────────────────── */}
       {diagVisible && diagStatsRef.current && (() => {
+        void diagVersion  // consume version counter so React re-renders when stats update
         const s = diagStatsRef.current
         const renderedPct = s.rawPts > 0 ? ((s.renderedPts / s.rawPts) * 100).toFixed(1) : '—'
         return (
@@ -2345,6 +2399,27 @@ export default function SpaceBuilderCanvas({
               <button
                 className="sbc-diag-rebuild"
                 onClick={async () => {
+                  // Fast-path for raw-points mode: re-run photo projection on the
+                  // existing point cloud without re-building the voxel pipeline.
+                  const pts = pointCloudMeshRef.current
+                  if (scanRenderMode === 'raw-points' && pts && space?.id) {
+                    setMeshRebuilding(true)
+                    try {
+                      await upgradeProjectiveTexturing({
+                        points: pts,
+                        yOffset: yOffsetRef.current,
+                        roomId: space.id,
+                        diagRef: diagStatsRef,
+                        onDiagUpdate: () => setDiagVersion(v => v + 1),
+                      })
+                    } catch (err) {
+                      console.warn('[rebuild] projection error:', err)
+                    } finally {
+                      setMeshRebuilding(false)
+                    }
+                    return
+                  }
+                  // Poisson GLB path: trigger server rebuild then reload
                   rebuildFromBufferRef.current = !!rawBufferRef.current
                   if (space?.id && scanRenderMode === 'poisson-glb') {
                     setMeshRebuilding(true)
@@ -2364,7 +2439,7 @@ export default function SpaceBuilderCanvas({
                 }}
                 disabled={meshRebuilding}
               >
-                {meshRebuilding ? 'Rebuilding…' : '↺ Rebuild from scan'}
+                {meshRebuilding ? 'Re-projecting…' : '↺ Rebuild from scan'}
               </button>
             )}
             {localLoad.active && (
