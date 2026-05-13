@@ -13,7 +13,7 @@ import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
-import { BASE, getJwt, getDeviceToken } from '../utils/api'
+import { BASE, getJwt, getDeviceToken, getSnapshots } from '../utils/api'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -108,7 +108,7 @@ const SPLAT_VERT = /* glsl */`
   uniform float uCeilY;     // raw-space Y above which points are ceiling
   uniform float uRoomCX;    // raw-space X centre of room
   uniform float uRoomCZ;    // raw-space Z centre of room
-  uniform float uSpacing;   // Wegter Equation: 6 × √(S_room / N_rendered)
+  uniform float uSpacing;   // Wegter Equation: 2.5 × √(S_room / N_rendered)
 
   varying vec3 vColor;
 
@@ -134,7 +134,7 @@ const SPLAT_VERT = /* glsl */`
     // View-dependent disc enlargement driven by the procedural normal.
     vec3  mvN       = normalize(normalMatrix * norm);
     float cosView   = max(0.30, abs(mvN.z));
-    float angleFactor = min(2.0, 1.0 / cosView);
+    float angleFactor = min(1.4, 1.0 / cosView);
 
     // Wegter Equation: density-adaptive splat sizing.
     // angleFactor enlarges grazing-angle discs to cover oblique surfaces.
@@ -169,6 +169,223 @@ const SPLAT_FRAG = /* glsl */`
     gl_FragColor = vec4(col, 1.0);
   }
 `
+
+// ── Projective-texturing splat shaders ───────────────────────────────────────
+// SPLAT_VERT_PROJ extends the base splat vertex shader with two varyings that
+// carry the fragment's world-space position and splat half-radius to the frag
+// shader so it can project each sub-pixel of the disc onto the camera images.
+
+const SPLAT_VERT_PROJ = /* glsl */`
+  uniform float uViewH;
+  uniform float uYOffset;
+  uniform float uFloorY;
+  uniform float uCeilY;
+  uniform float uRoomCX;
+  uniform float uRoomCZ;
+  uniform float uSpacing;
+
+  varying vec3  vColor;
+  varying vec3  vWorldPos;
+  varying float vSplatR;
+
+  void main() {
+    vColor = color;
+
+    vec4 mvPos = modelViewMatrix * vec4(position.x, position.y + uYOffset, position.z, 1.0);
+
+    vec3 norm;
+    if (position.y <= uFloorY) {
+      norm = vec3(0.0, 1.0, 0.0);
+    } else if (position.y >= uCeilY) {
+      norm = vec3(0.0, -1.0, 0.0);
+    } else {
+      float dx = position.x - uRoomCX;
+      float dz = position.z - uRoomCZ;
+      float len = max(length(vec2(dx, dz)), 0.001);
+      norm = vec3(dx / len, 0.0, dz / len);
+    }
+
+    vec3  mvN        = normalize(normalMatrix * norm);
+    float cosView    = max(0.30, abs(mvN.z));
+    float angleFactor = min(1.4, 1.0 / cosView);
+
+    vWorldPos = vec3(position.x, position.y + uYOffset, position.z);
+    vSplatR   = uSpacing * angleFactor * 0.5;
+
+    gl_PointSize = clamp(uSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`
+
+// makeProjFragShader(nCams) — template the camera count at shader-compile time
+// so the sampler array has a fixed size (GLSL requirement) while staying
+// as small as possible to respect hardware texture-unit limits.
+function makeProjFragShader(nCams) {
+  return /* glsl */`
+    precision highp float;
+    precision highp int;
+    #define N_CAMS ${nCams}
+
+    uniform sampler2D uCamTex[N_CAMS];
+    uniform mat4      uW2C[N_CAMS];
+    uniform vec4      uCamK[N_CAMS];   // (fx_n, fy_n, cx_n, cy_n) — normalised
+    uniform float     uCamFx[N_CAMS];  // raw fx for pixel-density score
+    uniform int       uNCams;
+    uniform int       uDiagMode;
+    uniform float     uYOffset;
+
+    varying vec3  vColor;
+    varying vec3  vWorldPos;
+    varying float vSplatR;
+
+    void main() {
+      vec2 pc = gl_PointCoord - 0.5;
+      if (dot(pc, pc) > 0.25) discard;
+
+      // Reconstruct fragment world position from splat centre + screen-aligned disc offset.
+      vec3 camRight = normalize(vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]));
+      vec3 camUp    = normalize(vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]));
+      float splatDiam = vSplatR * 2.0;
+      vec3 fragScene = vWorldPos
+        + (gl_PointCoord.x - 0.5) * splatDiam * camRight
+        - (gl_PointCoord.y - 0.5) * splatDiam * camUp;
+      // Undo uYOffset to get raw ARKit coordinates for camera projection.
+      vec3 fragRaw = vec3(fragScene.x, fragScene.y - uYOffset, fragScene.z);
+
+      // Weighted blend across all cameras: pixel-density score = fx * depth / r².
+      // ARKit convention: camera looks along -Z; visible if z < -0.05.
+      // K is normalised by image size so UV lands in [0,1].
+      // V is flipped (ARKit top-down vs OpenGL bottom-up).
+      vec3  accColor  = vec3(0.0);
+      float accWeight = 0.0;
+      for (int i = 0; i < N_CAMS; i++) {
+        if (i >= uNCams) break;
+        vec4  cp    = uW2C[i] * vec4(fragRaw, 1.0);
+        if (cp.z >= -0.05) continue;
+        float depth = -cp.z;
+        float u     = uCamK[i].x * cp.x / depth + uCamK[i].z;
+        float v     = uCamK[i].y * (-cp.y) / depth + uCamK[i].w;
+        float mg    = 0.02;
+        if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
+        float r2    = dot(cp.xyz, cp.xyz);
+        float score = uCamFx[i] * depth / (r2 + 1e-4);
+        if (score <= 0.0) continue;
+        vec3 texCol = texture2D(uCamTex[i], vec2(u, 1.0 - v)).rgb;
+        accColor  += texCol * score;
+        accWeight += score;
+      }
+
+      vec3 col;
+      if (accWeight > 0.0) {
+        col = accColor / accWeight;
+        col = pow(clamp(col, 0.0, 1.0), vec3(0.9));
+      } else {
+        col = vColor;
+        float luma = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(vec3(luma), col, 1.35);
+        col = pow(clamp(col, 0.0, 1.0), vec3(0.88));
+      }
+
+      if (uDiagMode == 1) {
+        float d = gl_FragCoord.z;
+        col = mix(vec3(1.0, 0.3, 0.0), vec3(0.0, 0.4, 1.0), clamp(d * 2.0 - 0.5, 0.0, 1.0));
+      } else if (uDiagMode == 2) {
+        col = vColor;
+      }
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+}
+
+// c2wToW2c — rigid-body inverse of a column-major 4×4 ARKit camera-to-world matrix.
+// w2c = [ R^T | -R^T t ]   stored column-major to match WebGL / Three.js convention.
+function c2wToW2c(c2w) {
+  const tx = c2w[12], ty = c2w[13], tz = c2w[14]
+  return [
+    c2w[0], c2w[4], c2w[8],  0,
+    c2w[1], c2w[5], c2w[9],  0,
+    c2w[2], c2w[6], c2w[10], 0,
+    -(c2w[0] * tx + c2w[1] * ty + c2w[2] * tz),
+    -(c2w[4] * tx + c2w[5] * ty + c2w[6] * tz),
+    -(c2w[8] * tx + c2w[9] * ty + c2w[10] * tz),
+    1,
+  ]
+}
+
+// upgradeProjectiveTexturing — replaces vertex-colour splat material with a
+// photo-projective ShaderMaterial that samples all available snapshot cameras.
+// Called fire-and-forget; the scan is already visible in vertex-colour mode.
+const MAX_PROJ_CAMS = 16
+
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef }) {
+  const data = await getSnapshots(roomId)
+  const allSnaps = data?.snapshots
+  if (!allSnaps?.length) return null
+
+  let snaps = allSnaps
+  if (snaps.length > MAX_PROJ_CAMS) {
+    const step = snaps.length / MAX_PROJ_CAMS
+    snaps = Array.from({ length: MAX_PROJ_CAMS }, (_, i) => allSnaps[Math.floor(i * step)])
+  }
+
+  const loader   = new THREE.TextureLoader()
+  const textures = await Promise.all(snaps.map(s => new Promise((res, rej) => {
+    loader.load(
+      BASE + s.url,
+      tex => { tex.flipY = false; res(tex) },
+      undefined,
+      rej,
+    )
+  })))
+
+  const nCams   = snaps.length
+  const w2cMats = snaps.map(s => new THREE.Matrix4().fromArray(c2wToW2c(s.c2w)))
+  const camKVec = snaps.map(({ K, fw, fh }) =>
+    new THREE.Vector4(K[0] / fw, K[4] / fh, K[6] / fw, K[7] / fh))
+  const camFxArr = new Float32Array(snaps.map(({ K }) => K[0]))
+
+  const oldUni = points.material?.uniforms
+  if (!oldUni) return null  // mesh was disposed while textures loaded
+
+  const projMat = new THREE.ShaderMaterial({
+    vertexColors: true,
+    depthWrite:   true,
+    depthTest:    true,
+    glslVersion:  THREE.GLSL3,
+    vertexShader:   SPLAT_VERT_PROJ,
+    fragmentShader: makeProjFragShader(nCams),
+    uniforms: {
+      uViewH:    { value: oldUni.uViewH?.value   ?? 1 },
+      uSpacing:  { value: oldUni.uSpacing?.value ?? 0.02 },
+      uYOffset:  { value: yOffset },
+      uFloorY:   { value: oldUni.uFloorY?.value  ?? 0 },
+      uCeilY:    { value: oldUni.uCeilY?.value   ?? 3 },
+      uRoomCX:   { value: oldUni.uRoomCX?.value  ?? 0 },
+      uRoomCZ:   { value: oldUni.uRoomCZ?.value  ?? 0 },
+      uDiagMode: { value: 0 },
+      uNCams:    { value: nCams },
+      uCamTex:   { value: textures },
+      uW2C:      { value: w2cMats },
+      uCamK:     { value: camKVec },
+      uCamFx:    { value: camFxArr },
+    },
+  })
+
+  points.material.dispose()
+  points.material = projMat
+
+  if (diagRef) {
+    diagRef.current = {
+      ...diagRef.current,
+      projective:   true,
+      projCams:     nCams,
+      projTotal:    allSnaps.length,
+      colourMethod: `Projective texturing (${nCams}/${allSnaps.length} photos)`,
+    }
+  }
+  return { nCams, projTotal: allSnaps.length }
+}
 
 // ── Mesh shaders (used when point cloud is rendered as a triangle mesh) ───────
 // The vertex shader just applies uYOffset (raw y → scene y) and passes
@@ -1139,12 +1356,12 @@ export default function SpaceBuilderCanvas({
           // Wegter Equation: derive optimal splat diameter from scan geometry.
           // Model: room surface area ≈ 2(W·D + W·H + D·H) from bounding box.
           // Mean inter-point surface spacing: d = √(S / N_rendered)
-          // uSpacing = 6 × d ensures coverage at density variation outliers.
+          // uSpacing = 2.5 × d ensures gap-free coverage without visible bowling-ball splats.
           const W = Math.max(0.1, maxX - minX)
           const H = Math.max(0.1, maxY - minY)
           const D = Math.max(0.1, maxZ - minZ)
           const roomSurfaceM2 = 2 * (W * D + W * H + D * H)
-          const wegterSpacing = 6.0 * Math.sqrt(roomSurfaceM2 / Math.max(1, vi))
+          const wegterSpacing = 2.5 * Math.sqrt(roomSurfaceM2 / Math.max(1, vi))
           const uSpacing = Math.max(0.004, Math.min(0.10, wegterSpacing))
 
           const geo = new THREE.BufferGeometry()
@@ -1201,6 +1418,13 @@ export default function SpaceBuilderCanvas({
           } catch { /* ignore */ }
 
           reportRoomLoad(100, 'Scan ready', false)
+
+          // Async upgrade: swap vertex-colour material for photo-projective texturing.
+          // Fire-and-forget so the scan is immediately visible while textures load.
+          if (roomId && !cancelled) {
+            upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef: diagStatsRef })
+              .catch(err => console.warn('[projective] upgrade error:', err))
+          }
           return
         } catch (err) {
           console.warn('[SpaceBuilderCanvas] Could not render raw points:', err)
@@ -1981,6 +2205,9 @@ export default function SpaceBuilderCanvas({
                 </td></tr>
                 {s.snapshotCount > 0 && (
                   <tr><td>Photo snapshots</td><td>{s.snapshotCount}</td></tr>
+                )}
+                {s.projective && (
+                  <tr><td>Proj. cameras</td><td>{s.projCams}/{s.projTotal} <span className="sbc-diag-dim">(active)</span></td></tr>
                 )}
                 {s.wegterSpacingMm != null && (
                   <tr><td>Wegter splat Ø</td><td>{s.wegterSpacingMm} mm <span className="sbc-diag-dim">(adaptive)</span></td></tr>

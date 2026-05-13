@@ -524,7 +524,12 @@ export default function App() {
         report(anim)
       }, 350)
       try {
-        const uploadedUrl = await pendingPointCloudUpload
+        let timeoutId
+        const uploadedUrl = await Promise.race([
+          pendingPointCloudUpload,
+          new Promise(resolve => { timeoutId = setTimeout(() => resolve(null), 120_000) }),
+        ])
+        clearTimeout(timeoutId)
         if (uploadedUrl) pointCloudUrl = uploadedUrl
       } catch (err) {
         console.warn('[handleSaveSpace] background point cloud upload failed', err)

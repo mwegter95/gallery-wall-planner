@@ -488,6 +488,13 @@ export async function downloadPointCloud(roomId) {
 }
 
 /**
+ * Fetch snapshot metadata for a room (URL + camera matrices) for projective texturing.
+ */
+export async function getSnapshots(roomId) {
+  return apiFetch(`/api/rooms/${roomId}/snapshots`)
+}
+
+/**
  * Upload snapshot bundles (fallback path for older native builds).
  * snapshots: Array<{ jpeg, c2w, K, fw, fh }>
  */
