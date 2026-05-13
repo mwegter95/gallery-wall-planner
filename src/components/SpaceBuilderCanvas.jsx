@@ -108,6 +108,7 @@ const SPLAT_VERT = /* glsl */`
   uniform float uCeilY;     // raw-space Y above which points are ceiling
   uniform float uRoomCX;    // raw-space X centre of room
   uniform float uRoomCZ;    // raw-space Z centre of room
+  uniform float uSpacing;   // Wegter Equation: 6 × √(S_room / N_rendered)
 
   varying vec3 vColor;
 
@@ -130,18 +131,13 @@ const SPLAT_VERT = /* glsl */`
       norm = vec3(dx / len, 0.0, dz / len);
     }
 
-    // View-dependent disc enlargement — same math as before but now driven
-    // by the procedural normal rather than a per-vertex attribute.
+    // View-dependent disc enlargement driven by the procedural normal.
     vec3  mvN       = normalize(normalMatrix * norm);
     float cosView   = max(0.30, abs(mvN.z));
     float angleFactor = min(2.0, 1.0 / cosView);
 
     // Wegter Equation: density-adaptive splat sizing.
-    // uSpacing = 6 × √(S_room / N_rendered) is precomputed on the CPU from the
-    // actual scan bounding box and rendered point count — fills all surface gaps
-    // including density-variation outliers while scaling automatically to scan density.
     // angleFactor enlarges grazing-angle discs to cover oblique surfaces.
-    uniform float uSpacing;
     gl_PointSize = clamp(uSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
     gl_Position  = projectionMatrix * mvPos;
   }

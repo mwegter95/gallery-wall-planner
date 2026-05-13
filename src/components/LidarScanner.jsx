@@ -124,11 +124,15 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
         // ── iOS direct upload complete ──────────────────────────────────────
         // Swift uploaded the point cloud directly and is telling us the URL.
         // Resolve the pending promise so SpaceBuilder can skip the browser XHR.
+        // This may arrive AFTER LidarScanner has unmounted — the cleanup below
+        // leaves window.onStageARResult live while directUploadResolveRef is set.
         if (result.status === 'uploadComplete') {
           if (directUploadResolveRef.current) {
             directUploadResolveRef.current(result.url || null)
             directUploadResolveRef.current = null
           }
+          // Handler no longer needed — safe to clean up now.
+          window.onStageARResult = null
           return
         }
         if (result.status === 'done') {
@@ -187,7 +191,14 @@ export default function LidarScanner({ onComplete, onCancel, onSnapshot = null, 
         }
       }
       setStatus('ready')
-      return () => { window.onStageARResult = null }
+      return () => {
+        // If iOS is still uploading the point cloud, keep the handler alive so
+        // the 'uploadComplete' message can resolve _directUploadPromise even after
+        // this component unmounts. The handler nulls itself once it fires (above).
+        if (!directUploadResolveRef.current) {
+          window.onStageARResult = null
+        }
+      }
     }
 
     const inIframe     = window.self !== window.top
