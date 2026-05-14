@@ -180,6 +180,7 @@ const SPLAT_VERT_PROJ = /* glsl */`
   // wall points near corners and let opposite-wall cameras bleed through.
   attribute float aLocalSpacing;
   attribute vec3  aNormal;       // outward surface normal (estimated on CPU)
+  attribute float aCamAssign;    // WPA-4: packed top-3 camera assignment from CPU pre-pass
   uniform float uViewH;
   uniform float uYOffset;
   uniform float uFloorY;
@@ -191,6 +192,7 @@ const SPLAT_VERT_PROJ = /* glsl */`
   varying vec3  vWorldPos;
   varying float vSplatR;
   varying vec3  vNorm;
+  varying float vCamAssign;      // WPA-4: forwarded camera assignment to fragment shader
 
   void main() {
     vColor = color;
@@ -201,6 +203,7 @@ const SPLAT_VERT_PROJ = /* glsl */`
     vec3 norm = normalize(aNormal);
 
     vNorm = norm;
+    vCamAssign = aCamAssign;
 
     vec3  mvN         = normalize(normalMatrix * norm);
     float cosView     = max(0.30, abs(mvN.z));
@@ -285,6 +288,7 @@ function makeProjFragShader(nCams) {
     varying vec3  vWorldPos;
     varying float vSplatR;
     varying vec3  vNorm;
+    varying float vCamAssign;
 
     vec3 sampleCam(int idx, vec2 uv) {
       ${sampleCases}
@@ -307,6 +311,19 @@ function makeProjFragShader(nCams) {
       float surfUpLen = length(surfUpRaw);
       vec3 surfUp = surfUpLen > 0.01 ? surfUpRaw / surfUpLen : worldUp;
 
+      // ── WPA-4: unpack per-point top-3 camera assignment ──────────────────
+      // CPU pre-pass packed top-3 camera indices as:
+      //   cam0 + cam1×32 + cam2×1024 + count×32768
+      // Encoding uses 5 bits per index (fits 0-31, we have ≤ 24 cameras).
+      // Float32 exact integer representation: max value ≈ 3×32768 = 98304 < 2^17.
+      float _packed  = vCamAssign;
+      float _cnt_f   = floor(_packed / 32768.0);
+      int   _camCnt  = int(_cnt_f);
+      float _rem     = mod(_packed, 32768.0);
+      int   _cam0    = int(mod(_rem, 32.0));  _rem = floor(_rem / 32.0);
+      int   _cam1    = int(mod(_rem, 32.0));  _rem = floor(_rem / 32.0);
+      int   _cam2    = int(_rem);
+
       // ── Pass 1: score every camera, cache UV ─────────────────────────────
       float scores_arr[N_CAMS];
       float us_arr[N_CAMS];
@@ -317,6 +334,17 @@ function makeProjFragShader(nCams) {
         scores_arr[i] = 0.0;
         us_arr[i]     = 0.0;
         vs_arr[i]     = 0.0;
+
+        // Skip cameras not in this point's top-3 CPU assignment.
+        // This check is O(1) and avoids expensive projection for 21/24 cameras.
+        // Reduces effective GPU work from 24→3 iterations per fragment.
+        // GLSL ES 1.0 note: comparing float(loop_int) == float(varying_int) is
+        // exact for small integers (all values < 32 here, well within float32).
+        float _fi = float(i);
+        bool _assigned = (float(_camCnt) > 0.0 && _fi == float(_cam0)) ||
+                         (float(_camCnt) > 1.0 && _fi == float(_cam1)) ||
+                         (float(_camCnt) > 2.0 && _fi == float(_cam2));
+        if (!_assigned) continue;
 
         vec4  cp    = uW2C[i] * vec4(fragRaw, 1.0);
         if (cp.z >= -0.05) continue;
@@ -804,6 +832,42 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   let covered = 0, sampled = 0
   let usedCamMask = 0
 
+  // Per-sampled-point top-3 camera assignment (packed for GPU vertex attribute).
+  // Encoding: cam0 + cam1×32 + cam2×1024 + count×32768.
+  const camAssignSampled = new Float32Array(Math.ceil(nPts / sampleStep) + 1)
+
+  // ── WPA-4: Per-camera depth maps for occlusion culling ────────────────────
+  // Build a 128×128 depth map per camera using the sampled points.
+  // Purpose: reject projections where a closer point exists at the same UV
+  // (e.g., furniture blocking the wall behind it).  Without this, the wall
+  // gets colored with furniture pixels → "bleed-through" artifacts.
+  //
+  // Cost: 20 K sampled points × 24 cameras × ~10 ns each ≈ 5 ms.
+  onProgress?.(77, 'Building occlusion depth maps…')
+  const DMAP = 128
+  const depthMaps = Array.from({ length: nCams }, () =>
+    new Float32Array(DMAP * DMAP).fill(1e9))
+  for (let i = 0; i < nPts; i += sampleStep) {
+    const xd = posAttr.getX(i), yd = posAttr.getY(i), zd = posAttr.getZ(i)
+    for (let ci = 0; ci < nCams; ci++) {
+      const e = w2cElems[ci]
+      const cpz_d = e[2]*xd + e[6]*yd + e[10]*zd + e[14]
+      if (cpz_d >= -0.05) continue
+      const depth_d = -cpz_d
+      const cpx_d = e[0]*xd + e[4]*yd + e[8]*zd + e[12]
+      const cpy_d = e[1]*xd + e[5]*yd + e[9]*zd + e[13]
+      const kd = camKVec[ci]
+      const u0d = kd.x * cpx_d / depth_d + kd.z
+      const v0d = kd.y * (-cpy_d) / depth_d + kd.w
+      const [ud, vd] = applyUvOrientation(u0d, v0d, camOriArr[ci] | 0)
+      if (ud < 0 || ud > 1 || vd < 0 || vd > 1) continue
+      const cu = Math.min(DMAP - 1, Math.floor(ud * DMAP))
+      const cv = Math.min(DMAP - 1, Math.floor(vd * DMAP))
+      const cell = cv * DMAP + cu
+      if (depth_d < depthMaps[ci][cell]) depthMaps[ci][cell] = depth_d
+    }
+  }
+
   onProgress?.(78, 'Scoring camera coverage…')
   for (let i = 0; i < nPts; i += sampleStep) {
     const xr = posAttr.getX(i), yr = posAttr.getY(i), zr = posAttr.getZ(i)
@@ -812,6 +876,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
 
     let bestScore = 0, bestDepth = 0, bestCamIdx = -1
+    // top3: small sorted list of {ci, score} for camera assignment attribute
+    const top3 = []
 
     for (let ci = 0; ci < nCams; ci++) {
       const e = w2cElems[ci]
@@ -825,6 +891,15 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
       if (u < 0.06 || u > 0.94 || v < 0.06 || v > 0.94) continue
+
+      // ── Occlusion culling: reject if a closer point exists in this camera ──
+      // Uses the pre-built 128×128 depth map.  15 cm tolerance handles LiDAR
+      // noise without rejecting valid wall points close to foreground objects.
+      const ocu = Math.min(DMAP - 1, Math.floor(u * DMAP))
+      const ocv = Math.min(DMAP - 1, Math.floor(v * DMAP))
+      const minD = depthMaps[ci][ocv * DMAP + ocu]
+      if (depth > minD + 0.15) continue   // occluded — skip this camera
+
       // WPA-4 score: angRes × facing⁶ × cosView² × spinFactor² (mirrors GLSL)
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
       const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz
@@ -844,6 +919,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const sf2 = Math.max(0.25, spinRaw) ** 2
       const score = angRes * f6 * cv2 * sf2
       if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci }
+
+      // Track top-3 cameras for GPU vertex attribute
+      top3.push({ ci, score })
+      if (top3.length > 3) {
+        top3.sort((a, b) => b.score - a.score)
+        top3.length = 3
+      }
     }
 
     if (bestCamIdx >= 0) {
@@ -851,6 +933,16 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         bestDepth / (camFxArr[bestCamIdx] + 1e-4) * WEGTER_OVERLAP
       ))
       if (bestCamIdx < 30) usedCamMask |= (1 << bestCamIdx)
+    }
+
+    // Pack top-3 camera assignment for GPU vertex attribute
+    // Encoding: cam0 + cam1×32 + cam2×1024 + count×32768
+    {
+      const cnt = top3.length
+      const c0  = cnt > 0 ? top3[0].ci : 0
+      const c1  = cnt > 1 ? top3[1].ci : 0
+      const c2  = cnt > 2 ? top3[2].ci : 0
+      camAssignSampled[Math.floor(i / sampleStep)] = c0 + c1*32 + c2*1024 + cnt*32768
     }
     // Only include non-horizontal surfaces (walls, furniture) in coverage %.
     // Floor/ceiling points (|ny| > 0.7) are excluded — their normals face up/down
@@ -877,6 +969,21 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
+  // Propagate camera assignment to all points from nearest sample.
+  // Nearest-sample assignment is correct: adjacent points belong to the
+  // same surface patch and should project to the same set of cameras.
+  const camAssignAll = new Float32Array(nPts)
+  for (let i = 0; i < nPts; i++) {
+    const si   = Math.floor(i / sampleStep)
+    const next = Math.min(camAssignSampled.length - 1, si + 1)
+    // Use the nearest of the two bracketing samples
+    const distPrev = i - si * sampleStep
+    const distNext = (si + 1) * sampleStep - i
+    camAssignAll[i] = distPrev <= distNext
+      ? camAssignSampled[si]
+      : camAssignSampled[next]
+  }
+
   // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
   const oldSpacingAttr = points.geometry.attributes.aLocalSpacing
   if (oldSpacingAttr && oldSpacingAttr.array.length === nPts) {
@@ -889,6 +996,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // Always replace aNormal since the PCA estimate is new each rebuild
   points.geometry.setAttribute('aNormal',
     new THREE.BufferAttribute(normals, 3))
+
+  // WPA-4: Per-point camera assignment (top-3 packed indices)
+  // Enables GPU fragment shader to skip 21/24 cameras per fragment → ~8× speedup.
+  points.geometry.setAttribute('aCamAssign',
+    new THREE.BufferAttribute(camAssignAll, 1))
 
   const coveragePct  = sampled > 0 ? Math.round(covered / sampled * 100) : 0
   const usedCamCount = nCams <= 30
