@@ -480,19 +480,82 @@ export async function uploadSnapshot(roomId, index, snapshot) {
 /**
  * Download the pre-colored point cloud binary for 3-D viewing.
  * Returns an ArrayBuffer of interleaved Float32 [x,y,z,r,g,b …].
+ *
+ * Uses 4 parallel HTTP Range requests so the available bandwidth is fully
+ * utilised rather than trickled through a single TCP stream. The server
+ * serves a pre-built gzip with Accept-Ranges support; we reassemble the
+ * chunks and decompress via DecompressionStream('gzip').
  */
 export async function downloadPointCloud(roomId) {
+  const url    = `${BASE}/api/rooms/${roomId}/pointcloud/download`
   const jwt    = getJwt()
   const device = getDeviceToken()
-  const resp = await fetch(`${BASE}/api/rooms/${roomId}/pointcloud/download`, {
-    headers: {
-      'X-Device-Token': device,
-      'Accept-Encoding': 'gzip',
-      ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
-    },
-  })
-  if (!resp.ok) throw new Error(`Point cloud download failed: ${resp.status}`)
-  return resp.arrayBuffer()
+  const authHeaders = {
+    'X-Device-Token': device,
+    ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
+  }
+
+  // ── 1. HEAD request to get the total compressed size ─────────────────────
+  const head = await fetch(url, { method: 'HEAD', headers: authHeaders })
+  if (!head.ok) throw new Error(`Point cloud HEAD failed: ${head.status}`)
+
+  const totalSize    = parseInt(head.headers.get('Content-Length') || '0', 10)
+  const isGzEncoded  = head.headers.get('X-Encoding') === 'gzip'
+
+  // Fallback: server doesn't support Range yet, or size unknown — single fetch
+  if (!totalSize || !head.headers.get('Accept-Ranges')) {
+    const resp = await fetch(url, { headers: { ...authHeaders, 'Accept-Encoding': 'gzip' } })
+    if (!resp.ok) throw new Error(`Point cloud download failed: ${resp.status}`)
+    return resp.arrayBuffer()
+  }
+
+  // ── 2. 4 parallel range fetches ──────────────────────────────────────────
+  const CHUNKS    = 4
+  const chunkSize = Math.ceil(totalSize / CHUNKS)
+
+  const buffers = await Promise.all(
+    Array.from({ length: CHUNKS }, (_, i) => {
+      const start = i * chunkSize
+      const end   = Math.min(start + chunkSize - 1, totalSize - 1)
+      return fetch(url, {
+        headers: { ...authHeaders, 'Range': `bytes=${start}-${end}` },
+      }).then(r => {
+        if (r.status !== 206 && r.status !== 200)
+          throw new Error(`Point cloud chunk ${i} failed: ${r.status}`)
+        return r.arrayBuffer()
+      })
+    })
+  )
+
+  // ── 3. Concatenate chunks in order ───────────────────────────────────────
+  const totalBytes = buffers.reduce((s, b) => s + b.byteLength, 0)
+  const joined     = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const buf of buffers) {
+    joined.set(new Uint8Array(buf), offset)
+    offset += buf.byteLength
+  }
+
+  // ── 4. Decompress gzip if the server sent raw gz bytes ───────────────────
+  if (isGzEncoded) {
+    const ds     = new DecompressionStream('gzip')
+    const writer = ds.writable.getWriter()
+    const reader = ds.readable.getReader()
+    writer.write(joined)
+    writer.close()
+    const parts = []
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      parts.push(value)
+    }
+    const raw = new Uint8Array(parts.reduce((s, p) => s + p.byteLength, 0))
+    let off = 0
+    for (const p of parts) { raw.set(p, off); off += p.byteLength }
+    return raw.buffer
+  }
+
+  return joined.buffer
 }
 
 /**
