@@ -487,6 +487,7 @@ export async function downloadPointCloud(roomId) {
   const resp = await fetch(`${BASE}/api/rooms/${roomId}/pointcloud/download`, {
     headers: {
       'X-Device-Token': device,
+      'Accept-Encoding': 'gzip',
       ...(jwt ? { 'Authorization': `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
     },
   })
