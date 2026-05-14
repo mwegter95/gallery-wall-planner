@@ -22,7 +22,11 @@ import {
   wegterSplatDiameter,
   applyOrientation,
   orientationFromDimensions,
+  smoothSurfaceNormal,
+  computeNeighborDistances,
   WPA2_BLEND_RATIO,
+  WPA4_BLEND_RATIO,
+  WPA4_UV_MARGIN_FALLBACK,
   WPA2_OVERLAP,
   WPA2_SPLAT_MIN_M,
   WPA2_SPLAT_MAX_M,
@@ -897,5 +901,190 @@ describe('WPA-2.2 spin × warp sub-algorithm', () => {
     expect(idxs).not.toContain(1)      // 20° — excluded (combined cos^8 = 0.608 < 0.70)
     expect(idxs).not.toContain(2)      // 30° — excluded
     expect(idxs).not.toContain(3)      // 45° — excluded
+  })
+})
+
+// ─── WPA-4 constants ──────────────────────────────────────────────────────────
+
+describe('WPA-4 constants', () => {
+  it('WPA4_BLEND_RATIO is tighter than WPA2_BLEND_RATIO', () => {
+    // 0.85 > 0.70 — narrows the camera acceptance cone (fewer cameras blend → sharper seams)
+    expect(WPA4_BLEND_RATIO).toBe(0.85)
+    expect(WPA4_BLEND_RATIO).toBeGreaterThan(WPA2_BLEND_RATIO)
+  })
+
+  it('WPA4_UV_MARGIN_FALLBACK is looser than WPA2_UV_MARGIN', () => {
+    // 0.03 < 0.08 — the fallback pass accepts slight lens-edge distortion
+    // rather than leaving wall vertices uncolored
+    expect(WPA4_UV_MARGIN_FALLBACK).toBe(0.03)
+    expect(WPA4_UV_MARGIN_FALLBACK).toBeLessThan(WPA2_UV_MARGIN)
+  })
+})
+
+// ─── smoothSurfaceNormal ──────────────────────────────────────────────────────
+
+describe('smoothSurfaceNormal', () => {
+  it('returns input normal when no neighbors', () => {
+    const n = [0, 0, -1]
+    const result = smoothSurfaceNormal(n, [])
+    expect(result[0]).toBeCloseTo(0, 6)
+    expect(result[1]).toBeCloseTo(0, 6)
+    expect(result[2]).toBeCloseTo(-1, 6)
+  })
+
+  it('averages neighbors within angular threshold', () => {
+    // Central normal pointing in -Z. Neighbors within 30° are averaged in;
+    // the result should remain close to -Z.
+    const n = [0, 0, -1]
+    // Small perturbation: 10° off in X. dot(n, nn) = cos(10°) ≈ 0.985 > cos(30°) = 0.866
+    const a10 = 10 * Math.PI / 180
+    const neighbor = [Math.sin(a10), 0, -Math.cos(a10)]
+    const result = smoothSurfaceNormal(n, [neighbor])
+    // Result should tilt slightly toward the neighbor but remain mostly -Z
+    expect(result[2]).toBeLessThan(0)               // still pointing mostly in -Z
+    expect(result[0]).toBeGreaterThan(0)             // tilted toward neighbor's +X
+    // Result must be a unit vector
+    const len = Math.sqrt(result[0]**2 + result[1]**2 + result[2]**2)
+    expect(len).toBeCloseTo(1, 5)
+  })
+
+  it('excludes neighbors beyond angular threshold (bilateral filtering)', () => {
+    // Neighbor at 45° off: dot = cos(45°) ≈ 0.707 < cos(30°) = 0.866 → excluded.
+    // Result should equal the input normal unchanged.
+    const n = [0, 0, -1]
+    const a45 = 45 * Math.PI / 180
+    const farNeighbor = [Math.sin(a45), 0, -Math.cos(a45)]
+    const result = smoothSurfaceNormal(n, [farNeighbor])
+    expect(result[0]).toBeCloseTo(0, 5)
+    expect(result[1]).toBeCloseTo(0, 5)
+    expect(result[2]).toBeCloseTo(-1, 5)
+  })
+
+  it('stabilises noisy normals: 4 neighbors with ±5° noise → result closer to mean', () => {
+    // LiDAR normals have ~5-10° noise. Averaging 4 neighbors with ±5° noise
+    // should produce a smoother result than the raw input.
+    const base = [0, 0, -1]
+    const noisy = [
+      [ Math.sin( 5 * Math.PI/180), 0, -Math.cos( 5 * Math.PI/180)],
+      [-Math.sin( 5 * Math.PI/180), 0, -Math.cos( 5 * Math.PI/180)],
+      [0,  Math.sin(5 * Math.PI/180), -Math.cos( 5 * Math.PI/180)],
+      [0, -Math.sin(5 * Math.PI/180), -Math.cos( 5 * Math.PI/180)],
+    ]
+    const result = smoothSurfaceNormal(base, noisy)
+    // All noise is symmetric, so the averaged result should nearly cancel in X/Y
+    expect(Math.abs(result[0])).toBeLessThan(0.01)
+    expect(Math.abs(result[1])).toBeLessThan(0.01)
+    expect(result[2]).toBeLessThan(-0.99)  // firmly pointing -Z
+  })
+
+  it('respects custom angular threshold', () => {
+    // With a tight 10° threshold, a 15° neighbor should be excluded.
+    const n = [0, 0, -1]
+    const a15 = 15 * Math.PI / 180
+    const nn   = [Math.sin(a15), 0, -Math.cos(a15)]
+    const tight  = smoothSurfaceNormal(n, [nn], 10)
+    const loose  = smoothSurfaceNormal(n, [nn], 20)
+    // tight: neighbor excluded → no X tilt
+    expect(Math.abs(tight[0])).toBeLessThan(0.001)
+    // loose: neighbor included → slight +X tilt
+    expect(loose[0]).toBeGreaterThan(0)
+  })
+})
+
+// ─── computeNeighborDistances ─────────────────────────────────────────────────
+
+describe('computeNeighborDistances', () => {
+  it('returns empty Float32Array for zero points', () => {
+    const result = computeNeighborDistances(new Float32Array(0), 0)
+    expect(result).toBeInstanceOf(Float32Array)
+    expect(result.length).toBe(0)
+  })
+
+  it('returns array of length n', () => {
+    const pts = new Float32Array([0,0,0,  1,0,0,  2,0,0])
+    const result = computeNeighborDistances(pts, 3)
+    expect(result.length).toBe(3)
+  })
+
+  it('nearest-neighbor distance is correct for a regular 3D grid', () => {
+    // 3×3×3 grid with 1 m spacing → every point's NN is exactly 1 m away.
+    // Uses a genuine 3D spread so the voxel cell size covers the 1 m spacing.
+    const n = 27
+    const pts = new Float32Array(n * 3)
+    let idx = 0
+    for (let ix = 0; ix < 3; ix++)
+      for (let iy = 0; iy < 3; iy++)
+        for (let iz = 0; iz < 3; iz++) {
+          pts[idx++] = ix; pts[idx++] = iy; pts[idx++] = iz
+        }
+    const result = computeNeighborDistances(pts, n)
+    // Every point's nearest neighbor (face-adjacent) is exactly 1 m away
+    for (let i = 0; i < n; i++) {
+      expect(result[i]).toBeCloseTo(1.0, 2)
+    }
+  })
+
+  it('dense grid returns smaller NN distances than sparse grid', () => {
+    // Dense: 10 points in [0,1]³ → avg spacing ~0.46
+    // Sparse: 10 points in [0,5]³ → avg spacing ~2.3
+    function makeGrid(scale) {
+      const pts = new Float32Array(9 * 3)  // 3×3 grid in XY, Z=0
+      let idx = 0
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+        pts[idx++] = i * scale; pts[idx++] = j * scale; pts[idx++] = 0
+      }
+      return pts
+    }
+    const densePts  = makeGrid(0.1)
+    const sparsePts = makeGrid(1.0)
+    const denseNN   = computeNeighborDistances(densePts,  9)
+    const sparseNN  = computeNeighborDistances(sparsePts, 9)
+    const denseAvg  = Array.from(denseNN).reduce((s, v) => s + v, 0) / 9
+    const sparseAvg = Array.from(sparseNN).reduce((s, v) => s + v, 0) / 9
+    expect(denseAvg).toBeLessThan(sparseAvg)
+  })
+
+  it('all distances are positive', () => {
+    const n = 6
+    const pts = new Float32Array(n * 3)
+    for (let i = 0; i < n; i++) {
+      pts[i*3]   = Math.random() * 10
+      pts[i*3+1] = Math.random() * 10
+      pts[i*3+2] = Math.random() * 10
+    }
+    const result = computeNeighborDistances(pts, n)
+    for (let i = 0; i < n; i++) {
+      expect(result[i]).toBeGreaterThan(0)
+    }
+  })
+})
+
+// ─── wegterSplatDiameter — adaptive (WPA-4 nnDist path) ──────────────────────
+
+describe('wegterSplatDiameter — adaptive nnDist (WPA-4)', () => {
+  it('uses nnDist×2 when nnDist is provided', () => {
+    // nnDist = 0.02 m → diameter = 0.04 m (each splat reaches its nearest neighbor)
+    const d = wegterSplatDiameter(5, 1000, WPA2_OVERLAP, 0.02)
+    expect(d).toBeCloseTo(0.04, 5)
+  })
+
+  it('falls back to depth/fx formula when nnDist is null', () => {
+    const withNull    = wegterSplatDiameter(5, 1000, WPA2_OVERLAP, null)
+    const withDefault = wegterSplatDiameter(5, 1000, WPA2_OVERLAP)
+    expect(withNull).toBeCloseTo(withDefault, 10)
+    // Formula: 5/1000 × 2.5 = 0.0125, clamped to [0.001, 0.08]
+    expect(withNull).toBeCloseTo(0.0125, 5)
+  })
+
+  it('clamps nnDist×2 to WPA2_SPLAT_MAX_M when very sparse', () => {
+    // nnDist = 1 m → diameter would be 2 m → clamped to 0.08 m
+    const d = wegterSplatDiameter(5, 1000, WPA2_OVERLAP, 1.0)
+    expect(d).toBe(WPA2_SPLAT_MAX_M)
+  })
+
+  it('clamps nnDist×2 to WPA2_SPLAT_MIN_M when very dense', () => {
+    // nnDist = 0.0001 m → diameter = 0.0002 → clamped to 0.001 m
+    const d = wegterSplatDiameter(5, 1000, WPA2_OVERLAP, 0.0001)
+    expect(d).toBe(WPA2_SPLAT_MIN_M)
   })
 })

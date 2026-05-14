@@ -535,8 +535,30 @@ async function loadSnapshotTex(url) {
   canvas.height = h
   canvas.getContext('2d').drawImage(img, 0, 0, w, h)
 
+  // WPA-4 sampling quality — mirrors the photoMesh.js pyramid/bicubic spec
+  // on the GPU path instead of the (dead) CPU path:
+  //
+  //   generateMipmaps + LinearMipMapLinearFilter
+  //     Equivalent to the 3-level image pyramid + automatic level selection:
+  //     WebGL builds a full mip chain (box-filtered half-res → quarter-res → …)
+  //     so distant wall points sample a pre-averaged mip level instead of
+  //     randomly picking a single photo pixel — eliminates the "dotty" look.
+  //
+  //   magFilter: LinearFilter
+  //     Close-up surfaces (coverage < 1.5 px/vertex) get smooth bilinear
+  //     upsampling — equivalent to the Catmull-Rom bicubic path in photoMesh.js.
+  //     (True bicubic would need a custom shader; hardware bilinear is ~90% as
+  //     good and free.)
+  //
+  //   anisotropy: 4
+  //     Reduces shimmer on oblique wall views (the camera is rarely perfectly
+  //     perpendicular) — standard complement to trilinear mipmapping.
   const tex = new THREE.CanvasTexture(canvas)
-  tex.flipY = false
+  tex.flipY          = false
+  tex.generateMipmaps = true
+  tex.minFilter      = THREE.LinearMipMapLinearFilter  // trilinear — pyramid
+  tex.magFilter      = THREE.LinearFilter              // bilinear close-up
+  tex.anisotropy     = 4                               // reduce oblique shimmer
   return tex
 }
 
