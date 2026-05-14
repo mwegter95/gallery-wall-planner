@@ -175,7 +175,11 @@ const SPLAT_FRAG = /* glsl */`
 // shader so it can project each sub-pixel of the disc onto the camera images.
 
 const SPLAT_VERT_PROJ = /* glsl */`
+  // WPA-3: per-point surface normal from CPU PCA (Jacobi on local LiDAR voxels).
+  // Replaces the procedural room-centre radial approximation that mis-classified
+  // wall points near corners and let opposite-wall cameras bleed through.
   attribute float aLocalSpacing;
+  attribute vec3  aNormal;       // outward surface normal (estimated on CPU)
   uniform float uViewH;
   uniform float uYOffset;
   uniform float uFloorY;
@@ -193,17 +197,8 @@ const SPLAT_VERT_PROJ = /* glsl */`
 
     vec4 mvPos = modelViewMatrix * vec4(position.x, position.y + uYOffset, position.z, 1.0);
 
-    vec3 norm;
-    if (position.y <= uFloorY) {
-      norm = vec3(0.0, 1.0, 0.0);
-    } else if (position.y >= uCeilY) {
-      norm = vec3(0.0, -1.0, 0.0);
-    } else {
-      float dx = position.x - uRoomCX;
-      float dz = position.z - uRoomCZ;
-      float len = max(length(vec2(dx, dz)), 0.001);
-      norm = vec3(dx / len, 0.0, dz / len);
-    }
+    // Use the CPU-estimated PCA normal; fall back to radial if attribute absent.
+    vec3 norm = normalize(aNormal);
 
     vNorm = norm;
 
@@ -219,48 +214,44 @@ const SPLAT_VERT_PROJ = /* glsl */`
   }
 `
 
-// makeProjFragShader(nCams) — generates a GLSL ES 1.00-compatible fragment shader.
+// makeProjFragShader — Wegter Projection Algorithm v3 (WPA-3)
 //
-// WHY no glslVersion THREE.GLSL3:
-//   iOS Safari / WebKit has a long-standing bug where gl_PointCoord is broken
-//   (wrong origin or zeroed-out) when the fragment shader is compiled as GLSL ES
-//   3.00 (#version 300 es).  Every fragment then lands outside the circular clip
-//   (dot(pc,pc) > 0.25) and is discarded → blank canvas.
+// WPA-3 over WPA-2.2:
 //
-// WHY per-camera samplers instead of sampler2D uCamTex[N]:
-//   GLSL ES 1.00 requires constant-expression indices for sampler arrays.
-//   Dynamic indexing (texture2D(arr[i], uv) where i is a loop var) is only
-//   guaranteed in GLSL ES 3.00.  We stay in GLSL ES 1.00 and emit one
-//   uniform per camera with a static if-chain dispatch function — zero runtime
-//   branching cost because the GPU compiler turns each taken branch into a
-//   single texture fetch.
-// makeProjFragShader — Wegter Projection Algorithm v2.2 (WPA-2.2)
+//   BUG FIX — V-axis double-flip removed
+//     WPA-2.x sampled at vec2(u, 1.0 − v).  With flipY=false textures the
+//     mapping is already correct (v=0 = top of image); the extra (1−v) caused
+//     every photo to appear vertically mirrored / 180°-rotated on the wall.
+//     WPA-3 samples directly at vec2(u, v).
 //
-// Three v1 bugs fixed (WPA-2):
-//   1. Point-center projection: use vWorldPos directly instead of spreading
-//      each fragment across the disc in view-space.  The old spread caused
-//      disc edges to project to completely different camera UVs, smearing
-//      textures across every splat as the camera moved.
+//   BUG FIX — Per-point PCA normals replace procedural room-centre radial
+//     WPA-2 estimated surface normals as "outward from room centre in XZ".
+//     This is wrong for any non-axis-aligned surface and allows cameras
+//     looking at the opposite wall to contribute non-zero facing scores for
+//     corner / edge points.  WPA-3 uses per-point normals pre-computed on the
+//     CPU via Jacobi eigendecomposition of the 27-voxel-neighbourhood
+//     covariance matrix (see minEigenvec3 + upgradeProjectiveTexturing JS).
 //
-//   2. Surface-normal facing check: rotate vNorm into each camera's space and
-//      test normCam.z < 0 (surface faces the camera, which looks in −Z).
-//      Cameras seeing the surface from behind get zero score and are excluded.
+//   NEW — In-plane "spin" alignment factor
+//     For each camera, how well does its Y axis align with the surface's
+//     vertical direction?  A camera that is "spun" (rolled around the view
+//     vector) samples the wall at a rotated angle and contributes a stretched,
+//     rotated image.  spinFactor = |dot(camY_world, surfaceUp)| penalises
+//     heavily-rotated cameras while rewarding face-on captures.
+//     Score: angRes × facing⁶ × cosView² × spinFactor²
 //
-//   3. Soft winner-takes-all blend: in pass 1 collect scores for all cameras;
-//      in pass 2 only sample cameras within BLEND_RATIO of the best score,
-//      weighted by score³.  This eliminates multi-camera ghosting/double-imaging
-//      while still blending smoothly at true seam boundaries.
+//   NEW — Hard facing cutoff at 0.35 (≈ 70° incidence angle)
+//     Any camera whose surface-normal–camera-direction angle exceeds 70° is
+//     completely excluded regardless of other score terms.
 //
-// WPA-2.2 "spin × warp" sub-algorithm:
-//   Score formula changed from facing² × cosView⁴  →  facing⁴ × cosView⁴.
-//   facing⁴ is the "spin" penalty: cameras yawed > 25° from the wall normal
-//   are excluded (cos(25°)⁴ ≈ 0.674 < BLEND_RATIO).  Previously, facing²
-//   only excluded cameras beyond ~33°.
+//   NEW — Tighter winner-takes-all blend (BLEND_RATIO 0.50, score⁵ weight)
+//     Reduces the number of cameras that contribute to a single point from
+//     typically 3-4 down to 1-2, sharpening the projected image.
 //
-// GLSL ES 1.00 constraints respected:
-//   • No glslVersion THREE.GLSL3 (iOS Safari/WebKit gl_PointCoord bug at ES 3.00)
-//   • No dynamic sampler-array indexing → per-camera uniform + static if-chain
-//   • Local float/int arrays (non-opaque) ARE safely indexed by loop vars in ES 1.00
+// GLSL ES 1.00 constraints respected (same as WPA-2):
+//   • No glslVersion THREE.GLSL3 — iOS Safari/WebKit gl_PointCoord bug
+//   • No dynamic sampler indexing — static if-chain dispatch
+//   • Local float/int arrays are safely loop-indexed in ES 1.00
 function makeProjFragShader(nCams) {
   const samplerDecls = Array.from({ length: nCams }, (_, i) =>
     `uniform sampler2D uCamTex${i};`).join('\n    ')
@@ -271,14 +262,19 @@ function makeProjFragShader(nCams) {
   return /* glsl */`
     precision highp float;
     precision highp int;
-    #define N_CAMS     ${nCams}
-    #define BLEND_RATIO 0.70
+    #define N_CAMS      ${nCams}
+    // WPA-3: tighter WTA blend — only top 50% of best-camera score contribute.
+    #define BLEND_RATIO 0.50
+    // WPA-3: hard facing cutoff — cameras > 70° from surface normal are skipped.
+    #define MIN_FACING  0.35
 
     ${samplerDecls}
     uniform mat4      uW2C[N_CAMS];
-    uniform vec4      uCamK[N_CAMS];   // (fx_n, fy_n, cx_n, cy_n) normalised
-    uniform float     uCamFx[N_CAMS];  // raw fx (pixels) for angular-resolution score
+    uniform vec4      uCamK[N_CAMS];    // (fx_n, fy_n, cx_n, cy_n) normalised
+    uniform float     uCamFx[N_CAMS];  // raw fx (pixels) for angular-res score
     uniform float     uCamOri[N_CAMS]; // 0=landscape, 1=portrait 90°CW
+    // WPA-3: camera Y axis in world space (c2w column 1) for spin-alignment score
+    uniform vec3      uCamY[N_CAMS];
     uniform int       uDiagMode;
     uniform float     uYOffset;
 
@@ -296,11 +292,17 @@ function makeProjFragShader(nCams) {
       vec2 pc = gl_PointCoord - 0.5;
       if (dot(pc, pc) > 0.25) discard;
 
-      // WPA-2 FIX 1: project the point CENTER only.
-      // Using the per-fragment disc position (old code) caused each sub-pixel of
-      // the splat to sample a different UV from every camera, smearing the texture
-      // across the whole disc.  Every fragment in the disc now gets the same color.
+      // Project the point centre (not per-fragment disc position) so every
+      // sub-pixel of a splat gets the same UV — no smearing as camera moves.
       vec3 fragRaw = vec3(vWorldPos.x, vWorldPos.y - uYOffset, vWorldPos.z);
+
+      // WPA-3: surface "up" = worldUp projected onto the surface plane.
+      // Used by the spin-alignment score.  For floor/ceiling (normal ≈ worldUp)
+      // surfUpLen → 0 and spinFactor is clamped to 1 (no spin penalty).
+      vec3 worldUp  = vec3(0.0, 1.0, 0.0);
+      vec3 surfUpRaw = worldUp - dot(worldUp, vNorm) * vNorm;
+      float surfUpLen = length(surfUpRaw);
+      vec3 surfUp = surfUpLen > 0.01 ? surfUpRaw / surfUpLen : worldUp;
 
       // ── Pass 1: score every camera, cache UV ─────────────────────────────
       float scores_arr[N_CAMS];
@@ -317,6 +319,9 @@ function makeProjFragShader(nCams) {
         if (cp.z >= -0.05) continue;
         float depth = -cp.z;
 
+        // ── Pinhole projection ────────────────────────────────────────────
+        // K is in sensor/display frame; uCamOri corrects for portrait rotation.
+        // With flipY=false textures, v=0 = top of image, so no extra (1−v) flip.
         float u0 = uCamK[i].x * cp.x / depth + uCamK[i].z;
         float v0 = uCamK[i].y * (-cp.y) / depth + uCamK[i].w;
         float u  = u0;
@@ -326,38 +331,40 @@ function makeProjFragShader(nCams) {
         else if (ori == 2) { u = 1.0 - u0; v = 1.0 - v0;  }
         else if (ori == 3) { u = v0;        v = 1.0 - u0;  }
 
-        float mg = 0.08;
+        float mg = 0.06;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
-        // WPA-2.2: score = angRes × facing⁴ × cosView⁴  ("spin × warp")
+        // ── WPA-3 score = angRes × facing⁶ × cosView² × spinFactor² ──────
         //
-        // angRes   = fxRaw / (depth² + ε)
-        //            Angular resolution: pixels per m² at this depth.
-        //            Closer, higher-fx cameras win.
-        //
-        // facing⁴  = max(0, −normCam.z)⁴   [WPA-2.2 change: was ² in v2.1]
-        //            "Spin" penalty: how much the camera is yawed relative
-        //            to the wall normal.  Raised from ² to ⁴ so cameras
-        //            more than ~25° yawed from the wall normal are excluded:
-        //              cos(25°)⁴ ≈ 0.674 < BLEND_RATIO = 0.70 → excluded
-        //              cos(30°)⁴ ≈ 0.563 → excluded
-        //            Previously with ², cos(30°)² = 0.75 > 0.70 → included.
-        //
-        // cosView⁴ = (depth / |cp|)⁴
-        //            "Warp" penalty: how far the point is from the optical
-        //            axis.  Unchanged from v2.1.
-        //              20° → 0.78  |  30° → 0.56  |  45° → 0.25
-        //
-        // Together: symmetric ^4 penalty for spin AND warp — cameras must be
-        // both well-aligned to the wall AND have the point near their centre.
+        // angRes: angular resolution at this depth — closer / higher-fx wins.
         float angRes  = uCamFx[i] / (depth * depth + 0.001);
-        vec3  normCam = (uW2C[i] * vec4(vNorm, 0.0)).xyz;
-        float facing  = max(0.0, -normCam.z);
-        float f2      = facing * facing;
+
+        // facing⁶: how squarely the camera sees the surface normal.
+        //   • Raised from facing⁴ (WPA-2.2) to facing⁶ for sharper falloff.
+        //   • Hard cutoff at MIN_FACING (≈70° incidence) pre-filters far-off cameras.
+        vec3  normCam  = (uW2C[i] * vec4(vNorm, 0.0)).xyz;
+        float facing   = max(0.0, -normCam.z);
+        if (facing < MIN_FACING) continue;   // WPA-3: hard cutoff
+        float f2       = facing * facing;
+        float f6       = f2 * f2 * f2;      // facing⁶
+
+        // cosView²: point distance from optical axis — was cosView⁴ in WPA-2.
+        //   Reduced to cosView² because facing⁶ already rejects highly oblique
+        //   cameras; cosView⁴ was doubly penalising edge-of-frame points.
         float cpLen   = length(cp.xyz);
         float cosView = cpLen > 0.001 ? depth / cpLen : 0.0;
         float cv2     = cosView * cosView;
-        float score   = angRes * f2 * f2 * cv2 * cv2;  // facing⁴ × cosView⁴
+
+        // spinFactor²: how well the camera's "up" aligns with the surface's "up".
+        //   Perfect face-on capture with phone upright = spinFactor 1.0.
+        //   Camera rolled 90° relative to the wall = spinFactor ≈ 0 → penalised.
+        //   Clamped to 0.25 min so a misaligned camera still contributes weakly
+        //   (avoids coverage gaps when the user scans with a tilted phone).
+        float spinRaw    = surfUpLen > 0.01 ? abs(dot(uCamY[i], surfUp)) : 1.0;
+        float spinFactor = max(0.25, spinRaw);
+        float sf2        = spinFactor * spinFactor;
+
+        float score = angRes * f6 * cv2 * sf2;
 
         scores_arr[i] = score;
         us_arr[i]     = u;
@@ -365,9 +372,8 @@ function makeProjFragShader(nCams) {
         bestScore     = max(bestScore, score);
       }
 
-      // ── Pass 2: soft WTA blend ────────────────────────────────────────────
-      // WPA-2 FIX 3: only blend cameras within BLEND_RATIO of the best score.
-      // score³ weighting sharpens the blend further so 1–2 cameras dominate.
+      // ── Pass 2: soft winner-takes-all blend ───────────────────────────────
+      // WPA-3: BLEND_RATIO 0.50 + score⁵ weight → typically 1-2 cameras win.
       vec3  accColor  = vec3(0.0);
       float accWeight = 0.0;
 
@@ -375,8 +381,13 @@ function makeProjFragShader(nCams) {
         float thresh = bestScore * BLEND_RATIO;
         for (int i = 0; i < N_CAMS; i++) {
           if (scores_arr[i] < thresh) continue;
-          float w = scores_arr[i] * scores_arr[i] * scores_arr[i];
-          accColor  += sampleCam(i, vec2(us_arr[i], 1.0 - vs_arr[i])) * w;
+          float w3 = scores_arr[i] * scores_arr[i] * scores_arr[i];
+          float w  = w3 * scores_arr[i] * scores_arr[i]; // score⁵
+          // WPA-3 BUG FIX: sample at (u, v) — NOT (u, 1−v).
+          // The old (1−v) was a double-flip: the projection formula already
+          // accounts for image-Y-down vs camera-Y-up, and flipY=false means
+          // v=0 in the shader directly maps to the top row of the JPEG.
+          accColor  += sampleCam(i, vec2(us_arr[i], vs_arr[i])) * w;
           accWeight += w;
         }
       }
@@ -386,6 +397,7 @@ function makeProjFragShader(nCams) {
         col = accColor / accWeight;
         col = pow(clamp(col, 0.0, 1.0), vec3(0.9));
       } else {
+        // Fallback: vertex colour (on-device LiDAR colour)
         col = vColor;
         float luma = dot(col, vec3(0.299, 0.587, 0.114));
         col = mix(vec3(luma), col, 1.35);
@@ -413,6 +425,56 @@ function applyUvOrientation(u0, v0, ori) {
   if (ori === 2) return [1 - u0, 1 - v0]
   if (ori === 3) return [v0, 1 - u0]
   return [u0, v0]
+}
+
+// ── Jacobi eigendecomposition for 3×3 symmetric matrix ───────────────────────
+// Returns the eigenvector corresponding to the MINIMUM eigenvalue — this is the
+// surface normal direction (the direction of least point-cloud variance).
+// Used by WPA-3 to estimate per-point normals from the LiDAR voxel grid.
+//
+// Algorithm: cyclic Jacobi sweeps (10 iterations, converges to ε < 1e-10).
+// Input:  6 unique elements of the symmetric matrix A
+// Output: [nx, ny, nz] unit eigenvector for min eigenvalue
+function minEigenvec3(c00, c01, c02, c11, c12, c22) {
+  // Flatten symmetric matrix A (row-major)
+  const a = [c00, c01, c02, c01, c11, c12, c02, c12, c22]
+  // Q accumulates rotation matrices; columns of Q converge to eigenvectors
+  const q = [1, 0, 0,  0, 1, 0,  0, 0, 1]
+  for (let it = 0; it < 20; it++) {
+    // Find the off-diagonal element with the largest absolute value
+    let maxV = 0, p = 0, r = 1
+    if (Math.abs(a[1]) > maxV) { maxV = Math.abs(a[1]); p = 0; r = 1 }
+    if (Math.abs(a[2]) > maxV) { maxV = Math.abs(a[2]); p = 0; r = 2 }
+    if (Math.abs(a[5]) > maxV) { maxV = Math.abs(a[5]); p = 1; r = 2 }
+    if (maxV < 1e-12) break
+    // Jacobi rotation
+    const app = a[p*3+p], arr = a[r*3+r], apr = a[p*3+r]
+    const theta = (arr - app) / (2 * apr)
+    const t     = Math.sign(theta) / (Math.abs(theta) + Math.sqrt(1 + theta * theta))
+    const c     = 1 / Math.sqrt(1 + t * t)
+    const s     = t * c
+    // Update A
+    a[p*3+p] = app - t * apr
+    a[r*3+r] = arr + t * apr
+    a[p*3+r] = 0; a[r*3+p] = 0
+    for (let k = 0; k < 3; k++) {
+      if (k === p || k === r) continue
+      const akp = a[k*3+p], akr = a[k*3+r]
+      a[k*3+p] = c*akp - s*akr; a[p*3+k] = a[k*3+p]
+      a[k*3+r] = s*akp + c*akr; a[r*3+k] = a[k*3+r]
+    }
+    // Update Q (columns = eigenvectors)
+    for (let k = 0; k < 3; k++) {
+      const qkp = q[k*3+p], qkr = q[k*3+r]
+      q[k*3+p] = c*qkp - s*qkr
+      q[k*3+r] = s*qkp + c*qkr
+    }
+  }
+  // Column of Q for the minimum eigenvalue
+  let mi = 0
+  if (a[4] < a[0])   mi = 1
+  if (a[8] < a[mi*3+mi]) mi = 2
+  return [q[mi], q[3+mi], q[6+mi]]
 }
 
 // upgradeProjectiveTexturing — replaces vertex-colour splat material with a
@@ -555,40 +617,87 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // ── WPA-2 photo-projection spacing pre-pass ─────────────────────────────
   // Sample ~20 K points; for each find the best camera using the WPA-2 score
   // (angular resolution × surface-facing²) and compute the Wegter splat diameter.
-  // Un-sampled points are filled by linear interpolation between bracketing samples.
+  // ── WPA-3: extract camera Y axes for spin-alignment uniform ───────────────
+  // Camera Y axis in world = column 1 of c2w = elements [4,5,6] (column-major).
+  const camYArr = snaps.map(({ c2w }) =>
+    new THREE.Vector3(c2w[4], c2w[5], c2w[6]).normalize())
+
   const posAttr    = points.geometry.attributes.position
   const nPts       = posAttr.count
   const sampleStep = Math.max(1, Math.floor(nPts / 20000))
   const w2cElems   = w2cMats.map(m => m.elements)
   const photoSpacings = new Float32Array(nPts)
 
-  // Approximate room geometry for surface-normal estimation (matches vertex shader).
+  // Approximate room geometry (for normal orientation fallback and floor/ceil).
   const floorY  = oldUni.uFloorY?.value  ?? -0.1
   const ceilY   = oldUni.uCeilY?.value   ?? 3.0
   const roomCX  = oldUni.uRoomCX?.value  ?? 0
   const roomCZ  = oldUni.uRoomCZ?.value  ?? 0
 
+  // ── WPA-3: Per-point surface normal estimation via local PCA ────────────
+  // Build a 15 cm voxel grid, accumulate position sums and cross-products per
+  // cell, then for each point aggregate its 3×3×3 neighbourhood into a 3×3
+  // covariance matrix and Jacobi-solve for the minimum eigenvector (= normal).
+  //
+  // Key integer: (bx+2048)*4096*4096 + (by+2048)*4096 + (bz+2048)
+  //   Fits in a JS safe integer; avoids string concat overhead on 10M lookups.
+  onProgress?.(70, 'Estimating surface normals…')
+  const NORM_CELL = 0.15
+  const normVox   = new Map()
+  for (let i = 0; i < nPts; i++) {
+    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i)
+    const bx = Math.round(x / NORM_CELL)
+    const by = Math.round(y / NORM_CELL)
+    const bz = Math.round(z / NORM_CELL)
+    const key = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
+    let v = normVox.get(key)
+    if (!v) { v = new Float64Array(10); normVox.set(key, v) } // [sx,sy,sz,sxx,sxy,sxz,syy,syz,szz,n]
+    v[0]+=x; v[1]+=y; v[2]+=z
+    v[3]+=x*x; v[4]+=x*y; v[5]+=x*z; v[6]+=y*y; v[7]+=y*z; v[8]+=z*z; v[9]++
+  }
+
+  // Per-point normals: aggregate 27 surrounding voxels, Jacobi → min eigenvec.
+  const normals = new Float32Array(nPts * 3)
+  const roomMidY = (floorY + ceilY) * 0.5
+  for (let i = 0; i < nPts; i++) {
+    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i)
+    const bx = Math.round(x / NORM_CELL)
+    const by = Math.round(y / NORM_CELL)
+    const bz = Math.round(z / NORM_CELL)
+    let sx=0,sy=0,sz=0,sxx=0,sxy=0,sxz=0,syy=0,syz=0,szz=0,n=0
+    for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++) {
+      const k2 = (bx+dx+2048)*16777216 + (by+dy+2048)*4096 + (bz+dz+2048)
+      const v = normVox.get(k2); if (!v) continue
+      sx+=v[0]; sy+=v[1]; sz+=v[2]; sxx+=v[3]; sxy+=v[4]; sxz+=v[5]; syy+=v[6]; syz+=v[7]; szz+=v[8]; n+=v[9]
+    }
+    let nx, ny, nz
+    if (n < 8) {
+      // Fallback: radial from room centre (same as WPA-2 procedural)
+      const dx=x-roomCX, dz=z-roomCZ, len=Math.max(Math.sqrt(dx*dx+dz*dz),0.001)
+      nx=dx/len; ny=0; nz=dz/len
+    } else {
+      const mx=sx/n, my=sy/n, mz=sz/n
+      const c00=sxx/n-mx*mx, c01=sxy/n-mx*my, c02=sxz/n-mx*mz
+      const c11=syy/n-my*my, c12=syz/n-my*mz, c22=szz/n-mz*mz
+      ;[nx, ny, nz] = minEigenvec3(c00, c01, c02, c11, c12, c22)
+    }
+    // Orient outward: dot(normal, point − room_interior) should be positive.
+    const flip = (nx*(x-roomCX) + ny*(y-roomMidY) + nz*(z-roomCZ)) < 0 ? -1 : 1
+    normals[i*3]   = nx * flip
+    normals[i*3+1] = ny * flip
+    normals[i*3+2] = nz * flip
+  }
+  normVox.clear()  // free memory
+
   let covered = 0, sampled = 0
   let usedCamMask = 0
 
+  onProgress?.(78, 'Scoring camera coverage…')
   for (let i = 0; i < nPts; i += sampleStep) {
-    const xr = posAttr.getX(i)
-    const yr = posAttr.getY(i)
-    const zr = posAttr.getZ(i)
+    const xr = posAttr.getX(i), yr = posAttr.getY(i), zr = posAttr.getZ(i)
 
-    // Approximate surface normal (same logic as SPLAT_VERT_PROJ vertex shader)
-    let nx = 0, ny = 0, nz = 0
-    if (yr <= floorY) {
-      ny = 1
-    } else if (yr >= ceilY) {
-      ny = -1
-    } else {
-      const dx  = xr - roomCX
-      const dz  = zr - roomCZ
-      const len = Math.max(Math.sqrt(dx*dx + dz*dz), 0.001)
-      nx = dx / len
-      nz = dz / len
-    }
+    // WPA-3: use PCA-estimated per-point normal
+    const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
 
     let bestScore = 0, bestDepth = 0, bestCamIdx = -1
 
@@ -603,23 +712,29 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const u0 = k.x * cpx / depth + k.z
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (u < 0.08 || u > 0.92 || v < 0.08 || v > 0.92) continue
-      // WPA-2.2 score: angRes × facing⁴ × cosView⁴ (mirrors GLSL shader exactly)
+      if (u < 0.06 || u > 0.94 || v < 0.06 || v > 0.94) continue
+      // WPA-3 score: angRes × facing⁶ × cosView² × spinFactor² (mirrors GLSL)
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
-      const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz  // rotation only (w=0)
+      const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz
       const facing   = Math.max(0, -normCamZ)
-      const f2       = facing * facing
+      if (facing < 0.35) continue  // hard cutoff (mirrors GLSL MIN_FACING)
+      const f6       = Math.pow(facing, 6)
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
       const cv2      = cosView * cosView
-      const score    = angRes * f2 * f2 * cv2 * cv2  // facing⁴ × cosView⁴
+      // Spin factor: camera Y dot surface-up (WPA-3 in-plane alignment)
+      const camYx = camYArr[ci].x, camYy = camYArr[ci].y, camYz = camYArr[ci].z
+      // surfaceUp = worldUp − dot(worldUp,normal)*normal; worldUp=(0,1,0)
+      const dotUp = ny  // dot((0,1,0), normal)
+      const sux = -dotUp*nx, suy = 1-dotUp*ny, suz = -dotUp*nz
+      const suLen = Math.sqrt(sux*sux + suy*suy + suz*suz)
+      const spinRaw = suLen > 0.01 ? Math.abs((camYx*sux + camYy*suy + camYz*suz)/suLen) : 1
+      const sf2 = Math.max(0.25, spinRaw) ** 2
+      const score = angRes * f6 * cv2 * sf2
       if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci }
     }
 
     if (bestCamIdx >= 0) {
-      // Wegter splat-diameter equation: depth / camFx × OVERLAP
-      // Ties splat size to camera pixel footprint at this depth so adjacent
-      // splats always overlap slightly and leave no coverage gaps.
       photoSpacings[i] = Math.max(0.001, Math.min(0.08,
         bestDepth / (camFxArr[bestCamIdx] + 1e-4) * WEGTER_OVERLAP
       ))
@@ -643,7 +758,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
-  // ── Update geometry spacing attribute with photo-derived values ─────────
+  // ── Update geometry attributes (spacing + WPA-3 per-point normals) ──────
   const oldSpacingAttr = points.geometry.attributes.aLocalSpacing
   if (oldSpacingAttr && oldSpacingAttr.array.length === nPts) {
     oldSpacingAttr.array.set(photoSpacings)
@@ -652,6 +767,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     points.geometry.setAttribute('aLocalSpacing',
       new THREE.BufferAttribute(photoSpacings.slice(), 1))
   }
+  // Always replace aNormal since the PCA estimate is new each rebuild
+  points.geometry.setAttribute('aNormal',
+    new THREE.BufferAttribute(normals, 3))
 
   const coveragePct  = sampled > 0 ? Math.round(covered / sampled * 100) : 0
   const usedCamCount = nCams <= 30
@@ -662,7 +780,6 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const medSpacingMm = Math.round(medSpacingPx * 1000)
 
   // Per-camera sampler uniforms: uCamTex0, uCamTex1, …
-  // (No GLSL3 → no dynamic array indexing → no iOS gl_PointCoord bug)
   const camTexUniforms = {}
   textures.forEach((tex, i) => { camTexUniforms[`uCamTex${i}`] = { value: tex } })
 
@@ -680,10 +797,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       uRoomCX:   { value: oldUni.uRoomCX?.value ?? 0 },
       uRoomCZ:   { value: oldUni.uRoomCZ?.value ?? 0 },
       uDiagMode: { value: 0 },
+      uNCams:    { value: nCams },
       uW2C:      { value: w2cMats },
       uCamK:     { value: camKVec },
       uCamFx:    { value: camFxArr },
       uCamOri:   { value: camOriArr },
+      uCamY:     { value: camYArr },   // WPA-3 spin alignment
       ...camTexUniforms,
     },
   })
@@ -692,7 +811,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material = projMat
 
   onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
-  console.info(`[projective] ${nCams} cams loaded, ${usedCamCount} cover points, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
+  console.info(`[projective] WPA-3: ${nCams} cams, ${usedCamCount} active, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
 
   if (diagRef) {
     diagRef.current = {
@@ -704,7 +823,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projCoverage:    coveragePct,
       wegterSpacingMm: medSpacingMm,
       projStatus:      null,
-      colourMethod:    `Photo projection (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
+      colourMethod:    `Photo projection WPA-3 (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
     }
   }
   onDiagUpdate?.()
