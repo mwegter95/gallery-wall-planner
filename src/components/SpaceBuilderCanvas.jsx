@@ -339,6 +339,32 @@ function applyUvOrientation(u0, v0, ori) {
 const MAX_PROJ_CAMS  = 16
 const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
+// Load a snapshot image via fetch (with auth headers) + blob URL so the
+// request always goes through the Flask API route where CORS headers are set.
+// Using <img> via TextureLoader directly hits /uploads/ which nginx may serve
+// without CORS headers, causing the browser to silently block cross-origin reads.
+async function loadSnapshotTex(url) {
+  const jwt    = getJwt()
+  const device = getDeviceToken()
+  const resp   = await fetch(`${BASE}${url}`, {
+    headers: {
+      'X-Device-Token': device,
+      ...(jwt ? { Authorization: `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
+    },
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`)
+  const blob   = await resp.blob()
+  const objUrl = URL.createObjectURL(blob)
+  return new Promise((resolve, reject) => {
+    new THREE.TextureLoader().load(
+      objUrl,
+      tex => { URL.revokeObjectURL(objUrl); tex.flipY = false; resolve(tex) },
+      undefined,
+      err => { URL.revokeObjectURL(objUrl); reject(err) },
+    )
+  })
+}
+
 async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress }) {
   onProgress?.(5, 'Loading snapshots…')
   let data
@@ -367,21 +393,27 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     snaps = Array.from({ length: MAX_PROJ_CAMS }, (_, i) => allSnaps[Math.floor(i * step)])
   }
 
-  const loader   = new THREE.TextureLoader()
-  let texLoaded  = 0
-  const textures = await Promise.all(snaps.map(s => new Promise((res, rej) => {
-    loader.load(
-      BASE + s.url,
-      tex => {
-        tex.flipY = false
-        texLoaded++
-        onProgress?.(10 + Math.round(55 * texLoaded / snaps.length), `Loading textures (${texLoaded}/${snaps.length})…`)
-        res(tex)
-      },
-      undefined,
-      rej,
-    )
-  })))
+  // Load textures via fetch+blob so we get proper auth and error visibility.
+  // A failed texture gets a 1×1 black placeholder — one bad photo won't abort
+  // the whole projection (remaining cameras still contribute).
+  let texLoaded = 0
+  const black1x1 = (() => {
+    const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1)
+    t.needsUpdate = true
+    return t
+  })()
+  const textures = await Promise.all(snaps.map(async (s, si) => {
+    try {
+      const tex = await loadSnapshotTex(s.url)
+      texLoaded++
+      onProgress?.(10 + Math.round(55 * texLoaded / snaps.length), `Loading textures (${texLoaded}/${snaps.length})…`)
+      return tex
+    } catch (err) {
+      console.error(`[projective] snapshot ${si} (${s.url}) failed: ${err.message}`)
+      texLoaded++
+      return black1x1
+    }
+  }))
 
   onProgress?.(68, 'Computing photo projection…')
 
@@ -1426,7 +1458,21 @@ export default function SpaceBuilderCanvas({
           reportRoomLoad(24, 'Using cached scan data')
           buf = pc._buffer
         } else if (pc?.url) {
-          const resp = await fetch(pc.url)
+          // Always use the dedicated download endpoint when we have a roomId — it
+          // runs through Flask which gzip-compresses at level 1 (~50% size reduction).
+          // Falling back to pc.url (a static /uploads/ path) bypasses Flask and is
+          // served raw by nginx, making large scans take minutes instead of seconds.
+          const jwt    = getJwt()
+          const device = getDeviceToken()
+          const downloadUrl = roomId
+            ? `${BASE}/api/rooms/${roomId}/pointcloud/download`
+            : pc.url
+          const resp = await fetch(downloadUrl, {
+            headers: {
+              'X-Device-Token': device,
+              ...(jwt ? { Authorization: `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
+            },
+          })
           if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
           // Prefer X-Uncompressed-Length (set when server gzip-encodes) so the
           // streaming buffer is sized for the decoded bytes, not the wire bytes.
