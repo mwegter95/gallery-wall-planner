@@ -1,31 +1,44 @@
 /**
- * Wegter Projection Algorithm v2.1 (WPA-2.1)
+ * Wegter Projection Algorithm v2.2 (WPA-2.2)
  *
  * Pure-JS reference implementation — mirrors the GLSL fragment shader exactly.
  * Importable for testing and for the CPU-side splat-spacing pre-pass.
  *
- * WHAT CHANGED IN v2.1 (the "panoramic wrapping" fix)
- * ────────────────────────────────────────────────────
- * WPA-2 used score = angRes × facing².  This correctly rejects cameras that
- * see a surface from the back, but does not penalise cameras that have the
- * point far off their own optical axis.  A wide-angle phone camera in the
- * south corner of a bedroom can "see" the north wall, but the north wall
- * occupies the extreme top-left of that image — heavily distorted, wrong
- * perspective.  WPA-2 gave it a high facing score (it IS facing the wall)
- * and let it blend, creating the "panoramic circle" smear.
+ * WHAT CHANGED IN v2.2 (the "spin × warp" sub-algorithm)
+ * ────────────────────────────────────────────────────────
+ * WPA-2.1 score = angRes × facing² × cosView⁴
  *
- * Fix — add a cosView⁴ term:
- *   cosView = depth / |camera_space_point| = cos(off-axis angle)
- *   1.0 when the point is dead-centre in the camera FOV;
- *   cos(θ) at angle θ off the optical axis.
- *   Raised to the 4th power → steep fall-off:  20°→0.78  30°→0.56  45°→0.25
+ * The cosView⁴ term correctly penalises cameras that see the point far from
+ * their optical axis.  But a camera that is yawed 30° away from the wall
+ * normal while the wall point happens to lie near its image CENTRE is barely
+ * penalised — cosView ≈ 1, so only facing² = cos(30°)² = 0.75 applies.
+ * 0.75 > BLEND_RATIO = 0.70, so the oblique camera is still included and
+ * contributes its warped, panoramically-stretched view of the wall.
  *
- * New score = angRes × facing² × cosView⁴
+ * The "spin" fix — raise the facing exponent from 2 to 4:
+ *   facing  = max(0, −normCam.z)  = cos(camera-to-wall-normal angle)
+ *   facing⁴: the "spin alignment" penalty.  A camera 25° yawed relative to
+ *             the wall normal scores cos(25°)⁴ ≈ 0.674, which is now BELOW
+ *             BLEND_RATIO (0.70) and is excluded even when the wall point
+ *             is centred in the image.
  *
- * With BLEND_RATIO = 0.70, cameras more than ~22° off-axis are excluded even
- * before the facing term matters.  Combined, a camera 25° off either axis
- * scores < 0.55 of the best → excluded.  This restricts each camera to the
- * central, undistorted region of its FOV, eliminating the panoramic sweep.
+ * The "warp" term — cosView⁴ (unchanged from v2.1):
+ *   cosView = depth / |camera_space_point|  = cos(off-axis angle)
+ *   Penalises sampling from the edge of the camera's FOV where wide-angle
+ *   lenses are most distorted.  Steep fall-off: 20°→0.78, 30°→0.56, 45°→0.25.
+ *
+ * New score = angRes × facing⁴ × cosView⁴
+ *
+ * Both terms now carry equal ^4 weight, creating symmetric steep penalties for:
+ *   "Spin"  — how much the camera is rotated relative to the wall normal.
+ *   "Warp"  — how far from the camera's optical axis the wall point appears.
+ * Combined, cameras beyond ~22° from either the wall normal or the optical
+ * axis are excluded, eliminating the panoramic-circle smear.
+ *
+ * Exclusion summary with BLEND_RATIO = 0.70 and facing⁴ × cosView⁴:
+ *   Camera yaw from wall normal:  > 25° → excluded (facing⁴ < 0.674)
+ *   Point off optical axis:       > 22° → excluded (cosView⁴ < 0.739)
+ *   Combined 18° + 18°:           score ≈ 0.686 × 0.686 = 0.471 → excluded
  *
  * WHY WPA-2 vs the original:
  * ──────────────────────────
@@ -49,27 +62,27 @@
  *   Fix: rotate the surface normal into camera space; cameras where the
  *   normal points away from the lens (normCam.z > 0) get zero score.
  *
- * WPA-2.1 SCORE FORMULA
+ * WPA-2.2 SCORE FORMULA
  * ─────────────────────
- *   score = (fxRaw / (depth² + ε)) × max(0, −normCam.z)² × cosView⁴
+ *   score = (fxRaw / (depth² + ε)) × max(0, −normCam.z)⁴ × cosView⁴
  *
  *   fxRaw / depth²          → angular resolution (pixels/m² at this depth).
  *                             Closer, higher-fx cameras win.
- *   max(0, −normCam.z)²     → surface facing.  Camera looks in −Z; normal
+ *   max(0, −normCam.z)⁴    → spin alignment.  Camera looks in −Z; normal
  *                             must point toward camera (ncz < 0 → facing > 0).
- *                             Squared to penalise grazing angles.
- *   cosView⁴ where          → on-axis quality.  Penalises sampling from the
- *   cosView = depth/|cp|      edge of the camera's FOV where wide-angle lenses
- *                             are most distorted.  4th power → aggressive:
- *                             20°off-axis → 0.78,  30° → 0.56,  45° → 0.25.
+ *                             Raised to 4th power (was 2nd): cameras > 25°
+ *                             yawed from wall normal are now excluded.
+ *   cosView⁴ where          → warp/on-axis quality.  Penalises sampling from
+ *   cosView = depth/|cp|      the edge of the FOV.  Together with facing⁴,
+ *                             both spin and warp create symmetric exclusion.
  *
  * SOFT WINNER-TAKES-ALL
  * ─────────────────────
  *   threshold = bestScore × BLEND_RATIO
  *   Only cameras with score ≥ threshold contribute.
- *   With BLEND_RATIO = 0.70 and the combined facing²×cosView⁴ penalty,
- *   cameras more than ~22° off the combined surface-normal / optical axis
- *   are excluded.  Blending weight = score³ for sharp but smooth seams.
+ *   With BLEND_RATIO = 0.70 and facing⁴ × cosView⁴, cameras are excluded
+ *   when yawed > 25° from wall normal OR when the point is > 22° off-axis.
+ *   Blending weight = score³ for sharp but smooth seams.
  *
  * ORIENTATION CONVENTION
  * ──────────────────────
@@ -179,14 +192,17 @@ export function rotateToCamera(v, w2c) {
 }
 
 /**
- * WPA-2.1 quality score for one camera–point pairing.
+ * WPA-2.2 quality score for one camera–point pairing.
  *
- *   score = angRes × facing² × cosView⁴
+ *   score = angRes × facing⁴ × cosView⁴
  *
  * where:
  *   angRes   = fxRaw / (depth² + ε)    [angular resolution, pixels/m²]
- *   facing   = max(0, −normCam.z)      [surface faces the camera's −Z axis]
- *   cosView  = depth / |cp|            [point is centred in the camera FOV]
+ *   facing   = max(0, −normCam.z)      ["spin" alignment: camera faces wall]
+ *              Raised to 4th power (was 2nd in v2.1).  A camera 25° yawed
+ *              from the wall normal scores facing⁴ ≈ 0.674 < BLEND_RATIO →
+ *              excluded.  Tightens acceptance from ~33° to ~25°.
+ *   cosView  = depth / |cp|            ["warp" quality: point near FOV centre]
  *              default 1.0 when not available (e.g., unit tests that only
  *              have depth and not the full camera-space vector)
  *
@@ -202,8 +218,10 @@ export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1) {
   const [, , ncz] = rotateToCamera(surfNorm, w2c)
   // Camera looks in −Z; surface normal must point toward camera (ncz < 0).
   const facing = Math.max(0, -ncz)
+  const f2  = facing * facing
   const cv2 = cosView * cosView
-  return angRes * facing * facing * cv2 * cv2
+  // WPA-2.2: facing⁴ × cosView⁴ — symmetric "spin × warp" penalty
+  return angRes * f2 * f2 * cv2 * cv2
 }
 
 // ─── Camera selection (WPA-2 soft WTA) ───────────────────────────────────────

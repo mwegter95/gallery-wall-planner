@@ -290,13 +290,13 @@ describe('computeScore', () => {
     expect(grazing).toBeLessThan(frontal * 0.05)
   })
 
-  it('score formula: angRes × facing² × cosView⁴ matches manual calculation (cosView default 1)', () => {
+  it('score formula: angRes × facing⁴ × cosView⁴ matches manual calculation (cosView default 1)', () => {
     const depth   = 3
     const fxRaw   = 1200
     const norm    = [0, 0, -1]    // normCam.z = −1, facing = 1
     const angRes  = fxRaw / (depth * depth + 0.001)
-    // Default cosView = 1 → cosView⁴ = 1
-    const expected = angRes * 1 * 1 * 1   // angRes × facing² × cosView⁴
+    // Default cosView = 1 → cosView⁴ = 1, facing = 1 → facing⁴ = 1
+    const expected = angRes * 1 * 1 * 1   // angRes × facing⁴ × cosView⁴
     expect(computeScore(depth, fxRaw, norm, I4)).toBeCloseTo(expected, 4)
   })
 
@@ -306,8 +306,9 @@ describe('computeScore', () => {
     const norm    = [0, 0, -1]
     const cosView = Math.cos(30 * Math.PI / 180)  // 30° off-axis
     const angRes  = fxRaw / (depth * depth + 0.001)
+    const f2      = 1 * 1   // facing = 1, f2 = 1
     const cv2     = cosView * cosView
-    const expected = angRes * 1 * 1 * cv2 * cv2  // facing=1, cosView^4
+    const expected = angRes * f2 * f2 * cv2 * cv2  // facing⁴ × cosView⁴, facing=1
     expect(computeScore(depth, fxRaw, norm, I4, cosView)).toBeCloseTo(expected, 4)
   })
 
@@ -324,6 +325,68 @@ describe('computeScore', () => {
     const s_30deg   = computeScore(5, 1000, [0, 0, -1], I4, cosView30)
     // cos(30°)^4 ≈ 0.562 < BLEND_RATIO=0.70 → excluded from blend
     expect(s_30deg / s_frontal).toBeLessThan(0.70)
+  })
+
+  // WPA-2.2 spin alignment tests (facing⁴ instead of facing²)
+  it('WPA-2.2: facing⁴ formula — facing=0.5 reduces score to 0.0625 of frontal', () => {
+    // With facing^4: 0.5^4 = 0.0625
+    // Build a W2C where normCam.z = -0.5 (surface facing = 0.5)
+    // normal [0, 0, -1] in camera space → need w2c such that normCam.z = -0.5
+    // That means the world normal [0, 0, -1] rotates to camera z of -0.5
+    // Use a camera rotated 60° so cos(60°)=0.5
+    const depth  = 5
+    const fxRaw  = 1000
+    const norm   = [0, 0, -1]
+    // frontal camera: facing=1
+    const sF = computeScore(depth, fxRaw, norm, I4, 1.0)
+    // half-facing camera: directly pass as cosView=0.5 but facing=1, to isolate
+    // the facing term: build a W2C where normCam.z produces facing=0.5
+    // Easiest: use computeScore with a tilted norm and identity W2C
+    // norm = [-sin(60°), 0, -cos(60°)] → normCam.z = -0.5 → facing = 0.5
+    const angle  = 60 * Math.PI / 180
+    const norm60 = [-Math.sin(angle), 0, -Math.cos(angle)]
+    const sH = computeScore(depth, fxRaw, norm60, I4, 1.0)
+    // facing = 0.5 → facing^4 = 0.0625 → score ratio = 0.0625
+    expect(sH / sF).toBeCloseTo(0.0625, 4)
+  })
+
+  it('WPA-2.2: 25° yaw from wall normal → score < BLEND_RATIO (spin penalty)', () => {
+    // Camera at 25° yaw from wall normal, point at camera centre (cosView=1)
+    // facing = cos(25°) ≈ 0.906, facing^4 ≈ 0.674 < 0.70 → excluded
+    const depth   = 5
+    const fxRaw   = 1000
+    const angle25 = 25 * Math.PI / 180
+    // Rotate the wall normal by 25° around Y so normCam.z = -cos(25°) with identity W2C
+    // Outward normal rotated 25° from cam optical axis: [sin(25°), 0, -cos(25°)]
+    const norm25  = [Math.sin(angle25), 0, -Math.cos(angle25)]
+    const sF = computeScore(depth, fxRaw, [0, 0, -1], I4, 1.0)   // frontal
+    const s25 = computeScore(depth, fxRaw, norm25, I4, 1.0)        // 25° spin
+    // facing = cos(25°), facing^4 ≈ 0.674 < 0.70 → spin-excluded
+    expect(s25 / sF).toBeLessThan(WPA2_BLEND_RATIO)
+    expect(s25 / sF).toBeGreaterThan(0.60)  // not zero — just below threshold
+  })
+
+  it('WPA-2.2: 20° yaw — just inside BLEND_RATIO (allowed in seam blend)', () => {
+    // facing = cos(20°) ≈ 0.940, facing^4 ≈ 0.781 > 0.70 → included
+    const depth   = 5
+    const fxRaw   = 1000
+    const angle20 = 20 * Math.PI / 180
+    const norm20  = [Math.sin(angle20), 0, -Math.cos(angle20)]
+    const sF  = computeScore(depth, fxRaw, [0, 0, -1], I4, 1.0)
+    const s20 = computeScore(depth, fxRaw, norm20, I4, 1.0)
+    // cos(20°)^4 ≈ 0.781 > BLEND_RATIO → camera is included at seams
+    expect(s20 / sF).toBeGreaterThan(WPA2_BLEND_RATIO)
+  })
+
+  it('WPA-2.2: 30° yaw — clearly excluded (spin penalty)', () => {
+    const depth   = 5
+    const fxRaw   = 1000
+    const angle30 = 30 * Math.PI / 180
+    const norm30  = [Math.sin(angle30), 0, -Math.cos(angle30)]
+    const sF  = computeScore(depth, fxRaw, [0, 0, -1], I4, 1.0)
+    const s30 = computeScore(depth, fxRaw, norm30, I4, 1.0)
+    // cos(30°)^4 ≈ 0.563 < 0.70 → excluded
+    expect(s30 / sF).toBeLessThan(WPA2_BLEND_RATIO)
   })
 })
 
@@ -686,5 +749,144 @@ describe('WPA-2 integration invariant: point-center projection', () => {
     // 9 > 1/BLEND_RATIO=1/0.70=1.43 → far camera excluded
     expect(result).toHaveLength(1)
     expect(result[0].camIdx).toBe(0)  // closer camera wins
+  })
+})
+
+// ─── WPA-2.2: spin × warp integration ────────────────────────────────────────
+
+describe('WPA-2.2 spin × warp sub-algorithm', () => {
+  // "Spin" = facing⁴: penalises cameras yawed relative to wall normal.
+  // "Warp" = cosView⁴: penalises cameras with point far from optical axis.
+  // Both carry ^4 for symmetric steep exclusion cones (~25° for spin, ~22° for warp).
+
+  it('frontal camera (0° spin, 0° warp) scores maximum', () => {
+    // Camera at origin, point dead ahead, wall normal aligned → score = angRes
+    const result = selectCameras([0, 0, -5], [0, 0, -1], [cam()])
+    expect(result).toHaveLength(1)
+    expect(result[0].score).toBeCloseTo(1000 / (25 + 0.001), 2)
+  })
+
+  it('25° yaw from wall normal → spin penalty excludes camera vs frontal', () => {
+    // Frontal camera vs camera yawed 25° horizontally from wall normal.
+    // For the yawed camera: the wall normal [0,0,-1] appears at 25° in its FOV.
+    // Rotate wall normal 25° around Y: norm_in_yawed_cam = [sin(25°), 0, -cos(25°)]
+    // facing = cos(25°) ≈ 0.906, facing^4 ≈ 0.674 < BLEND_RATIO=0.70 → excluded.
+    // Both cameras at same depth, same fxRaw → only angRes and facing differ.
+    const depth   = 5
+    const angle   = 25 * Math.PI / 180
+    // Camera A: frontal (wall normal stays [0,0,-1] in camera space = identity W2C)
+    const camA = cam(I4)
+    // Camera B: yawed 25° — simulate by rotating the wall normal 25° in world space
+    // such that when projected into camera B (also identity W2C), normCam rotates.
+    // Easier: give camera B a W2C that is a 25° Y-rotation so normCam.z = -cos(25°).
+    // R_y(25°) rotates world→camera by 25° around Y:
+    //   e.g. [cos25,0,-sin25, 0,1,0, sin25,0,cos25] stored column-major
+    const c25 = Math.cos(angle), s25 = Math.sin(angle)
+    const w2cYaw25 = [c25,0,s25,0, 0,1,0,0, -s25,0,c25,0, 0,0,0,1]
+    const camB = cam(w2cYaw25)
+    const norm = [0, 0, -1]
+    const result = selectCameras([0, 0, -depth], norm, [camA, camB])
+    // camA: facing=1, score=angRes; camB: facing=cos25, score=angRes×cos25^4
+    // cos(25°)^4 ≈ 0.674 < 0.70 → camB excluded
+    expect(result.some(r => r.camIdx === 0)).toBe(true)   // frontal survives
+    expect(result.some(r => r.camIdx === 1)).toBe(false)  // yawed excluded
+  })
+
+  it('20° yaw (on-axis point) — excluded by combined spin×warp penalty', () => {
+    // When the camera is yawed 20° from the wall normal, and the wall point is
+    // on the wall's central axis (straight ahead in the frontal camera), the point
+    // appears 20° off the yawed camera's optical axis too. Both spin (facing) and
+    // warp (cosView) equal cos(20°), so combined: cos(20°)^8 ≈ 0.608 < 0.70 → excluded.
+    // This is intentional — WPA-2.2 acceptance cone is ~17° for on-axis points.
+    const depth   = 5
+    const angle   = 20 * Math.PI / 180
+    const c20 = Math.cos(angle), s20 = Math.sin(angle)
+    const w2cYaw20 = [c20,0,s20,0, 0,1,0,0, -s20,0,c20,0, 0,0,0,1]
+    const camB = cam(w2cYaw20)
+    const norm = [0, 0, -1]
+    const result = selectCameras([0, 0, -depth], norm, [cam(I4), camB])
+    // Frontal camera survives; 20°-yawed camera is excluded for this on-axis point
+    expect(result.some(r => r.camIdx === 0)).toBe(true)
+    expect(result.some(r => r.camIdx === 1)).toBe(false)
+  })
+
+  it('15° yaw (on-axis point) — within acceptance cone', () => {
+    // cos(15°)^8 ≈ 0.769 > 0.70 → included for smooth seam blending
+    const depth   = 5
+    const angle   = 15 * Math.PI / 180
+    const c15 = Math.cos(angle), s15 = Math.sin(angle)
+    const w2cYaw15 = [c15,0,s15,0, 0,1,0,0, -s15,0,c15,0, 0,0,0,1]
+    const camB = cam(w2cYaw15)
+    const norm = [0, 0, -1]
+    const result = selectCameras([0, 0, -depth], norm, [cam(I4), camB])
+    expect(result.some(r => r.camIdx === 0)).toBe(true)
+    expect(result.some(r => r.camIdx === 1)).toBe(true)
+  })
+
+  it('30° yaw — clearly outside acceptance cone', () => {
+    const depth   = 5
+    const angle   = 30 * Math.PI / 180
+    const c30 = Math.cos(angle), s30 = Math.sin(angle)
+    const w2cYaw30 = [c30,0,s30,0, 0,1,0,0, -s30,0,c30,0, 0,0,0,1]
+    const camB = cam(w2cYaw30)
+    const norm = [0, 0, -1]
+    const result = selectCameras([0, 0, -depth], norm, [cam(I4), camB])
+    // cos(30°)^4 ≈ 0.563 < 0.70 → excluded
+    expect(result.some(r => r.camIdx === 0)).toBe(true)
+    expect(result.some(r => r.camIdx === 1)).toBe(false)
+  })
+
+  it('spin × warp combined: 18° yaw + 18° off-axis → score ≈ 0.471 × frontal → excluded', () => {
+    // Both spin and warp at 18°: cos(18°)^4 × cos(18°)^4 = cos(18°)^8 ≈ 0.471 < 0.70
+    const depth  = 5
+    const angle  = 18 * Math.PI / 180
+    const lat    = depth * Math.tan(angle)  // point offset for 18° off-axis
+
+    const c18 = Math.cos(angle), s18 = Math.sin(angle)
+    // Camera yawed 18° (spin)
+    const w2cYaw18 = [c18,0,s18,0, 0,1,0,0, -s18,0,c18,0, 0,0,0,1]
+    const camYawed = cam(w2cYaw18)
+
+    const norm = [0, 0, -1]
+    // Point shifted 18° off-axis laterally (warp) for the frontal camera
+    // lat offset → point at [lat, 0, -depth]: cosView = cos(18°)
+    const p = projectPoint([lat, 0, -depth], w2cYaw18, K1000)
+    // Both effects combined: score = angRes × cos(18°)^4 × cos(18°)^4 ≈ 0.471 × frontal
+    if (p) {
+      const score = computeScore(p.depth, 1000, norm, w2cYaw18, p.cosView)
+      const frontalScore = computeScore(depth, 1000, norm, I4, 1.0)
+      // 0.471 < 0.70 → excluded relative to frontal
+      expect(score / frontalScore).toBeLessThan(WPA2_BLEND_RATIO)
+    }
+  })
+
+  it('facing⁴ penalises 25° yaw more than facing² did', () => {
+    // Under the old facing² formula, cos(25°)² ≈ 0.821 > 0.70 → included.
+    // Under the new facing⁴ formula, cos(25°)⁴ ≈ 0.674 < 0.70 → excluded.
+    const angle  = 25 * Math.PI / 180
+    const facing = Math.cos(angle)
+    const old_score_ratio = facing * facing             // WPA-2.1: facing²
+    const new_score_ratio = facing * facing * facing * facing  // WPA-2.2: facing⁴
+    expect(old_score_ratio).toBeGreaterThan(WPA2_BLEND_RATIO)  // WPA-2.1 would include it
+    expect(new_score_ratio).toBeLessThan(WPA2_BLEND_RATIO)     // WPA-2.2 excludes it
+  })
+
+  it('selectCameras: among 4 cameras at 0°/20°/30°/45° yaw, only 0° contributes for on-axis point', () => {
+    // Simulates 4 photos taken while spinning. For a wall point on the central axis,
+    // combined spin×warp acceptance cone is ~17°, so only the frontal camera passes.
+    // cos(20°)^8 ≈ 0.608 < 0.70 → excluded; cos(30°)^8 ≈ 0.317; cos(45°)^8 ≈ 0.063.
+    const depth = 5
+    const makeYaw = (deg) => {
+      const a = deg * Math.PI / 180
+      const c = Math.cos(a), s = Math.sin(a)
+      return cam([c,0,s,0, 0,1,0,0, -s,0,c,0, 0,0,0,1])
+    }
+    const cameras = [makeYaw(0), makeYaw(20), makeYaw(30), makeYaw(45)]
+    const result  = selectCameras([0, 0, -depth], [0, 0, -1], cameras)
+    const idxs    = result.map(r => r.camIdx)
+    expect(idxs).toContain(0)          // frontal survives
+    expect(idxs).not.toContain(1)      // 20° — excluded (combined cos^8 = 0.608 < 0.70)
+    expect(idxs).not.toContain(2)      // 30° — excluded
+    expect(idxs).not.toContain(3)      // 45° — excluded
   })
 })

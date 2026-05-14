@@ -234,9 +234,9 @@ const SPLAT_VERT_PROJ = /* glsl */`
 //   uniform per camera with a static if-chain dispatch function — zero runtime
 //   branching cost because the GPU compiler turns each taken branch into a
 //   single texture fetch.
-// makeProjFragShader — Wegter Projection Algorithm v2 (WPA-2)
+// makeProjFragShader — Wegter Projection Algorithm v2.2 (WPA-2.2)
 //
-// Three v1 bugs fixed:
+// Three v1 bugs fixed (WPA-2):
 //   1. Point-center projection: use vWorldPos directly instead of spreading
 //      each fragment across the disc in view-space.  The old spread caused
 //      disc edges to project to completely different camera UVs, smearing
@@ -250,6 +250,12 @@ const SPLAT_VERT_PROJ = /* glsl */`
 //      in pass 2 only sample cameras within BLEND_RATIO of the best score,
 //      weighted by score³.  This eliminates multi-camera ghosting/double-imaging
 //      while still blending smoothly at true seam boundaries.
+//
+// WPA-2.2 "spin × warp" sub-algorithm:
+//   Score formula changed from facing² × cosView⁴  →  facing⁴ × cosView⁴.
+//   facing⁴ is the "spin" penalty: cameras yawed > 25° from the wall normal
+//   are excluded (cos(25°)⁴ ≈ 0.674 < BLEND_RATIO).  Previously, facing²
+//   only excluded cameras beyond ~33°.
 //
 // GLSL ES 1.00 constraints respected:
 //   • No glslVersion THREE.GLSL3 (iOS Safari/WebKit gl_PointCoord bug at ES 3.00)
@@ -323,32 +329,35 @@ function makeProjFragShader(nCams) {
         float mg = 0.08;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
-        // WPA-2.1: score = angRes × facing² × cosView⁴
+        // WPA-2.2: score = angRes × facing⁴ × cosView⁴  ("spin × warp")
         //
         // angRes   = fxRaw / (depth² + ε)
         //            Angular resolution: pixels per m² at this depth.
         //            Closer, higher-fx cameras win.
         //
-        // facing   = max(0, −normCam.z)
-        //            Surface normal faces the camera (−Z in camera space).
-        //            Cameras seeing the surface from behind score 0 → excluded.
+        // facing⁴  = max(0, −normCam.z)⁴   [WPA-2.2 change: was ² in v2.1]
+        //            "Spin" penalty: how much the camera is yawed relative
+        //            to the wall normal.  Raised from ² to ⁴ so cameras
+        //            more than ~25° yawed from the wall normal are excluded:
+        //              cos(25°)⁴ ≈ 0.674 < BLEND_RATIO = 0.70 → excluded
+        //              cos(30°)⁴ ≈ 0.563 → excluded
+        //            Previously with ², cos(30°)² = 0.75 > 0.70 → included.
         //
-        // cosView  = depth / |cp|
-        //            How centred the point is on the camera's optical axis.
-        //            1.0 = dead ahead; cos(30°)≈0.87 at 30° off-axis.
-        //            Raised to the 4th power so off-axis projections lose fast:
+        // cosView⁴ = (depth / |cp|)⁴
+        //            "Warp" penalty: how far the point is from the optical
+        //            axis.  Unchanged from v2.1.
         //              20° → 0.78  |  30° → 0.56  |  45° → 0.25
-        //            This is the key fix for "panoramic wrapping": a wide-angle
-        //            camera that has the surface point near the edge of its FOV
-        //            gets heavily penalised vs one that sees it near centre,
-        //            preventing distorted edge pixels from dominating the blend.
+        //
+        // Together: symmetric ^4 penalty for spin AND warp — cameras must be
+        // both well-aligned to the wall AND have the point near their centre.
         float angRes  = uCamFx[i] / (depth * depth + 0.001);
         vec3  normCam = (uW2C[i] * vec4(vNorm, 0.0)).xyz;
         float facing  = max(0.0, -normCam.z);
+        float f2      = facing * facing;
         float cpLen   = length(cp.xyz);
         float cosView = cpLen > 0.001 ? depth / cpLen : 0.0;
         float cv2     = cosView * cosView;
-        float score   = angRes * facing * facing * cv2 * cv2;
+        float score   = angRes * f2 * f2 * cv2 * cv2;  // facing⁴ × cosView⁴
 
         scores_arr[i] = score;
         us_arr[i]     = u;
@@ -595,14 +604,15 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
       if (u < 0.08 || u > 0.92 || v < 0.08 || v > 0.92) continue
-      // WPA-2.1 score: angRes × facing² × cosView⁴ (mirrors GLSL shader exactly)
+      // WPA-2.2 score: angRes × facing⁴ × cosView⁴ (mirrors GLSL shader exactly)
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
       const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz  // rotation only (w=0)
       const facing   = Math.max(0, -normCamZ)
+      const f2       = facing * facing
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
       const cv2      = cosView * cosView
-      const score    = angRes * facing * facing * cv2 * cv2
+      const score    = angRes * f2 * f2 * cv2 * cv2  // facing⁴ × cosView⁴
       if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci }
     }
 
