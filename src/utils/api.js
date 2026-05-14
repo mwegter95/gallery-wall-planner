@@ -526,26 +526,3 @@ export async function uploadSurfaceImage(roomId, faceId, dataUrl) {
   const url = data.url?.startsWith('/') ? `${BASE}${data.url}` : data.url
   return { ...data, url: `${url}?v=${Date.now()}` }
 }
-
-import { buildPhotoColors, projectPhotoWithGPU } from './photoMesh';
-
-/**
- * Process and enhance the point cloud with photo projection.
- * @param {ArrayBuffer} pointCloud - The raw point cloud data.
- * @param {Array} snapshots - Array of snapshot objects with photo data.
- * @returns {Promise<ArrayBuffer>} - Enhanced point cloud data.
- */
-export async function processPointCloudWithPhotoProjection(pointCloud, snapshots) {
-  try {
-    // Apply photo projection using GPU acceleration
-    const enhancedPointCloud = projectPhotoWithGPU(pointCloud, snapshots);
-
-    // Optionally, apply further processing (e.g., depth refinement, gap filling)
-    const refinedPointCloud = buildPhotoColors(enhancedPointCloud, snapshots);
-
-    return refinedPointCloud;
-  } catch (error) {
-    console.error('Error during photo projection:', error);
-    throw error;
-  }
-}
