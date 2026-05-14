@@ -1,8 +1,31 @@
 /**
- * Wegter Projection Algorithm v2 (WPA-2)
+ * Wegter Projection Algorithm v2.1 (WPA-2.1)
  *
  * Pure-JS reference implementation — mirrors the GLSL fragment shader exactly.
  * Importable for testing and for the CPU-side splat-spacing pre-pass.
+ *
+ * WHAT CHANGED IN v2.1 (the "panoramic wrapping" fix)
+ * ────────────────────────────────────────────────────
+ * WPA-2 used score = angRes × facing².  This correctly rejects cameras that
+ * see a surface from the back, but does not penalise cameras that have the
+ * point far off their own optical axis.  A wide-angle phone camera in the
+ * south corner of a bedroom can "see" the north wall, but the north wall
+ * occupies the extreme top-left of that image — heavily distorted, wrong
+ * perspective.  WPA-2 gave it a high facing score (it IS facing the wall)
+ * and let it blend, creating the "panoramic circle" smear.
+ *
+ * Fix — add a cosView⁴ term:
+ *   cosView = depth / |camera_space_point| = cos(off-axis angle)
+ *   1.0 when the point is dead-centre in the camera FOV;
+ *   cos(θ) at angle θ off the optical axis.
+ *   Raised to the 4th power → steep fall-off:  20°→0.78  30°→0.56  45°→0.25
+ *
+ * New score = angRes × facing² × cosView⁴
+ *
+ * With BLEND_RATIO = 0.70, cameras more than ~22° off-axis are excluded even
+ * before the facing term matters.  Combined, a camera 25° off either axis
+ * scores < 0.55 of the best → excluded.  This restricts each camera to the
+ * central, undistorted region of its FOV, eliminating the panoramic sweep.
  *
  * WHY WPA-2 vs the original:
  * ──────────────────────────
@@ -26,22 +49,27 @@
  *   Fix: rotate the surface normal into camera space; cameras where the
  *   normal points away from the lens (normCam.z > 0) get zero score.
  *
- * WPA-2 SCORE FORMULA
- * ───────────────────
- *   score = (fxRaw / (depth² + ε)) × max(0, −normCam.z)²
+ * WPA-2.1 SCORE FORMULA
+ * ─────────────────────
+ *   score = (fxRaw / (depth² + ε)) × max(0, −normCam.z)² × cosView⁴
  *
- *   fxRaw / depth²  → angular resolution: pixels per steradian at this depth.
- *                     Closer cameras with longer focal lengths win.
- *   max(0, −normCam.z)²  → surface facing: normal should point toward camera
- *                          (camera looks in −Z; facing is −normCam.z).
- *                          Squared to down-weight grazing angles strongly.
+ *   fxRaw / depth²          → angular resolution (pixels/m² at this depth).
+ *                             Closer, higher-fx cameras win.
+ *   max(0, −normCam.z)²     → surface facing.  Camera looks in −Z; normal
+ *                             must point toward camera (ncz < 0 → facing > 0).
+ *                             Squared to penalise grazing angles.
+ *   cosView⁴ where          → on-axis quality.  Penalises sampling from the
+ *   cosView = depth/|cp|      edge of the camera's FOV where wide-angle lenses
+ *                             are most distorted.  4th power → aggressive:
+ *                             20°off-axis → 0.78,  30° → 0.56,  45° → 0.25.
  *
  * SOFT WINNER-TAKES-ALL
  * ─────────────────────
  *   threshold = bestScore × BLEND_RATIO
  *   Only cameras with score ≥ threshold contribute.
- *   With BLEND_RATIO = 0.70, at most ~2-3 cameras blend near seams.
- *   Blending weight = score³ for sharp but smooth camera boundary transitions.
+ *   With BLEND_RATIO = 0.70 and the combined facing²×cosView⁴ penalty,
+ *   cameras more than ~22° off the combined surface-normal / optical axis
+ *   are excluded.  Blending weight = score³ for sharp but smooth seams.
  *
  * ORIENTATION CONVENTION
  * ──────────────────────
@@ -68,8 +96,9 @@ export const WPA2_OVERLAP = 2.5
 export const WPA2_SPLAT_MIN_M = 0.001
 export const WPA2_SPLAT_MAX_M = 0.08
 
-/** Reject projections closer than this many normalised UV units to the edge. */
-export const WPA2_UV_MARGIN = 0.04
+/** Reject projections closer than this many normalised UV units to the edge.
+ *  0.08 (8%) avoids the most distorted periphery of wide-angle phone lenses. */
+export const WPA2_UV_MARGIN = 0.08
 
 // ─── Projection helpers ───────────────────────────────────────────────────────
 
@@ -89,8 +118,9 @@ export const WPA2_UV_MARGIN = 0.04
  *   Normalised intrinsics [fx/fw, fy/fh, cx/fw, cy/fh].
  * @param {0|1|2|3} [ori=0]  Image orientation (see module doc).
  * @param {number}  [margin]  UV reject margin (default WPA2_UV_MARGIN).
- * @returns {{ u:number, v:number, depth:number } | null}
+ * @returns {{ u:number, v:number, depth:number, cosView:number } | null}
  *   null when point is behind the camera or outside the image frustum.
+ *   cosView = depth / |camera_space_point|, how centred the point is in the FOV.
  */
 export function projectPoint(worldPos, w2c, kNorm, ori = 0, margin = WPA2_UV_MARGIN) {
   const [wx, wy, wz] = worldPos
@@ -106,6 +136,11 @@ export function projectPoint(worldPos, w2c, kNorm, ori = 0, margin = WPA2_UV_MAR
   if (cz >= -0.05) return null
   const depth = -cz
 
+  // cosView = cos(angle from optical axis) = depth / |cp|
+  // 1.0 = dead ahead; falls off toward 0 at the image edges.
+  const cpLen   = Math.sqrt(cx*cx + cy*cy + cz*cz)
+  const cosView = cpLen > 0.001 ? depth / cpLen : 0
+
   // Pinhole projection → normalised image UV
   const [fxn, fyn, cxn, cyn] = kNorm
   const u0 = fxn * (cx / depth) + cxn
@@ -119,7 +154,7 @@ export function projectPoint(worldPos, w2c, kNorm, ori = 0, margin = WPA2_UV_MAR
 
   if (u < margin || u > 1 - margin || v < margin || v > 1 - margin) return null
 
-  return { u, v, depth }
+  return { u, v, depth, cosView }
 }
 
 // ─── Scoring ──────────────────────────────────────────────────────────────────
@@ -144,26 +179,31 @@ export function rotateToCamera(v, w2c) {
 }
 
 /**
- * WPA-2 quality score for one camera–point pairing.
+ * WPA-2.1 quality score for one camera–point pairing.
  *
- *   score = angularResolution × facing²
+ *   score = angRes × facing² × cosView⁴
  *
  * where:
- *   angularResolution = fxRaw / (depth² + ε)   [pixels / m² at this depth]
- *   facing            = max(0, −normCam.z)      [0..1 — how directly cam faces surface]
+ *   angRes   = fxRaw / (depth² + ε)    [angular resolution, pixels/m²]
+ *   facing   = max(0, −normCam.z)      [surface faces the camera's −Z axis]
+ *   cosView  = depth / |cp|            [point is centred in the camera FOV]
+ *              default 1.0 when not available (e.g., unit tests that only
+ *              have depth and not the full camera-space vector)
  *
- * @param {number}              depth    Distance from camera to point (metres).
- * @param {number}              fxRaw    Raw focal length in pixels.
- * @param {[number,number,number]} surfNorm  World-space surface normal (unit vector).
- * @param {number[16]}          w2c      Column-major world→camera matrix.
- * @returns {number}  Score ≥ 0; 0 means this camera should not contribute.
+ * @param {number}              depth     Distance from camera to point (m).
+ * @param {number}              fxRaw     Raw focal length in pixels.
+ * @param {[number,number,number]} surfNorm  World-space surface normal (unit).
+ * @param {number[16]}          w2c       Column-major world→camera matrix.
+ * @param {number}              [cosView=1]  cos(off-axis angle) from projectPoint.
+ * @returns {number}  Score ≥ 0; 0 means this camera must not contribute.
  */
-export function computeScore(depth, fxRaw, surfNorm, w2c) {
+export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1) {
   const angRes = fxRaw / (depth * depth + 0.001)
   const [, , ncz] = rotateToCamera(surfNorm, w2c)
   // Camera looks in −Z; surface normal must point toward camera (ncz < 0).
   const facing = Math.max(0, -ncz)
-  return angRes * facing * facing
+  const cv2 = cosView * cosView
+  return angRes * facing * facing * cv2 * cv2
 }
 
 // ─── Camera selection (WPA-2 soft WTA) ───────────────────────────────────────
@@ -205,7 +245,7 @@ export function selectCameras(worldPos, surfNorm, cameras, blendRatio = WPA2_BLE
     const { w2c, kNorm, fxRaw, ori } = cameras[i]
     const proj = projectPoint(worldPos, w2c, kNorm, ori)
     if (!proj) continue
-    const score = computeScore(proj.depth, fxRaw, surfNorm, w2c)
+    const score = computeScore(proj.depth, fxRaw, surfNorm, w2c, proj.cosView)
     if (score <= 0) continue
     candidates.push({ camIdx: i, ...proj, score })
     if (score > bestScore) bestScore = score

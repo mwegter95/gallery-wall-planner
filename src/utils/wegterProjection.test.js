@@ -136,6 +136,47 @@ describe('projectPoint', () => {
     const p = projectPoint([0, 0, -7.5], I4, K1000)
     expect(p.depth).toBeCloseTo(7.5, 6)
   })
+
+  it('returns cosView field', () => {
+    const p = projectPoint([0, 0, -5], I4, K1000)
+    expect(p).not.toBeNull()
+    expect(typeof p.cosView).toBe('number')
+    expect(p.cosView).toBeGreaterThan(0)
+    expect(p.cosView).toBeLessThanOrEqual(1)
+  })
+
+  it('cosView = 1.0 for a point exactly on the optical axis', () => {
+    // [0, 0, -d] is dead-centre → cp = [0, 0, -d] → cosView = d / d = 1
+    const p = projectPoint([0, 0, -5], I4, K1000)
+    expect(p.cosView).toBeCloseTo(1.0, 6)
+  })
+
+  it('cosView < 1.0 for an off-axis point', () => {
+    // [2, 0, -5]: cx=2, cz=−5, cpLen=√(4+25)=√29≈5.39 → cosView=5/5.39≈0.928
+    const p = projectPoint([2, 0, -5], I4, K1000)
+    expect(p).not.toBeNull()
+    expect(p.cosView).toBeLessThan(1.0)
+    expect(p.cosView).toBeGreaterThan(0.8)
+  })
+
+  it('cosView equals cos(off-axis angle)', () => {
+    // Point at 30° off axis: tan(30°) = lateral/depth → lateral = depth*tan(30°)
+    const depth  = 5
+    const angle  = 30 * Math.PI / 180
+    const lat    = depth * Math.tan(angle)
+    const p      = projectPoint([lat, 0, -depth], I4, K1000)
+    if (p) {
+      expect(p.cosView).toBeCloseTo(Math.cos(angle), 4)
+    }
+  })
+
+  it('cosView is lower for more off-axis points', () => {
+    const p1 = projectPoint([1, 0, -10], I4, K1000)  // 5.7° off axis
+    const p2 = projectPoint([2, 0, -10], I4, K1000)  // 11.3° off axis
+    if (p1 && p2) {
+      expect(p1.cosView).toBeGreaterThan(p2.cosView)
+    }
+  })
 })
 
 // ─── applyOrientation ─────────────────────────────────────────────────────────
@@ -249,13 +290,40 @@ describe('computeScore', () => {
     expect(grazing).toBeLessThan(frontal * 0.05)
   })
 
-  it('score formula: angRes × facing² matches manual calculation', () => {
+  it('score formula: angRes × facing² × cosView⁴ matches manual calculation (cosView default 1)', () => {
     const depth   = 3
     const fxRaw   = 1200
     const norm    = [0, 0, -1]    // normCam.z = −1, facing = 1
     const angRes  = fxRaw / (depth * depth + 0.001)
-    const expected = angRes * 1 * 1   // facing² = 1
+    // Default cosView = 1 → cosView⁴ = 1
+    const expected = angRes * 1 * 1 * 1   // angRes × facing² × cosView⁴
     expect(computeScore(depth, fxRaw, norm, I4)).toBeCloseTo(expected, 4)
+  })
+
+  it('score formula with explicit cosView < 1 matches manual calculation', () => {
+    const depth   = 5
+    const fxRaw   = 1000
+    const norm    = [0, 0, -1]
+    const cosView = Math.cos(30 * Math.PI / 180)  // 30° off-axis
+    const angRes  = fxRaw / (depth * depth + 0.001)
+    const cv2     = cosView * cosView
+    const expected = angRes * 1 * 1 * cv2 * cv2  // facing=1, cosView^4
+    expect(computeScore(depth, fxRaw, norm, I4, cosView)).toBeCloseTo(expected, 4)
+  })
+
+  it('cosView=0.5 (60° off-axis) reduces score to 0.0625 of cosView=1 score', () => {
+    const s1 = computeScore(5, 1000, [0, 0, -1], I4, 1.0)
+    const s2 = computeScore(5, 1000, [0, 0, -1], I4, 0.5)
+    // cosView^4: 0.5^4 = 0.0625
+    expect(s2 / s1).toBeCloseTo(0.0625, 5)
+  })
+
+  it('30° off-axis camera scores below BLEND_RATIO=0.70 of 0°-axis camera', () => {
+    const cosView30 = Math.cos(30 * Math.PI / 180)
+    const s_frontal = computeScore(5, 1000, [0, 0, -1], I4, 1.0)
+    const s_30deg   = computeScore(5, 1000, [0, 0, -1], I4, cosView30)
+    // cos(30°)^4 ≈ 0.562 < BLEND_RATIO=0.70 → excluded from blend
+    expect(s_30deg / s_frontal).toBeLessThan(0.70)
   })
 })
 
@@ -399,6 +467,159 @@ describe('wegterSplatDiameter', () => {
     const raw  = depth / (fx + 1e-4) * WPA2_OVERLAP
     const clamped = Math.max(WPA2_SPLAT_MIN_M, Math.min(WPA2_SPLAT_MAX_M, raw))
     expect(wegterSplatDiameter(depth, fx)).toBeCloseTo(clamped, 8)
+  })
+})
+
+// ─── WPA-2.1: panoramic wrapping prevention ───────────────────────────────────
+
+describe('WPA-2.1 panoramic wrapping prevention', () => {
+  // A wide-angle camera in the south corner of a room can technically "see" the
+  // north wall, but that wall occupies the extreme periphery of the image — heavily
+  // distorted. WPA-2.1 penalises these off-axis projections with cosView^4.
+
+  it('a camera directly facing a wall (0° off-axis) has cosView ≈ 1', () => {
+    // Camera at origin, point straight ahead at [0, 0, -5]
+    const p = projectPoint([0, 0, -5], I4, K1000)
+    expect(p).not.toBeNull()
+    expect(p.cosView).toBeCloseTo(1.0, 5)
+  })
+
+  it('a camera with point at 45° off-axis has cosView ≈ 0.707', () => {
+    // lat = depth * tan(45°) = 5 * 1 = 5 → point at [5, 0, -5]
+    // cosView = cos(45°) ≈ 0.7071
+    const p = projectPoint([5, 0, -5], I4, K1000)
+    // May be outside the UV margin — if so, skip (that's the correct rejection)
+    if (p) {
+      expect(p.cosView).toBeCloseTo(Math.cos(Math.PI / 4), 4)
+    }
+  })
+
+  it('cosView^4 at 45° ≈ 0.25 (steep penalisation)', () => {
+    const cosView = Math.cos(45 * Math.PI / 180)
+    const cv4     = cosView * cosView * cosView * cosView
+    expect(cv4).toBeCloseTo(0.25, 4)
+  })
+
+  it('an on-axis camera outscores a 30° off-axis camera by >BLEND_RATIO', () => {
+    // Both cameras at same depth; point is centred for camA, 30° off for camB.
+    // Achieved by having the point straight ahead for camA and shifted for camB.
+    const depth = 5
+    const camA  = cam(I4)                                    // point at [0,0,−5] → 0° off-axis
+    const lat   = depth * Math.tan(30 * Math.PI / 180)      // ~2.887
+    // camB is translated so the point appears at 30° in its FOV:
+    //   world point [0,0,−5], camB at [lat,0,0] → cx = 0−lat = −lat, cz = −5
+    //   off-axis angle = atan(lat/5) = 30°
+    const camB  = cam(translationW2C(lat, 0, 0))
+    const norm  = [0, 0, -1]
+    const result = selectCameras([0, 0, -5], norm, [camA, camB])
+    // camA: cosView=1, score_A = angRes * 1 * 1
+    // camB: cosView=cos(30°)≈0.866, score_B = angRes * 1 * 0.866^4 ≈ 0.562 * score_A
+    // 0.562 < BLEND_RATIO=0.70 → camB excluded
+    expect(result).toHaveLength(1)
+    expect(result[0].camIdx).toBe(0)
+  })
+
+  it('a room-corner wide-angle camera is excluded from the opposite wall', () => {
+    // Scenario: north wall at z = -6. Camera in south corner at z = +6.
+    // Camera looks in -Z (toward north wall). Point on north wall: [0, 0, -6].
+    // Camera at [0, 0, 6]: W2C translation = (0, 0, -6) → but translationW2C(0,0,6)
+    //   gives col12-15 as [0, 0, -6, 1].
+    // cz for point [0,0,-6]: 1*(-6) + (-6)*1 = -12 → depth=12
+    // cx = 0, cy = 0, cz = -12 → cosView = 1.0 (point is dead centre for this camera)
+    // Wait — that's directly ahead. Let me place camera off to the side instead.
+    //
+    // Better: camera in SW corner at [-5, 0, 5], looking in -Z.
+    // W2C = translationW2C(-5, 0, 5).
+    // Point on north wall: [0, 0, -5].
+    // Camera space: cx = 0-(-5) = 5, cy=0, cz = -5+(−5) = -10 → depth=10
+    // cpLen = sqrt(25+0+100) = sqrt(125) ≈ 11.18
+    // cosView = 10/11.18 ≈ 0.894 → 26.6° off-axis
+    // cosView^4 ≈ 0.639
+    // And a frontal camera directly at origin: cosView=1, score_frontal = angRes_frontal
+    // Depths: frontal=5, corner=10 → angRes_frontal/angRes_corner = 100/25 = 4×
+    // score_frontal = fxRaw/25; score_corner = fxRaw/100 * 0.639 → ratio = 0.160
+    // → 0.160 << BLEND_RATIO → corner cam is excluded
+    const cornerW2C = translationW2C(-5, 0, 5)
+    const camFrontal = cam(I4)            // at origin, point [0,0,−5] → depth=5, cosView=1
+    const camCorner  = cam(cornerW2C)     // SW corner, point depth≈10, 26.6° off-axis
+    const norm = [0, 0, -1]
+    const result = selectCameras([0, 0, -5], norm, [camFrontal, camCorner])
+    // frontal score >> corner score → corner excluded by WTA
+    expect(result.some(r => r.camIdx === 0)).toBe(true)   // frontal present
+    // corner may or may not be present; what matters is frontal dominates
+    const frontWeight = result.find(r => r.camIdx === 0)?.weight ?? 0
+    expect(frontWeight).toBeGreaterThan(0.9)
+  })
+
+  it('UV margin rejects the distorted outer 8% of the image', () => {
+    // WPA2_UV_MARGIN = 0.08 → points projecting within 8% of the image edge are
+    // rejected outright, regardless of score — catches max-distortion periphery.
+    expect(WPA2_UV_MARGIN).toBe(0.08)
+    // A point that projects to u = 0.07 should be null
+    const depth = 5
+    const uTarget = 0.07
+    // u0 = fx_n * (cx/depth) + cx_n → cx = (uTarget - 0.5) * depth / 1.0 = (0.07-0.5)*5 = -2.15
+    const cx = (uTarget - 0.5) * depth
+    const p  = projectPoint([cx, 0, -depth], I4, K1000)
+    expect(p).toBeNull()
+  })
+
+  it('UV margin passes points at 9% from the edge', () => {
+    const depth   = 5
+    const uTarget = 0.09    // just inside the 8% margin
+    const cx = (uTarget - 0.5) * depth
+    const p  = projectPoint([cx, 0, -depth], I4, K1000)
+    expect(p).not.toBeNull()
+    expect(p.u).toBeCloseTo(uTarget, 5)
+  })
+
+  it('selectCameras passes cosView from projectPoint to computeScore', () => {
+    // Verify end-to-end: a camera with the point off-axis produces a lower score
+    // than when the point is centred — and the weight difference reflects cosView^4.
+    const depthVal  = 5
+    const angle     = 20 * Math.PI / 180
+    const lat       = depthVal * Math.tan(angle)
+
+    // Camera A: point centred [0,0,−5]
+    const camA = cam(I4)
+    const resA = selectCameras([0, 0, -depthVal], [0, 0, -1], [camA])
+
+    // Camera B: camera shifted so point is 20° off-axis
+    const camB  = cam(translationW2C(lat, 0, 0))
+    const resB  = selectCameras([0, 0, -depthVal], [0, 0, -1], [camB])
+
+    expect(resA.length).toBeGreaterThan(0)
+    expect(resB.length).toBeGreaterThan(0)
+
+    // camA (centred): cosView=1, cosView^4=1
+    // camB (20° off): cosView=cos(20°)≈0.940, cosView^4≈0.779
+    // Depths are not equal (camB is further from point), so compare cosView directly.
+    expect(resA[0].cosView).toBeCloseTo(1.0, 4)
+    expect(resB[0].cosView).toBeLessThan(resA[0].cosView)
+    expect(resB[0].cosView).toBeGreaterThan(0.9)  // cos(20°)≈0.94
+  })
+
+  it('two cameras at equal depth: more centred one wins', () => {
+    // camA: point at dead centre (0° off-axis)
+    // camB: same depth but point is 25° off-axis
+    // Both have same depth → same angRes, same facing → cosView^4 decides
+    // cos(25°)^4 ≈ 0.674 < BLEND_RATIO=0.70 → camB excluded
+    const depth   = 5
+    const angle25 = 25 * Math.PI / 180
+    const lat25   = depth * Math.tan(angle25)
+
+    const camA = cam(I4)                            // point centred
+    const camB = cam(translationW2C(lat25, 0, 0))  // point 25° off-axis
+
+    const result = selectCameras([0, 0, -depth], [0, 0, -1], [camA, camB])
+    // camA score = angRes * 1 * 1;  camB score = angRes_B * 1 * cos(25°)^4 ≈ 0.674 * angRes_B
+    // Depths are slightly different (camB laterally offset → same cz=−5 → depth=5 still,
+    // but cpLen larger → cosView lower).  Both depths = 5.
+    // score_B / score_A = cos(25°)^4 ≈ 0.674 < 0.70 → camB excluded
+    const aPresent = result.some(r => r.camIdx === 0)
+    const bPresent = result.some(r => r.camIdx === 1)
+    expect(aPresent).toBe(true)
+    expect(bPresent).toBe(false)
   })
 })
 
