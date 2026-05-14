@@ -265,8 +265,11 @@ function makeProjFragShader(nCams) {
     #define N_CAMS      ${nCams}
     // WPA-4: tighter WTA blend — only top 50% of best-camera score contribute.
     #define BLEND_RATIO 0.50
-    // WPA-4: hard facing cutoff — cameras > 70° from surface normal are skipped.
-    #define MIN_FACING  0.35
+    // WPA-4: hard facing cutoff — cameras > 75° from surface normal are skipped.
+    // Lowered from 0.35 (70°) to 0.25 (75°): oblique cameras that pass this gate
+    // still get facing⁶ ≈ 0.0002, so they only contribute when NO better camera
+    // exists — preventing black speckle on near-vertical surfaces at scan edges.
+    #define MIN_FACING  0.25
 
     ${samplerDecls}
     uniform mat4      uW2C[N_CAMS];
@@ -331,7 +334,11 @@ function makeProjFragShader(nCams) {
         else if (ori == 2) { u = 1.0 - u0; v = 1.0 - v0;  }
         else if (ori == 3) { u = v0;        v = 1.0 - u0;  }
 
-        float mg = 0.06;
+        // WPA-4: 4% margin (was 6%) — accepts slightly more of the lens periphery.
+        // The 8% CPU pre-pass margin is intentionally stricter so the pre-pass
+        // underestimates coverage (conservative splat spacing) while the GPU
+        // fills in more area at render time.
+        float mg = 0.04;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
         // ── WPA-4 score = angRes × facing⁶ × cosView² × spinFactor² ──────
@@ -489,7 +496,7 @@ function minEigenvec3(c00, c01, c02, c11, c12, c22) {
 // This is depth-adaptive: close-up points get smaller splats (preserving detail),
 // distant points get larger splats (bridging the wider LiDAR return spacing).
 // Points not covered by any camera keep their geometry-density-based spacing.
-const MAX_PROJ_CAMS  = 16
+const MAX_PROJ_CAMS  = 24
 const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
 // Load a snapshot image via fetch (with auth headers) + canvas downscale.
@@ -562,6 +569,84 @@ async function loadSnapshotTex(url) {
   return tex
 }
 
+/**
+ * Select k snapshots from allSnaps using greedy farthest-point sampling on the
+ * camera forward-direction sphere.
+ *
+ * Why this beats temporal stride:
+ *   A room scan is typically shot by slowly rotating 360°.  Temporal stride
+ *   (every N-th frame) picks shots that happen to be N frames apart — but if
+ *   the user pauses on an interesting corner, those N frames all cover the same
+ *   wall.  Angular-diversity selection guarantees that the chosen k cameras
+ *   span the full set of unique viewing directions, covering every wall segment.
+ *
+ * Algorithm: O(total × k) greedy farthest-point on the unit sphere.
+ *   1. Seed with the snapshot whose forward vector is most "horizontal" (best
+ *      wall coverage candidate).
+ *   2. Repeatedly pick the snapshot farthest (in angle) from all already-selected
+ *      cameras — "farthest" = max(min angular distance to any selected camera).
+ *   3. Repeat until k cameras are chosen.
+ *
+ * @param {Array} allSnaps   Full snapshot array from the server.
+ * @param {number} k         Number of cameras to select.
+ * @returns {Array}          Subset of allSnaps, sorted by original index.
+ */
+function selectBestSnapshots(allSnaps, k) {
+  if (allSnaps.length <= k) return allSnaps
+
+  // Camera forward vector = −column 3 of c2w (col-major: indices 8,9,10)
+  // c2w is col-major 4×4: col0=[0..3], col1=[4..7], col2=[8..11], col3=[12..15]
+  // Camera looks in −Z in camera space, so forward in world = −c2w_col2 = −(c2w[8],c2w[9],c2w[10])
+  const fwds = allSnaps.map(s => {
+    const x = -s.c2w[8], y = -s.c2w[9], z = -s.c2w[10]
+    const len = Math.sqrt(x*x + y*y + z*z) || 1
+    return [x/len, y/len, z/len]
+  })
+
+  // Seed: pick the snapshot whose forward vector is most horizontal (smallest |y|).
+  // This biases toward wall-facing cameras as the starting point.
+  let seedIdx = 0, seedMinAbsY = Infinity
+  for (let i = 0; i < allSnaps.length; i++) {
+    const absY = Math.abs(fwds[i][1])
+    if (absY < seedMinAbsY) { seedMinAbsY = absY; seedIdx = i }
+  }
+
+  const selected = [seedIdx]
+  // minAngDist[i] = minimum angular distance (radians) from point i to any selected camera
+  const minAngDist = new Float32Array(allSnaps.length).fill(Math.PI)
+  minAngDist[seedIdx] = 0
+
+  // Init distances from seed
+  for (let i = 0; i < allSnaps.length; i++) {
+    if (i === seedIdx) continue
+    const dot = fwds[seedIdx][0]*fwds[i][0] + fwds[seedIdx][1]*fwds[i][1] + fwds[seedIdx][2]*fwds[i][2]
+    minAngDist[i] = Math.acos(Math.max(-1, Math.min(1, dot)))
+  }
+
+  const selectedSet = new Set([seedIdx])
+  for (let iter = 1; iter < k; iter++) {
+    // Pick the unselected snapshot with the LARGEST minimum angular distance from any selected
+    let best = -1, bestD = -1
+    for (let i = 0; i < allSnaps.length; i++) {
+      if (selectedSet.has(i)) continue
+      if (minAngDist[i] > bestD) { bestD = minAngDist[i]; best = i }
+    }
+    if (best < 0) break
+    selected.push(best)
+    selectedSet.add(best)
+    // Update minAngDist for all remaining candidates
+    for (let i = 0; i < allSnaps.length; i++) {
+      if (selectedSet.has(i)) continue
+      const dot = fwds[best][0]*fwds[i][0] + fwds[best][1]*fwds[i][1] + fwds[best][2]*fwds[i][2]
+      const d = Math.acos(Math.max(-1, Math.min(1, dot)))
+      if (d < minAngDist[i]) minAngDist[i] = d
+    }
+  }
+
+  // Return in original temporal order (so the shader sees them in a sensible sequence)
+  return selected.sort((a, b) => a - b).map(i => allSnaps[i])
+}
+
 async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress }) {
   onProgress?.(5, 'Loading snapshots…')
   let data
@@ -582,12 +667,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     onProgress?.(100, 'No snapshots found', false)
     return null
   }
-  onProgress?.(10, `Loading ${Math.min(allSnaps.length, MAX_PROJ_CAMS)} photo textures…`)
+  onProgress?.(10, `Selecting best ${Math.min(allSnaps.length, MAX_PROJ_CAMS)} of ${allSnaps.length} snapshots…`)
 
   let snaps = allSnaps
   if (snaps.length > MAX_PROJ_CAMS) {
-    const step = snaps.length / MAX_PROJ_CAMS
-    snaps = Array.from({ length: MAX_PROJ_CAMS }, (_, i) => allSnaps[Math.floor(i * step)])
+    snaps = selectBestSnapshots(allSnaps, MAX_PROJ_CAMS)
   }
 
   // Load textures via fetch+blob so we get proper auth and error visibility.
@@ -711,6 +795,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   normVox.clear()  // free memory
 
+  // covered/sampled: only count non-horizontal surfaces (walls, furniture).
+  // Floor and ceiling points have |ny| > 0.7 (normal mostly vertical) — a
+  // horizontal scan can never project onto them face-on, so including them in
+  // the denominator deflates the coverage % well below what is visually observed
+  // on the walls. The reported "Photo coverage" stat now reflects wall/surface
+  // coverage rather than total-point-cloud coverage.
   let covered = 0, sampled = 0
   let usedCamMask = 0
 
@@ -760,10 +850,17 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       photoSpacings[i] = Math.max(0.001, Math.min(0.08,
         bestDepth / (camFxArr[bestCamIdx] + 1e-4) * WEGTER_OVERLAP
       ))
-      covered++
       if (bestCamIdx < 30) usedCamMask |= (1 << bestCamIdx)
     }
-    sampled++
+    // Only include non-horizontal surfaces (walls, furniture) in coverage %.
+    // Floor/ceiling points (|ny| > 0.7) are excluded — their normals face up/down
+    // and cameras can never project onto them face-on from a standing room scan.
+    const nx_s = normals[i*3], ny_s = normals[i*3+1]
+    const isVertical = Math.abs(ny_s) < 0.70
+    if (isVertical) {
+      sampled++
+      if (bestCamIdx >= 0) covered++
+    }
   }
 
   // Fill un-sampled points by linear interpolation between bracketing samples
@@ -797,6 +894,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const usedCamCount = nCams <= 30
     ? [...Array(nCams)].filter((_, i) => usedCamMask & (1 << i)).length
     : nCams  // if >30 cams, assume all used (bitmask overflows)
+  const nSelected = snaps.length  // cameras actually loaded (≤ MAX_PROJ_CAMS)
 
   const medSpacingPx = photoSpacings.slice().sort()[Math.floor(nPts / 2)] ?? 0
   const medSpacingMm = Math.round(medSpacingPx * 1000)
@@ -833,24 +931,25 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material = projMat
 
   onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
-  console.info(`[projective] WPA-4: ${nCams} cams, ${usedCamCount} active, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
+  console.info(`[projective] WPA-4: ${nSelected}/${allSnaps.length} snaps selected, ${usedCamCount} active, ${coveragePct}% wall coverage, med splat ${medSpacingMm}mm`)
 
   if (diagRef) {
     diagRef.current = {
       ...diagRef.current,
       projective:      true,
       projCams:        nCams,
-      projTotal:       allSnaps.length,
-      projUsed:        usedCamCount,
+      projTotal:       allSnaps.length,   // total snapshots on server
+      projSelected:    nSelected,         // cameras loaded into GPU (≤ MAX_PROJ_CAMS)
+      projUsed:        usedCamCount,      // cameras that actually covered ≥ 1 point
       projCoverage:    coveragePct,
       wegterSpacingMm: medSpacingMm,
       projStatus:      null,
-      colourMethod:    `Photo projection WPA-4 (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
+      colourMethod:    `Photo projection WPA-4 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
     }
   }
   onDiagUpdate?.()
   onProgress?.(100, 'Photo projection complete', false)
-  return { nCams, projTotal: allSnaps.length, coveragePct, projUsed: usedCamCount }
+  return { nCams, projTotal: allSnaps.length, projSelected: nSelected, coveragePct, projUsed: usedCamCount }
 }
 
 // ── Mesh shaders (used when point cloud is rendered as a triangle mesh) ───────
@@ -2753,10 +2852,13 @@ export default function SpaceBuilderCanvas({
                 )}
                 {s.projective && (
                   <>
-                    <tr><td>Proj. cameras</td><td>{s.projUsed ?? s.projCams}/{s.projTotal}</td></tr>
+                    <tr><td>Proj. cameras</td><td>
+                      {s.projUsed ?? s.projCams}/{s.projSelected ?? s.projCams}
+                      <span className="sbc-diag-dim"> (of {s.projTotal} scanned)</span>
+                    </td></tr>
                     <tr><td>Photo coverage</td><td>
                       {s.projCoverage != null ? `${s.projCoverage}%` : '—'}
-                      <span className="sbc-diag-dim"> of surface pts</span>
+                      <span className="sbc-diag-dim"> of wall pts</span>
                     </td></tr>
                   </>
                 )}
