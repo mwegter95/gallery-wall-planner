@@ -1,5 +1,5 @@
 /**
- * Wegter Projection Algorithm v2.2 (WPA-2.2)
+ * Wegter Projection Algorithm v4 (WPA-4)
  *
  * Pure-JS reference implementation — mirrors the GLSL fragment shader exactly.
  * Importable for testing and for the CPU-side splat-spacing pre-pass.
@@ -27,13 +27,13 @@
  *   Penalises sampling from the edge of the camera's FOV where wide-angle
  *   lenses are most distorted.  Steep fall-off: 20°→0.78, 30°→0.56, 45°→0.25.
  *
- * New score = angRes × facing⁴ × cosView⁴
+ * WPA-2.2 score = angRes × facing⁴ × cosView⁴
  *
- * Both terms now carry equal ^4 weight, creating symmetric steep penalties for:
+ * Both terms carried equal ^4 weight, creating symmetric steep penalties for:
  *   "Spin"  — how much the camera is rotated relative to the wall normal.
  *   "Warp"  — how far from the camera's optical axis the wall point appears.
  * Combined, cameras beyond ~22° from either the wall normal or the optical
- * axis are excluded, eliminating the panoramic-circle smear.
+ * axis were excluded, eliminating the panoramic-circle smear.
  *
  * Exclusion summary with BLEND_RATIO = 0.70 and facing⁴ × cosView⁴:
  *   Camera yaw from wall normal:  > 25° → excluded (facing⁴ < 0.674)
@@ -62,27 +62,31 @@
  *   Fix: rotate the surface normal into camera space; cameras where the
  *   normal points away from the lens (normCam.z > 0) get zero score.
  *
- * WPA-2.2 SCORE FORMULA
- * ─────────────────────
- *   score = (fxRaw / (depth² + ε)) × max(0, −normCam.z)⁴ × cosView⁴
+ * WPA-4 SCORE FORMULA
+ * ────────────────────
+ *   score = (fxRaw / (depth² + ε)) × max(0, −normCam.z)⁶ × cosView² × spinFactor²
  *
  *   fxRaw / depth²          → angular resolution (pixels/m² at this depth).
  *                             Closer, higher-fx cameras win.
- *   max(0, −normCam.z)⁴    → spin alignment.  Camera looks in −Z; normal
+ *   max(0, −normCam.z)⁶    → spin alignment.  Camera looks in −Z; normal
  *                             must point toward camera (ncz < 0 → facing > 0).
- *                             Raised to 4th power (was 2nd): cameras > 25°
- *                             yawed from wall normal are now excluded.
- *   cosView⁴ where          → warp/on-axis quality.  Penalises sampling from
- *   cosView = depth/|cp|      the edge of the FOV.  Together with facing⁴,
- *                             both spin and warp create symmetric exclusion.
+ *                             Raised to 6th power (was 4th in v2.2): cameras
+ *                             beyond ~18° yawed from wall normal are excluded.
+ *   cosView² where          → warp/on-axis quality.  Penalises sampling from
+ *   cosView = depth/|cp|      the edge of the FOV.  Reduced from cosView⁴ because
+ *                             facing⁶ already rejects highly oblique cameras;
+ *                             cosView⁴ was doubly penalising edge-of-frame points.
+ *   spinFactor²             → in-plane "spin" alignment.  |dot(camY, surfaceUp)|
+ *                             penalises cameras rolled relative to the wall.
+ *                             spinFactor = 1.0 for face-on upright capture.
  *
  * SOFT WINNER-TAKES-ALL
  * ─────────────────────
  *   threshold = bestScore × BLEND_RATIO
  *   Only cameras with score ≥ threshold contribute.
- *   With BLEND_RATIO = 0.70 and facing⁴ × cosView⁴, cameras are excluded
- *   when yawed > 25° from wall normal OR when the point is > 22° off-axis.
- *   Blending weight = score³ for sharp but smooth seams.
+ *   With WPA4_BLEND_RATIO = 0.85 and facing⁶ × cosView² × spinFactor², the
+ *   effective acceptance window shrinks to ~18° yaw from the best camera.
+ *   Blending weight = score⁵ for sharp but smooth seams.
  *
  * ORIENTATION CONVENTION
  * ──────────────────────
@@ -100,7 +104,7 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 // WPA v2 legacy constants — kept for test backward-compatibility.
-/** Only blend cameras whose score is within this fraction of the best (WPA-2.2). */
+/** Legacy v2 blend ratio (WPA-2.2). The active default is WPA4_BLEND_RATIO (0.85). */
 export const WPA2_BLEND_RATIO = 0.70
 
 // ── WPA v4 constants (v4 improvements) ──────────────────────────────────────
@@ -215,36 +219,42 @@ export function rotateToCamera(v, w2c) {
 }
 
 /**
- * WPA-2.2 quality score for one camera–point pairing.
+ * WPA-4 quality score for one camera–point pairing.
  *
- *   score = angRes × facing⁴ × cosView⁴
+ *   score = angRes × facing⁶ × cosView² × spinFactor²
  *
  * where:
- *   angRes   = fxRaw / (depth² + ε)    [angular resolution, pixels/m²]
- *   facing   = max(0, −normCam.z)      ["spin" alignment: camera faces wall]
- *              Raised to 4th power (was 2nd in v2.1).  A camera 25° yawed
- *              from the wall normal scores facing⁴ ≈ 0.674 < BLEND_RATIO →
- *              excluded.  Tightens acceptance from ~33° to ~25°.
- *   cosView  = depth / |cp|            ["warp" quality: point near FOV centre]
- *              default 1.0 when not available (e.g., unit tests that only
- *              have depth and not the full camera-space vector)
+ *   angRes     = fxRaw / (depth² + ε)    [angular resolution, pixels/m²]
+ *   facing     = max(0, −normCam.z)      ["spin" alignment: camera faces wall]
+ *                Raised to 6th power (was 4th in WPA-2.2).  Cameras beyond
+ *                ~18° yawed from the wall normal are now excluded.
+ *   cosView    = depth / |cp|            ["warp" quality: point near FOV centre]
+ *                Reduced to cosView² (was cosView⁴) because facing⁶ already
+ *                rejects highly oblique cameras.
+ *                default 1.0 when not available (e.g., unit tests that only
+ *                have depth and not the full camera-space vector)
+ *   spinFactor = |dot(camY_world, surfaceUp)|  [in-plane roll alignment]
+ *                Penalises cameras rolled relative to the wall surface.
+ *                default 1.0 (no spin penalty when not provided).
  *
- * @param {number}              depth     Distance from camera to point (m).
- * @param {number}              fxRaw     Raw focal length in pixels.
- * @param {[number,number,number]} surfNorm  World-space surface normal (unit).
- * @param {number[16]}          w2c       Column-major world→camera matrix.
- * @param {number}              [cosView=1]  cos(off-axis angle) from projectPoint.
+ * @param {number}              depth       Distance from camera to point (m).
+ * @param {number}              fxRaw       Raw focal length in pixels.
+ * @param {[number,number,number]} surfNorm World-space surface normal (unit).
+ * @param {number[16]}          w2c         Column-major world→camera matrix.
+ * @param {number}              [cosView=1]    cos(off-axis angle) from projectPoint.
+ * @param {number}              [spinFactor=1] |dot(camY, surfaceUp)| roll alignment.
  * @returns {number}  Score ≥ 0; 0 means this camera must not contribute.
  */
-export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1) {
+export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1, spinFactor = 1.0) {
   const angRes = fxRaw / (depth * depth + 0.001)
   const [, , ncz] = rotateToCamera(surfNorm, w2c)
   // Camera looks in −Z; surface normal must point toward camera (ncz < 0).
   const facing = Math.max(0, -ncz)
   const f2  = facing * facing
   const cv2 = cosView * cosView
-  // WPA-2.2: facing⁴ × cosView⁴ — symmetric "spin × warp" penalty
-  return angRes * f2 * f2 * cv2 * cv2
+  const sf2 = spinFactor * spinFactor
+  // WPA-4: facing⁶ × cosView² × spinFactor²
+  return angRes * f2 * f2 * f2 * cv2 * sf2
 }
 
 // ─── Camera selection (WPA-2 soft WTA) ───────────────────────────────────────

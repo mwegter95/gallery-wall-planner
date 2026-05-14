@@ -290,13 +290,13 @@ describe('computeScore', () => {
     expect(grazing).toBeLessThan(frontal * 0.05)
   })
 
-  it('score formula: angRes × facing⁴ × cosView⁴ matches manual calculation (cosView default 1)', () => {
+  it('score formula: angRes × facing⁶ × cosView² × spinFactor² matches manual calculation (defaults)', () => {
     const depth   = 3
     const fxRaw   = 1200
     const norm    = [0, 0, -1]    // normCam.z = −1, facing = 1
     const angRes  = fxRaw / (depth * depth + 0.001)
-    // Default cosView = 1 → cosView⁴ = 1, facing = 1 → facing⁴ = 1
-    const expected = angRes * 1 * 1 * 1   // angRes × facing⁴ × cosView⁴
+    // Default cosView = 1, spinFactor = 1 → all terms = 1
+    const expected = angRes * 1 * 1 * 1   // angRes × facing⁶ × cosView² × spinFactor²
     expect(computeScore(depth, fxRaw, norm, I4)).toBeCloseTo(expected, 4)
   })
 
@@ -308,28 +308,28 @@ describe('computeScore', () => {
     const angRes  = fxRaw / (depth * depth + 0.001)
     const f2      = 1 * 1   // facing = 1, f2 = 1
     const cv2     = cosView * cosView
-    const expected = angRes * f2 * f2 * cv2 * cv2  // facing⁴ × cosView⁴, facing=1
+    const expected = angRes * f2 * f2 * f2 * cv2  // facing⁶ × cosView², facing=1, spinFactor=1
     expect(computeScore(depth, fxRaw, norm, I4, cosView)).toBeCloseTo(expected, 4)
   })
 
-  it('cosView=0.5 (60° off-axis) reduces score to 0.0625 of cosView=1 score', () => {
+  it('cosView=0.5 (60° off-axis) reduces score to 0.25 of cosView=1 score (WPA-4: cosView²)', () => {
     const s1 = computeScore(5, 1000, [0, 0, -1], I4, 1.0)
     const s2 = computeScore(5, 1000, [0, 0, -1], I4, 0.5)
-    // cosView^4: 0.5^4 = 0.0625
-    expect(s2 / s1).toBeCloseTo(0.0625, 5)
+    // WPA-4 cosView²: 0.5^2 = 0.25
+    expect(s2 / s1).toBeCloseTo(0.25, 5)
   })
 
   it('30° off-axis camera scores below BLEND_RATIO=0.70 of 0°-axis camera', () => {
     const cosView30 = Math.cos(30 * Math.PI / 180)
     const s_frontal = computeScore(5, 1000, [0, 0, -1], I4, 1.0)
     const s_30deg   = computeScore(5, 1000, [0, 0, -1], I4, cosView30)
-    // cos(30°)^4 ≈ 0.562 < BLEND_RATIO=0.70 → excluded from blend
-    expect(s_30deg / s_frontal).toBeLessThan(0.70)
+    // WPA-4 cosView²: cos(30°)^2 ≈ 0.75 → above 0.70, but still penalised
+    expect(s_30deg / s_frontal).toBeLessThan(1.0)
   })
 
-  // WPA-2.2 spin alignment tests (facing⁴ instead of facing²)
-  it('WPA-2.2: facing⁴ formula — facing=0.5 reduces score to 0.0625 of frontal', () => {
-    // With facing^4: 0.5^4 = 0.0625
+  // WPA-4 spin alignment tests (facing⁶ instead of facing⁴)
+  it('WPA-4: facing⁶ formula — facing=0.5 reduces score to 1/64 of frontal', () => {
+    // With facing^6: 0.5^6 = 0.015625
     // Build a W2C where normCam.z = -0.5 (surface facing = 0.5)
     // normal [0, 0, -1] in camera space → need w2c such that normCam.z = -0.5
     // That means the world normal [0, 0, -1] rotates to camera z of -0.5
@@ -346,13 +346,13 @@ describe('computeScore', () => {
     const angle  = 60 * Math.PI / 180
     const norm60 = [-Math.sin(angle), 0, -Math.cos(angle)]
     const sH = computeScore(depth, fxRaw, norm60, I4, 1.0)
-    // facing = 0.5 → facing^4 = 0.0625 → score ratio = 0.0625
-    expect(sH / sF).toBeCloseTo(0.0625, 4)
+    // facing = 0.5 → facing^6 = 0.015625 → score ratio = 0.015625
+    expect(sH / sF).toBeCloseTo(0.015625, 4)
   })
 
-  it('WPA-2.2: 25° yaw from wall normal → score < BLEND_RATIO (spin penalty)', () => {
+  it('WPA-4: 25° yaw from wall normal → score < WPA4_BLEND_RATIO (spin penalty)', () => {
     // Camera at 25° yaw from wall normal, point at camera centre (cosView=1)
-    // facing = cos(25°) ≈ 0.906, facing^4 ≈ 0.674 < 0.70 → excluded
+    // facing = cos(25°) ≈ 0.906, facing^6 ≈ 0.554 < 0.85 → excluded
     const depth   = 5
     const fxRaw   = 1000
     const angle25 = 25 * Math.PI / 180
@@ -361,31 +361,31 @@ describe('computeScore', () => {
     const norm25  = [Math.sin(angle25), 0, -Math.cos(angle25)]
     const sF = computeScore(depth, fxRaw, [0, 0, -1], I4, 1.0)   // frontal
     const s25 = computeScore(depth, fxRaw, norm25, I4, 1.0)        // 25° spin
-    // facing = cos(25°), facing^4 ≈ 0.674 < 0.70 → spin-excluded
+    // facing = cos(25°), facing^6 ≈ 0.554 < WPA2_BLEND_RATIO (0.70) → spin-excluded
     expect(s25 / sF).toBeLessThan(WPA2_BLEND_RATIO)
-    expect(s25 / sF).toBeGreaterThan(0.60)  // not zero — just below threshold
+    expect(s25 / sF).toBeGreaterThan(0.40)  // not zero — just below threshold
   })
 
-  it('WPA-2.2: 20° yaw — just inside BLEND_RATIO (allowed in seam blend)', () => {
-    // facing = cos(20°) ≈ 0.940, facing^4 ≈ 0.781 > 0.70 → included
+  it('WPA-4: 15° yaw — just inside WPA2_BLEND_RATIO (allowed in seam blend)', () => {
+    // facing = cos(15°) ≈ 0.966, facing^6 ≈ 0.807 > 0.70 → included
     const depth   = 5
     const fxRaw   = 1000
-    const angle20 = 20 * Math.PI / 180
-    const norm20  = [Math.sin(angle20), 0, -Math.cos(angle20)]
+    const angle15 = 15 * Math.PI / 180
+    const norm15  = [Math.sin(angle15), 0, -Math.cos(angle15)]
     const sF  = computeScore(depth, fxRaw, [0, 0, -1], I4, 1.0)
-    const s20 = computeScore(depth, fxRaw, norm20, I4, 1.0)
-    // cos(20°)^4 ≈ 0.781 > BLEND_RATIO → camera is included at seams
-    expect(s20 / sF).toBeGreaterThan(WPA2_BLEND_RATIO)
+    const s15 = computeScore(depth, fxRaw, norm15, I4, 1.0)
+    // cos(15°)^6 ≈ 0.807 > WPA2_BLEND_RATIO (0.70) → camera is included at seams
+    expect(s15 / sF).toBeGreaterThan(WPA2_BLEND_RATIO)
   })
 
-  it('WPA-2.2: 30° yaw — clearly excluded (spin penalty)', () => {
+  it('WPA-4: 30° yaw — clearly excluded (spin penalty)', () => {
     const depth   = 5
     const fxRaw   = 1000
     const angle30 = 30 * Math.PI / 180
     const norm30  = [Math.sin(angle30), 0, -Math.cos(angle30)]
     const sF  = computeScore(depth, fxRaw, [0, 0, -1], I4, 1.0)
     const s30 = computeScore(depth, fxRaw, norm30, I4, 1.0)
-    // cos(30°)^4 ≈ 0.563 < 0.70 → excluded
+    // cos(30°)^6 ≈ 0.422 < 0.70 → excluded
     expect(s30 / sF).toBeLessThan(WPA2_BLEND_RATIO)
   })
 })

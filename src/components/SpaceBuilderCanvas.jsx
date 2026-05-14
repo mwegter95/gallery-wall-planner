@@ -175,7 +175,7 @@ const SPLAT_FRAG = /* glsl */`
 // shader so it can project each sub-pixel of the disc onto the camera images.
 
 const SPLAT_VERT_PROJ = /* glsl */`
-  // WPA-3: per-point surface normal from CPU PCA (Jacobi on local LiDAR voxels).
+  // WPA-4: per-point surface normal from CPU PCA (Jacobi on local LiDAR voxels).
   // Replaces the procedural room-centre radial approximation that mis-classified
   // wall points near corners and let opposite-wall cameras bleed through.
   attribute float aLocalSpacing;
@@ -214,21 +214,21 @@ const SPLAT_VERT_PROJ = /* glsl */`
   }
 `
 
-// makeProjFragShader — Wegter Projection Algorithm v3 (WPA-3)
+// makeProjFragShader — Wegter Projection Algorithm v4 (WPA-4)
 //
-// WPA-3 over WPA-2.2:
+// WPA-4 over WPA-2.2:
 //
 //   BUG FIX — V-axis double-flip removed
 //     WPA-2.x sampled at vec2(u, 1.0 − v).  With flipY=false textures the
 //     mapping is already correct (v=0 = top of image); the extra (1−v) caused
 //     every photo to appear vertically mirrored / 180°-rotated on the wall.
-//     WPA-3 samples directly at vec2(u, v).
+//     WPA-4 samples directly at vec2(u, v).
 //
 //   BUG FIX — Per-point PCA normals replace procedural room-centre radial
 //     WPA-2 estimated surface normals as "outward from room centre in XZ".
 //     This is wrong for any non-axis-aligned surface and allows cameras
 //     looking at the opposite wall to contribute non-zero facing scores for
-//     corner / edge points.  WPA-3 uses per-point normals pre-computed on the
+//     corner / edge points.  WPA-4 uses per-point normals pre-computed on the
 //     CPU via Jacobi eigendecomposition of the 27-voxel-neighbourhood
 //     covariance matrix (see minEigenvec3 + upgradeProjectiveTexturing JS).
 //
@@ -263,9 +263,9 @@ function makeProjFragShader(nCams) {
     precision highp float;
     precision highp int;
     #define N_CAMS      ${nCams}
-    // WPA-3: tighter WTA blend — only top 50% of best-camera score contribute.
+    // WPA-4: tighter WTA blend — only top 50% of best-camera score contribute.
     #define BLEND_RATIO 0.50
-    // WPA-3: hard facing cutoff — cameras > 70° from surface normal are skipped.
+    // WPA-4: hard facing cutoff — cameras > 70° from surface normal are skipped.
     #define MIN_FACING  0.35
 
     ${samplerDecls}
@@ -273,7 +273,7 @@ function makeProjFragShader(nCams) {
     uniform vec4      uCamK[N_CAMS];    // (fx_n, fy_n, cx_n, cy_n) normalised
     uniform float     uCamFx[N_CAMS];  // raw fx (pixels) for angular-res score
     uniform float     uCamOri[N_CAMS]; // 0=landscape, 1=portrait 90°CW
-    // WPA-3: camera Y axis in world space (c2w column 1) for spin-alignment score
+    // WPA-4: camera Y axis in world space (c2w column 1) for spin-alignment score
     uniform vec3      uCamY[N_CAMS];
     uniform int       uDiagMode;
     uniform float     uYOffset;
@@ -296,7 +296,7 @@ function makeProjFragShader(nCams) {
       // sub-pixel of a splat gets the same UV — no smearing as camera moves.
       vec3 fragRaw = vec3(vWorldPos.x, vWorldPos.y - uYOffset, vWorldPos.z);
 
-      // WPA-3: surface "up" = worldUp projected onto the surface plane.
+      // WPA-4: surface "up" = worldUp projected onto the surface plane.
       // Used by the spin-alignment score.  For floor/ceiling (normal ≈ worldUp)
       // surfUpLen → 0 and spinFactor is clamped to 1 (no spin penalty).
       vec3 worldUp  = vec3(0.0, 1.0, 0.0);
@@ -334,7 +334,7 @@ function makeProjFragShader(nCams) {
         float mg = 0.06;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
-        // ── WPA-3 score = angRes × facing⁶ × cosView² × spinFactor² ──────
+        // ── WPA-4 score = angRes × facing⁶ × cosView² × spinFactor² ──────
         //
         // angRes: angular resolution at this depth — closer / higher-fx wins.
         float angRes  = uCamFx[i] / (depth * depth + 0.001);
@@ -344,7 +344,7 @@ function makeProjFragShader(nCams) {
         //   • Hard cutoff at MIN_FACING (≈70° incidence) pre-filters far-off cameras.
         vec3  normCam  = (uW2C[i] * vec4(vNorm, 0.0)).xyz;
         float facing   = max(0.0, -normCam.z);
-        if (facing < MIN_FACING) continue;   // WPA-3: hard cutoff
+        if (facing < MIN_FACING) continue;   // WPA-4: hard cutoff
         float f2       = facing * facing;
         float f6       = f2 * f2 * f2;      // facing⁶
 
@@ -373,7 +373,7 @@ function makeProjFragShader(nCams) {
       }
 
       // ── Pass 2: soft winner-takes-all blend ───────────────────────────────
-      // WPA-3: BLEND_RATIO 0.50 + score⁵ weight → typically 1-2 cameras win.
+      // WPA-4: BLEND_RATIO 0.50 + score⁵ weight → typically 1-2 cameras win.
       vec3  accColor  = vec3(0.0);
       float accWeight = 0.0;
 
@@ -383,7 +383,7 @@ function makeProjFragShader(nCams) {
           if (scores_arr[i] < thresh) continue;
           float w3 = scores_arr[i] * scores_arr[i] * scores_arr[i];
           float w  = w3 * scores_arr[i] * scores_arr[i]; // score⁵
-          // WPA-3 BUG FIX: sample at (u, v) — NOT (u, 1−v).
+          // WPA-4 BUG FIX: sample at (u, v) — NOT (u, 1−v).
           // The old (1−v) was a double-flip: the projection formula already
           // accounts for image-Y-down vs camera-Y-up, and flipY=false means
           // v=0 in the shader directly maps to the top row of the JPEG.
@@ -430,7 +430,7 @@ function applyUvOrientation(u0, v0, ori) {
 // ── Jacobi eigendecomposition for 3×3 symmetric matrix ───────────────────────
 // Returns the eigenvector corresponding to the MINIMUM eigenvalue — this is the
 // surface normal direction (the direction of least point-cloud variance).
-// Used by WPA-3 to estimate per-point normals from the LiDAR voxel grid.
+// Used by WPA-4 to estimate per-point normals from the LiDAR voxel grid.
 //
 // Algorithm: cyclic Jacobi sweeps (10 iterations, converges to ε < 1e-10).
 // Input:  6 unique elements of the symmetric matrix A
@@ -617,7 +617,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // ── WPA-2 photo-projection spacing pre-pass ─────────────────────────────
   // Sample ~20 K points; for each find the best camera using the WPA-2 score
   // (angular resolution × surface-facing²) and compute the Wegter splat diameter.
-  // ── WPA-3: extract camera Y axes for spin-alignment uniform ───────────────
+  // ── WPA-4: extract camera Y axes for spin-alignment uniform ───────────────
   // Camera Y axis in world = column 1 of c2w = elements [4,5,6] (column-major).
   const camYArr = snaps.map(({ c2w }) =>
     new THREE.Vector3(c2w[4], c2w[5], c2w[6]).normalize())
@@ -634,7 +634,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const roomCX  = oldUni.uRoomCX?.value  ?? 0
   const roomCZ  = oldUni.uRoomCZ?.value  ?? 0
 
-  // ── WPA-3: Per-point surface normal estimation via local PCA ────────────
+  // ── WPA-4: Per-point surface normal estimation via local PCA ────────────
   // Build a 15 cm voxel grid, accumulate position sums and cross-products per
   // cell, then for each point aggregate its 3×3×3 neighbourhood into a 3×3
   // covariance matrix and Jacobi-solve for the minimum eigenvector (= normal).
@@ -696,7 +696,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   for (let i = 0; i < nPts; i += sampleStep) {
     const xr = posAttr.getX(i), yr = posAttr.getY(i), zr = posAttr.getZ(i)
 
-    // WPA-3: use PCA-estimated per-point normal
+    // WPA-4: use PCA-estimated per-point normal
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
 
     let bestScore = 0, bestDepth = 0, bestCamIdx = -1
@@ -713,7 +713,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
       if (u < 0.06 || u > 0.94 || v < 0.06 || v > 0.94) continue
-      // WPA-3 score: angRes × facing⁶ × cosView² × spinFactor² (mirrors GLSL)
+      // WPA-4 score: angRes × facing⁶ × cosView² × spinFactor² (mirrors GLSL)
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
       const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz
       const facing   = Math.max(0, -normCamZ)
@@ -722,7 +722,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
       const cv2      = cosView * cosView
-      // Spin factor: camera Y dot surface-up (WPA-3 in-plane alignment)
+      // Spin factor: camera Y dot surface-up (WPA-4 in-plane alignment)
       const camYx = camYArr[ci].x, camYy = camYArr[ci].y, camYz = camYArr[ci].z
       // surfaceUp = worldUp − dot(worldUp,normal)*normal; worldUp=(0,1,0)
       const dotUp = ny  // dot((0,1,0), normal)
@@ -758,7 +758,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
-  // ── Update geometry attributes (spacing + WPA-3 per-point normals) ──────
+  // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
   const oldSpacingAttr = points.geometry.attributes.aLocalSpacing
   if (oldSpacingAttr && oldSpacingAttr.array.length === nPts) {
     oldSpacingAttr.array.set(photoSpacings)
@@ -802,7 +802,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       uCamK:     { value: camKVec },
       uCamFx:    { value: camFxArr },
       uCamOri:   { value: camOriArr },
-      uCamY:     { value: camYArr },   // WPA-3 spin alignment
+      uCamY:     { value: camYArr },   // WPA-4 spin alignment
       ...camTexUniforms,
     },
   })
@@ -811,7 +811,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material = projMat
 
   onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
-  console.info(`[projective] WPA-3: ${nCams} cams, ${usedCamCount} active, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
+  console.info(`[projective] WPA-4: ${nCams} cams, ${usedCamCount} active, ${coveragePct}% covered, med splat ${medSpacingMm}mm`)
 
   if (diagRef) {
     diagRef.current = {
@@ -823,7 +823,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projCoverage:    coveragePct,
       wegterSpacingMm: medSpacingMm,
       projStatus:      null,
-      colourMethod:    `Photo projection WPA-3 (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
+      colourMethod:    `Photo projection WPA-4 (${usedCamCount}/${nCams} cams, ${coveragePct}% pts)`,
     }
   }
   onDiagUpdate?.()
@@ -1721,42 +1721,65 @@ export default function SpaceBuilderCanvas({
           reportRoomLoad(24, 'Using cached scan data')
           buf = pc._buffer
         } else if (pc?.url) {
-          // Fetch directly from the upload URL — serve_wall_upload decrypts on the fly.
-          // Routing through the /pointcloud/download endpoint blocks on Python gzip(240MB)
-          // per-request, which is slower than serving the raw decrypted bytes directly.
-          const resp = await fetch(pc.url.startsWith('/') ? `${BASE}${pc.url}` : pc.url)
-          if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
-          // Prefer X-Uncompressed-Length (set when server gzip-encodes) so the
-          // streaming buffer is sized for the decoded bytes, not the wire bytes.
-          const totalBytes = Number(
-            resp.headers.get('x-uncompressed-length') ||
-            resp.headers.get('content-length') || 0
-          )
+          const pcUrl = pc.url.startsWith('/') ? `${BASE}${pc.url}` : pc.url
+          const authH  = { 'X-Device-Token': getDeviceToken() }
+          const jwt    = getJwt?.()
+          if (jwt) { authH['Authorization'] = `Bearer ${jwt}`; authH['X-Auth-Token'] = jwt }
+
+          // 1. HEAD to discover size and Range support (no Accept-Encoding so bytes are plaintext)
+          const head = await fetch(pcUrl, { method: 'HEAD', headers: authH })
+          if (!head.ok) throw new Error(`Point cloud HEAD failed: ${head.status}`)
+          const totalBytes  = parseInt(head.headers.get('Content-Length') || '0', 10)
+          const rangeOk     = head.headers.get('Accept-Ranges') === 'bytes' && totalBytes > 0
+
           let ab
-          if (resp.body?.getReader && totalBytes > 0) {
-            const reader = resp.body.getReader()
+          if (rangeOk) {
+            // 2a. 4 parallel range fetches
+            const N     = 4
+            const chunk = Math.ceil(totalBytes / N)
+            reportRoomLoad(4, 'Downloading scan (4 parallel chunks)…')
+            const bufs = await Promise.all(
+              Array.from({ length: N }, (_, i) => {
+                const start = i * chunk
+                const end   = Math.min(start + chunk - 1, totalBytes - 1)
+                return fetch(pcUrl, { headers: { ...authH, 'Range': `bytes=${start}-${end}` } })
+                  .then(r => {
+                    if (r.status !== 206 && r.status !== 200)
+                      throw new Error(`Point cloud chunk ${i} failed: ${r.status}`)
+                    return r.arrayBuffer()
+                  })
+              })
+            )
             const merged = new Uint8Array(totalBytes)
-            let received = 0
-            while (true) {
-              const { done, value } = await reader.read()
-              if (done) break
-              if (!value) continue
-              const end = Math.min(totalBytes, received + value.byteLength)
-              merged.set(value.subarray(0, end - received), received)
-              received += value.byteLength
-              if (!cancelled) {
-                reportRoomLoad(4 + (34 * received / totalBytes), 'Downloading scan')
-              }
-            }
-            // Use slice() so ab is a correctly-sized copy rather than the full
-            // backing buffer (subarray().buffer returns the original full buffer).
-            ab = received >= totalBytes
-              ? merged.buffer
-              : merged.slice(0, Math.max(0, Math.min(received, totalBytes))).buffer
+            let off = 0
+            for (const b of bufs) { merged.set(new Uint8Array(b), off); off += b.byteLength }
+            ab = merged.buffer
+            reportRoomLoad(38, 'Scan downloaded')
           } else {
-            reportRoomLoad(14, 'Downloading scan')
-            ab = await resp.arrayBuffer()
-            reportRoomLoad(38, 'Download complete')
+            // 2b. Fallback: single streaming fetch (server doesn't support Range yet)
+            const resp = await fetch(pcUrl, { headers: authH })
+            if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
+            const sizeHint = parseInt(
+              resp.headers.get('x-uncompressed-length') ||
+              resp.headers.get('content-length') || '0', 10
+            )
+            if (resp.body?.getReader && sizeHint > 0) {
+              const reader = resp.body.getReader()
+              const merged = new Uint8Array(sizeHint)
+              let received = 0
+              while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                if (!value) continue
+                const end = Math.min(sizeHint, received + value.byteLength)
+                merged.set(value.subarray(0, end - received), received)
+                received += value.byteLength
+                if (!cancelled) reportRoomLoad(4 + (34 * received / sizeHint), 'Downloading scan…')
+              }
+              ab = merged.buffer
+            } else {
+              ab = await resp.arrayBuffer()
+            }
           }
           const arr = new Float32Array(ab)
           const inferredCount = Math.floor(arr.length / 6)
