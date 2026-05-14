@@ -1487,19 +1487,10 @@ export default function SpaceBuilderCanvas({
           reportRoomLoad(24, 'Using cached scan data')
           buf = pc._buffer
         } else if (pc?.url) {
-          // Use the dedicated download endpoint (always gzip-compressed by Flask).
-          // pc.url points to /uploads/ which nginx may serve without compression.
-          const jwt    = getJwt()
-          const device = getDeviceToken()
-          const downloadUrl = roomId
-            ? `${BASE}/api/rooms/${roomId}/pointcloud/download`
-            : pc.url
-          const resp = await fetch(downloadUrl, {
-            headers: {
-              'X-Device-Token': device,
-              ...(jwt ? { Authorization: `Bearer ${jwt}`, 'X-Auth-Token': jwt } : {}),
-            },
-          })
+          // Fetch directly from the upload URL — serve_wall_upload decrypts on the fly.
+          // Routing through the /pointcloud/download endpoint blocks on Python gzip(240MB)
+          // per-request, which is slower than serving the raw decrypted bytes directly.
+          const resp = await fetch(pc.url.startsWith('/') ? `${BASE}${pc.url}` : pc.url)
           if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
           // Prefer X-Uncompressed-Length (set when server gzip-encodes) so the
           // streaming buffer is sized for the decoded bytes, not the wire bytes.
