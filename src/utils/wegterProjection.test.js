@@ -810,17 +810,26 @@ describe('WPA-2.2 spin × warp sub-algorithm', () => {
     expect(result.some(r => r.camIdx === 1)).toBe(false)
   })
 
-  it('15° yaw (on-axis point) — within acceptance cone', () => {
-    // cos(15°)^8 ≈ 0.769 > 0.70 → included for smooth seam blending
+  it('15° yaw (on-axis point) — within WPA-2.2 cone, outside WPA-v4 cone', () => {
+    // cos(15°)^8 ≈ 0.769
+    //   WPA-2.2 (BLEND_RATIO=0.70): 0.769 > 0.70 → included
+    //   WPA-v4  (BLEND_RATIO=0.85): 0.769 < 0.85 → excluded (tighter cone)
     const depth   = 5
     const angle   = 15 * Math.PI / 180
     const c15 = Math.cos(angle), s15 = Math.sin(angle)
     const w2cYaw15 = [c15,0,s15,0, 0,1,0,0, -s15,0,c15,0, 0,0,0,1]
     const camB = cam(w2cYaw15)
     const norm = [0, 0, -1]
-    const result = selectCameras([0, 0, -depth], norm, [cam(I4), camB])
-    expect(result.some(r => r.camIdx === 0)).toBe(true)
-    expect(result.some(r => r.camIdx === 1)).toBe(true)
+
+    // WPA-2.2 behavior: pass old ratio explicitly
+    const r22 = selectCameras([0, 0, -depth], norm, [cam(I4), camB], WPA2_BLEND_RATIO)
+    expect(r22.some(r => r.camIdx === 0)).toBe(true)
+    expect(r22.some(r => r.camIdx === 1)).toBe(true)  // included at 0.70
+
+    // WPA-v4 behavior: default ratio (0.85) excludes the 15°-yawed camera
+    const r4 = selectCameras([0, 0, -depth], norm, [cam(I4), camB])
+    expect(r4.some(r => r.camIdx === 0)).toBe(true)
+    expect(r4.some(r => r.camIdx === 1)).toBe(false)  // excluded at 0.85
   })
 
   it('30° yaw — clearly outside acceptance cone', () => {

@@ -99,8 +99,31 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Only blend cameras whose score is within this fraction of the best. */
+// WPA v2 legacy constants — kept for test backward-compatibility.
+/** Only blend cameras whose score is within this fraction of the best (WPA-2.2). */
 export const WPA2_BLEND_RATIO = 0.70
+
+// ── WPA v4 constants (v4 improvements) ──────────────────────────────────────
+/**
+ * WPA-v4 tighter soft-WTA blend ratio (0.85).
+ *
+ * Raising from 0.70 → 0.85 narrows the window of contributing cameras,
+ * reducing the weighted-average blur at seam boundaries.  Analogous to
+ * tightening the bandwidth of a Nadaraya-Watson kernel smoother: fewer
+ * cameras blend → sharper but still smooth transitions.
+ *
+ * Combined with score⁵ weighting (was score³) the effective acceptance
+ * window shrinks from ~25° down to ~18° yaw from the best camera.
+ */
+export const WPA4_BLEND_RATIO = 0.85
+
+/**
+ * Fallback UV margin for the two-pass coverage system.
+ * First pass uses WPA2_UV_MARGIN (0.08).  If no camera covers a point,
+ * a second pass retries with this reduced margin — accepting slight
+ * lens-edge distortion rather than leaving the vertex uncolored.
+ */
+export const WPA4_UV_MARGIN_FALLBACK = 0.03
 
 /** Splat covers this many camera-pixel-widths at the point's depth.        */
 export const WPA2_OVERLAP = 2.5
@@ -229,11 +252,18 @@ export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1) {
 /**
  * Select the cameras that should contribute color to a given world point.
  *
- * Implements WPA-2 soft winner-takes-all:
- *   1. Project the point CENTER into every camera.
+ * Implements WPA-v4 soft winner-takes-all:
+ *   1. Project the point CENTER into every camera (first pass: margin=WPA2_UV_MARGIN).
  *   2. Score each in-frustum, forward-facing projection.
- *   3. Find bestScore; reject cameras below bestScore × BLEND_RATIO.
- *   4. Blend survivors weighted by score³.
+ *   3. Find bestScore; reject cameras below bestScore × blendRatio.
+ *   4. Blend survivors weighted by score⁵ (was score³ in v2.2).
+ *   Two-pass UV margin fallback: if no camera covers the point at margin=0.08,
+ *   retry with margin=WPA4_UV_MARGIN_FALLBACK (0.03) before returning empty.
+ *
+ * WPA-v4 changes vs v2.2:
+ *   • blendRatio default: 0.70 → 0.85  (tighter WTA, fewer cameras blend)
+ *   • score weight:       score³ → score⁵  (sharper single-winner preference)
+ *   • two-pass UV margin: 0.08 first, 0.03 fallback for uncolored edge cases
  *
  * @param {[number,number,number]} worldPos   World-space position.
  * @param {[number,number,number]} surfNorm   World-space surface normal (unit).
@@ -243,7 +273,7 @@ export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1) {
  *   fxRaw:  number,
  *   ori:    0|1|2|3,
  * }>} cameras
- * @param {number} [blendRatio]  Override WPA2_BLEND_RATIO for this call.
+ * @param {number} [blendRatio]  Override WPA4_BLEND_RATIO for this call.
  * @returns {Array<{
  *   camIdx: number,
  *   u:      number,
@@ -255,18 +285,35 @@ export function computeScore(depth, fxRaw, surfNorm, w2c, cosView = 1) {
  *   Contributing cameras, sorted best-first.  Empty array = no camera covers
  *   this point.  Weights are normalised to sum to 1.
  */
-export function selectCameras(worldPos, surfNorm, cameras, blendRatio = WPA2_BLEND_RATIO) {
-  const candidates = []
-  let bestScore = 0
+export function selectCameras(worldPos, surfNorm, cameras, blendRatio = WPA4_BLEND_RATIO) {
+  /**
+   * One pass: project every camera at the given UV margin and collect scored candidates.
+   * Returns { candidates, bestScore }.
+   */
+  function runPass(margin) {
+    const cands = []
+    let best = 0
+    for (let i = 0; i < cameras.length; i++) {
+      const { w2c, kNorm, fxRaw, ori } = cameras[i]
+      const proj = projectPoint(worldPos, w2c, kNorm, ori, margin)
+      if (!proj) continue
+      const score = computeScore(proj.depth, fxRaw, surfNorm, w2c, proj.cosView)
+      if (score <= 0) continue
+      cands.push({ camIdx: i, ...proj, score })
+      if (score > best) best = score
+    }
+    return { cands, best }
+  }
 
-  for (let i = 0; i < cameras.length; i++) {
-    const { w2c, kNorm, fxRaw, ori } = cameras[i]
-    const proj = projectPoint(worldPos, w2c, kNorm, ori)
-    if (!proj) continue
-    const score = computeScore(proj.depth, fxRaw, surfNorm, w2c, proj.cosView)
-    if (score <= 0) continue
-    candidates.push({ camIdx: i, ...proj, score })
-    if (score > bestScore) bestScore = score
+  // First pass: strict margin (avoids most-distorted periphery)
+  let { cands: candidates, best: bestScore } = runPass(WPA2_UV_MARGIN)
+
+  // Two-pass UV margin fallback: if nothing found, retry with reduced margin.
+  // Accepts slight lens-edge distortion rather than leaving the vertex uncolored.
+  if (bestScore <= 0) {
+    const fb = runPass(WPA4_UV_MARGIN_FALLBACK)
+    candidates = fb.cands
+    bestScore  = fb.best
   }
 
   if (bestScore <= 0) return []
@@ -274,8 +321,13 @@ export function selectCameras(worldPos, surfNorm, cameras, blendRatio = WPA2_BLE
   const thresh = bestScore * blendRatio
   const survivors = candidates.filter(p => p.score >= thresh)
 
-  // Compute score³ weights and normalise
-  const rawWeights = survivors.map(p => p.score * p.score * p.score)
+  // WPA-v4: score⁵ weighting (was score³) — sharper single-winner preference.
+  // Higher exponent = the best camera dominates more strongly, reducing
+  // weighted-average blur from secondary cameras near seams.
+  const rawWeights = survivors.map(p => {
+    const s2 = p.score * p.score
+    return s2 * s2 * p.score  // score⁵
+  })
   const totalW = rawWeights.reduce((s, w) => s + w, 0)
 
   return survivors
@@ -305,7 +357,17 @@ export function selectCameras(worldPos, surfNorm, cameras, blendRatio = WPA2_BLE
  * @param {number} [overlap]  Override WPA2_OVERLAP for this call.
  * @returns {number}  Splat diameter in metres.
  */
-export function wegterSplatDiameter(depth, fxRaw, overlap = WPA2_OVERLAP) {
+export function wegterSplatDiameter(depth, fxRaw, overlap = WPA2_OVERLAP, nnDist = null) {
+  // WPA-v4: adaptive splat sizing via nearest-neighbor distance.
+  // When nnDist is provided (from computeNeighborDistances), use the actual
+  // point-cloud spacing instead of the fixed pixel-footprint formula.
+  // This shrinks splats in dense regions (removes blur) and expands them in
+  // sparse regions (fills gaps) — analogous to Voronoi cell sizing.
+  if (nnDist != null && nnDist > 0) {
+    // Diameter = 2× the nearest-neighbor distance so each splat reaches its
+    // neighbor's center, ensuring gapless coverage.
+    return Math.max(WPA2_SPLAT_MIN_M, Math.min(WPA2_SPLAT_MAX_M, nnDist * 2.0))
+  }
   const raw = depth / (fxRaw + 1e-4) * overlap
   return Math.max(WPA2_SPLAT_MIN_M, Math.min(WPA2_SPLAT_MAX_M, raw))
 }
@@ -339,4 +401,118 @@ export function applyOrientation(u0, v0, ori) {
   if (ori === 2) return [1 - u0, 1 - v0]
   if (ori === 3) return [v0,     1 - u0]
   return [u0, v0]
+}
+
+// ─── WPA-v4 utilities ─────────────────────────────────────────────────────────
+
+/**
+ * Smooth a surface normal by weighted-averaging with neighboring normals.
+ *
+ * The facing⁴ term in WPA-2.2+ is highly sensitive to normal accuracy:
+ * a 10° noise error changes the score by (cos10°)⁴ ≈ 0.78, potentially
+ * pushing marginal cameras below the blend threshold.  LiDAR normals
+ * typically have 5-10° of inherent noise (the normal is the eigenvector
+ * for the smallest eigenvalue of the local covariance — the least stable).
+ *
+ * This function averages nearby normals that are within `angularThresholdDeg`
+ * of the input normal, discarding inconsistent neighbors (surface boundaries,
+ * noise spikes).  The result is a more stable normal for WPA scoring.
+ *
+ * Analogy: this is a Laplacian bilateral filter on the normal field — the
+ * bilateral weight prevents smoothing across surface discontinuities.
+ *
+ * @param {[number,number,number]}    normal             Input surface normal (unit vector).
+ * @param {[number,number,number][]}  neighborNormals    Normals of nearby points.
+ * @param {number} [angularThresholdDeg=30]  Max angle (°) for a neighbor to contribute.
+ * @returns {[number,number,number]}  Smoothed, normalized surface normal.
+ */
+export function smoothSurfaceNormal(normal, neighborNormals, angularThresholdDeg = 30) {
+  const cosThresh = Math.cos(angularThresholdDeg * Math.PI / 180)
+  let sx = normal[0], sy = normal[1], sz = normal[2]
+  for (const nn of neighborNormals) {
+    // Only include neighbors pointing in roughly the same direction (same surface).
+    const dot = normal[0]*nn[0] + normal[1]*nn[1] + normal[2]*nn[2]
+    if (dot >= cosThresh) {
+      sx += nn[0]; sy += nn[1]; sz += nn[2]
+    }
+  }
+  const len = Math.sqrt(sx*sx + sy*sy + sz*sz)
+  return len > 1e-6 ? [sx/len, sy/len, sz/len] : [normal[0], normal[1], normal[2]]
+}
+
+/**
+ * Compute approximate per-point nearest-neighbor distances using a voxel hash grid.
+ *
+ * This enables adaptive splat sizing in wegterSplatDiameter: instead of the
+ * fixed depth/fxRaw formula, each splat is sized to reach its closest
+ * neighbor — like Voronoi cell sizing.  Dense regions get smaller splats
+ * (less blur) and sparse regions get larger splats (no gaps).
+ *
+ * Complexity: O(n) average using a spatial hash with expected ~8 points/cell.
+ *
+ * @param {Float32Array | number[]} positions  [x,y,z, x,y,z, …] in world space.
+ * @param {number}                  n          Number of points.
+ * @returns {Float32Array}  Per-point nearest-neighbor distance, length = n.
+ */
+export function computeNeighborDistances(positions, n) {
+  if (n === 0) return new Float32Array(0)
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  for (let i = 0; i < n; i++) {
+    const b = i * 3
+    const x = positions[b], y = positions[b+1], z = positions[b+2]
+    if (x < minX) minX = x;  if (x > maxX) maxX = x
+    if (y < minY) minY = y;  if (y > maxY) maxY = y
+    if (z < minZ) minZ = z;  if (z > maxZ) maxZ = z
+  }
+
+  // Choose cell size so each cell contains ~8 points on average.
+  const vol = Math.max(1e-9, (maxX-minX) * (maxY-minY+1e-9) * (maxZ-minZ+1e-9))
+  const cellSize = Math.max(1e-5, Math.cbrt(vol / n) * 2.0)
+  const invCell = 1 / cellSize
+
+  // Spatial hash: integer voxel key → list of point indices
+  const grid = new Map()
+  for (let i = 0; i < n; i++) {
+    const b = i * 3
+    const ix = (positions[b]   - minX) * invCell | 0
+    const iy = (positions[b+1] - minY) * invCell | 0
+    const iz = (positions[b+2] - minZ) * invCell | 0
+    // Pack three 20-bit integers into a BigInt key for a collision-free hash.
+    const key = (BigInt(ix) << 42n) | (BigInt(iy) << 21n) | BigInt(iz)
+    const cell = grid.get(key)
+    if (cell) cell.push(i)
+    else grid.set(key, [i])
+  }
+
+  const nnDists = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    const b = i * 3
+    const px = positions[b], py = positions[b+1], pz = positions[b+2]
+    const ix = (px - minX) * invCell | 0
+    const iy = (py - minY) * invCell | 0
+    const iz = (pz - minZ) * invCell | 0
+    let minD2 = Infinity
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const key = (BigInt(ix+dx) << 42n) | (BigInt(iy+dy) << 21n) | BigInt(iz+dz)
+          const cell = grid.get(key)
+          if (!cell) continue
+          for (const j of cell) {
+            if (j === i) continue
+            const bj = j * 3
+            const ex = positions[bj]   - px
+            const ey = positions[bj+1] - py
+            const ez = positions[bj+2] - pz
+            const d2 = ex*ex + ey*ey + ez*ez
+            if (d2 < minD2) minD2 = d2
+          }
+        }
+      }
+    }
+    nnDists[i] = minD2 === Infinity ? cellSize : Math.sqrt(minD2)
+  }
+  return nnDists
 }
