@@ -492,6 +492,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     vertexColors: true,
     depthWrite:   true,
     depthTest:    true,
+    glslVersion:  THREE.GLSL3,
     vertexShader:   SPLAT_VERT_PROJ,
     fragmentShader: makeProjFragShader(nCams),
     uniforms: {
