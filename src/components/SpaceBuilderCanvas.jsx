@@ -216,21 +216,38 @@ const SPLAT_VERT_PROJ = /* glsl */`
   }
 `
 
-// makeProjFragShader(nCams) — template the camera count at shader-compile time
-// so the sampler array has a fixed size (GLSL requirement) while staying
-// as small as possible to respect hardware texture-unit limits.
+// makeProjFragShader(nCams) — generates a GLSL ES 1.00-compatible fragment shader.
+//
+// WHY no glslVersion THREE.GLSL3:
+//   iOS Safari / WebKit has a long-standing bug where gl_PointCoord is broken
+//   (wrong origin or zeroed-out) when the fragment shader is compiled as GLSL ES
+//   3.00 (#version 300 es).  Every fragment then lands outside the circular clip
+//   (dot(pc,pc) > 0.25) and is discarded → blank canvas.
+//
+// WHY per-camera samplers instead of sampler2D uCamTex[N]:
+//   GLSL ES 1.00 requires constant-expression indices for sampler arrays.
+//   Dynamic indexing (texture2D(arr[i], uv) where i is a loop var) is only
+//   guaranteed in GLSL ES 3.00.  We stay in GLSL ES 1.00 and emit one
+//   uniform per camera with a static if-chain dispatch function — zero runtime
+//   branching cost because the GPU compiler turns each taken branch into a
+//   single texture fetch.
 function makeProjFragShader(nCams) {
+  const samplerDecls = Array.from({ length: nCams }, (_, i) =>
+    `uniform sampler2D uCamTex${i};`).join('\n    ')
+
+  const sampleCases = Array.from({ length: nCams }, (_, i) =>
+    `if (idx == ${i}) return texture2D(uCamTex${i}, uv).rgb;`).join('\n      ')
+
   return /* glsl */`
     precision highp float;
     precision highp int;
     #define N_CAMS ${nCams}
 
-    uniform sampler2D uCamTex[N_CAMS];
+    ${samplerDecls}
     uniform mat4      uW2C[N_CAMS];
     uniform vec4      uCamK[N_CAMS];   // (fx_n, fy_n, cx_n, cy_n) — normalised
     uniform float     uCamFx[N_CAMS];  // raw fx for pixel-density score
-    uniform float     uCamOri[N_CAMS]; // 0,1,2,3 => 0/90/180/270
-    uniform int       uNCams;
+    uniform float     uCamOri[N_CAMS]; // 0=landscape, 1=portrait 90°CW
     uniform int       uDiagMode;
     uniform float     uYOffset;
 
@@ -238,28 +255,26 @@ function makeProjFragShader(nCams) {
     varying vec3  vWorldPos;
     varying float vSplatR;
 
+    vec3 sampleCam(int idx, vec2 uv) {
+      ${sampleCases}
+      return vec3(0.0);
+    }
+
     void main() {
       vec2 pc = gl_PointCoord - 0.5;
       if (dot(pc, pc) > 0.25) discard;
 
-      // Reconstruct fragment world position from splat centre + screen-aligned disc offset.
       vec3 camRight = normalize(vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]));
       vec3 camUp    = normalize(vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]));
       float splatDiam = vSplatR * 2.0;
       vec3 fragScene = vWorldPos
         + (gl_PointCoord.x - 0.5) * splatDiam * camRight
         - (gl_PointCoord.y - 0.5) * splatDiam * camUp;
-      // Undo uYOffset to get raw ARKit coordinates for camera projection.
       vec3 fragRaw = vec3(fragScene.x, fragScene.y - uYOffset, fragScene.z);
 
-      // Weighted blend across all cameras: pixel-density score = fx * depth / r².
-      // ARKit convention: camera looks along -Z; visible if z < -0.05.
-      // K is normalised by image size so UV lands in [0,1].
-      // V is flipped (ARKit top-down vs OpenGL bottom-up).
       vec3  accColor  = vec3(0.0);
       float accWeight = 0.0;
       for (int i = 0; i < N_CAMS; i++) {
-        if (i >= uNCams) break;
         vec4  cp    = uW2C[i] * vec4(fragRaw, 1.0);
         if (cp.z >= -0.05) continue;
         float depth = -cp.z;
@@ -268,25 +283,14 @@ function makeProjFragShader(nCams) {
         float u = u0;
         float v = v0;
         int ori = int(floor(uCamOri[i] + 0.5));
-        if (ori == 1) {
-          u = 1.0 - v0;
-          v = u0;
-        } else if (ori == 2) {
-          u = 1.0 - u0;
-          v = 1.0 - v0;
-        } else if (ori == 3) {
-          u = v0;
-          v = 1.0 - u0;
-        }
-        float mg    = 0.02;
+        if (ori == 1) { u = 1.0 - v0; v = u0; }
+        else if (ori == 2) { u = 1.0 - u0; v = 1.0 - v0; }
+        else if (ori == 3) { u = v0;       v = 1.0 - u0; }
+        float mg = 0.02;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
-        // Wegter photo-projection score: angular resolution (camFx / depth²).
-        // Squaring the score creates winner-take-most blending in a single pass:
-        // a camera at half the distance scores 4× higher linear → 16× in the blend.
         float score = uCamFx[i] / (depth * depth + 0.01);
         float w     = score * score;
-        vec3 texCol = texture2D(uCamTex[i], vec2(u, 1.0 - v)).rgb;
-        accColor  += texCol * w;
+        accColor  += sampleCam(i, vec2(u, 1.0 - v)) * w;
         accWeight += w;
       }
 
@@ -339,10 +343,18 @@ function applyUvOrientation(u0, v0, ori) {
 const MAX_PROJ_CAMS  = 16
 const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
-// Load a snapshot image via fetch (with auth headers) + blob URL so the
-// request always goes through the Flask API route where CORS headers are set.
-// Using <img> via TextureLoader directly hits /uploads/ which nginx may serve
-// without CORS headers, causing the browser to silently block cross-origin reads.
+// Load a snapshot image via fetch (with auth headers) + canvas downscale.
+//
+// Why fetch instead of TextureLoader directly:
+//   The snapshot URL goes through /api/ (Flask-CORS), not /uploads/ (nginx,
+//   no CORS headers).  The fetch sends auth headers and gets a proper response.
+//
+// Why canvas downscale to 1024px:
+//   16 ARKit photos at native 4032×3024 = ~800 MB GPU texture memory on iOS —
+//   well past the point where WebGL context loss becomes likely.  At 1024px max
+//   each texture is ~4 MB → 16 × 4 MB = 64 MB total, well within iOS limits.
+//   Projection quality is limited by point density, not texture resolution.
+const SNAP_TEX_MAX_PX = 1024
 async function loadSnapshotTex(url) {
   const jwt    = getJwt()
   const device = getDeviceToken()
@@ -355,14 +367,28 @@ async function loadSnapshotTex(url) {
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`)
   const blob   = await resp.blob()
   const objUrl = URL.createObjectURL(blob)
-  return new Promise((resolve, reject) => {
-    new THREE.TextureLoader().load(
-      objUrl,
-      tex => { URL.revokeObjectURL(objUrl); tex.flipY = false; resolve(tex) },
-      undefined,
-      err => { URL.revokeObjectURL(objUrl); reject(err) },
-    )
+
+  // Load into an Image to get natural dimensions, then paint onto a
+  // size-capped canvas so the GPU upload is always ≤ SNAP_TEX_MAX_PX².
+  const img = await new Promise((res, rej) => {
+    const el = new Image()
+    el.onload  = () => res(el)
+    el.onerror = rej
+    el.src = objUrl
   })
+  URL.revokeObjectURL(objUrl)
+
+  const scale = Math.min(1, SNAP_TEX_MAX_PX / Math.max(img.naturalWidth, img.naturalHeight))
+  const w = Math.round(img.naturalWidth  * scale)
+  const h = Math.round(img.naturalHeight * scale)
+  const canvas = document.createElement('canvas')
+  canvas.width  = w
+  canvas.height = h
+  canvas.getContext('2d').drawImage(img, 0, 0, w, h)
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.flipY = false
+  return tex
 }
 
 async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress }) {
@@ -520,11 +546,15 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const medSpacingPx = photoSpacings.slice().sort()[Math.floor(nPts / 2)] ?? 0
   const medSpacingMm = Math.round(medSpacingPx * 1000)
 
+  // Per-camera sampler uniforms: uCamTex0, uCamTex1, …
+  // (No GLSL3 → no dynamic array indexing → no iOS gl_PointCoord bug)
+  const camTexUniforms = {}
+  textures.forEach((tex, i) => { camTexUniforms[`uCamTex${i}`] = { value: tex } })
+
   const projMat = new THREE.ShaderMaterial({
     vertexColors: true,
     depthWrite:   true,
     depthTest:    true,
-    glslVersion:  THREE.GLSL3,
     vertexShader:   SPLAT_VERT_PROJ,
     fragmentShader: makeProjFragShader(nCams),
     uniforms: {
@@ -535,12 +565,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       uRoomCX:   { value: oldUni.uRoomCX?.value ?? 0 },
       uRoomCZ:   { value: oldUni.uRoomCZ?.value ?? 0 },
       uDiagMode: { value: 0 },
-      uNCams:    { value: nCams },
-      uCamTex:   { value: textures },
       uW2C:      { value: w2cMats },
       uCamK:     { value: camKVec },
       uCamFx:    { value: camFxArr },
       uCamOri:   { value: camOriArr },
+      ...camTexUniforms,
     },
   })
 
@@ -1458,16 +1487,12 @@ export default function SpaceBuilderCanvas({
           reportRoomLoad(24, 'Using cached scan data')
           buf = pc._buffer
         } else if (pc?.url) {
-          // Always use the dedicated download endpoint when we have a roomId — it
-          // runs through Flask which gzip-compresses at level 1 (~50% size reduction).
-          // Falling back to pc.url (a static /uploads/ path) bypasses Flask and is
-          // served raw by nginx, making large scans take minutes instead of seconds.
+          // Use the dedicated download endpoint (always gzip-compressed by Flask).
+          // pc.url points to /uploads/ which nginx may serve without compression.
           const jwt    = getJwt()
           const device = getDeviceToken()
-          // Cap at 4M points for download: 4M×24B = 96MB raw → ~60MB gzip.
-          // Server subsamples evenly so spatial coverage is maintained.
           const downloadUrl = roomId
-            ? `${BASE}/api/rooms/${roomId}/pointcloud/download?maxPoints=4000000`
+            ? `${BASE}/api/rooms/${roomId}/pointcloud/download`
             : pc.url
           const resp = await fetch(downloadUrl, {
             headers: {
