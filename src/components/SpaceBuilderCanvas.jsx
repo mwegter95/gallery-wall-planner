@@ -186,6 +186,7 @@ const SPLAT_VERT_PROJ = /* glsl */`
   varying vec3  vColor;
   varying vec3  vWorldPos;
   varying float vSplatR;
+  varying vec3  vNorm;
 
   void main() {
     vColor = color;
@@ -203,6 +204,8 @@ const SPLAT_VERT_PROJ = /* glsl */`
       float len = max(length(vec2(dx, dz)), 0.001);
       norm = vec3(dx / len, 0.0, dz / len);
     }
+
+    vNorm = norm;
 
     vec3  mvN         = normalize(normalMatrix * norm);
     float cosView     = max(0.30, abs(mvN.z));
@@ -231,6 +234,27 @@ const SPLAT_VERT_PROJ = /* glsl */`
 //   uniform per camera with a static if-chain dispatch function — zero runtime
 //   branching cost because the GPU compiler turns each taken branch into a
 //   single texture fetch.
+// makeProjFragShader — Wegter Projection Algorithm v2 (WPA-2)
+//
+// Three v1 bugs fixed:
+//   1. Point-center projection: use vWorldPos directly instead of spreading
+//      each fragment across the disc in view-space.  The old spread caused
+//      disc edges to project to completely different camera UVs, smearing
+//      textures across every splat as the camera moved.
+//
+//   2. Surface-normal facing check: rotate vNorm into each camera's space and
+//      test normCam.z < 0 (surface faces the camera, which looks in −Z).
+//      Cameras seeing the surface from behind get zero score and are excluded.
+//
+//   3. Soft winner-takes-all blend: in pass 1 collect scores for all cameras;
+//      in pass 2 only sample cameras within BLEND_RATIO of the best score,
+//      weighted by score³.  This eliminates multi-camera ghosting/double-imaging
+//      while still blending smoothly at true seam boundaries.
+//
+// GLSL ES 1.00 constraints respected:
+//   • No glslVersion THREE.GLSL3 (iOS Safari/WebKit gl_PointCoord bug at ES 3.00)
+//   • No dynamic sampler-array indexing → per-camera uniform + static if-chain
+//   • Local float/int arrays (non-opaque) ARE safely indexed by loop vars in ES 1.00
 function makeProjFragShader(nCams) {
   const samplerDecls = Array.from({ length: nCams }, (_, i) =>
     `uniform sampler2D uCamTex${i};`).join('\n    ')
@@ -241,12 +265,13 @@ function makeProjFragShader(nCams) {
   return /* glsl */`
     precision highp float;
     precision highp int;
-    #define N_CAMS ${nCams}
+    #define N_CAMS     ${nCams}
+    #define BLEND_RATIO 0.70
 
     ${samplerDecls}
     uniform mat4      uW2C[N_CAMS];
-    uniform vec4      uCamK[N_CAMS];   // (fx_n, fy_n, cx_n, cy_n) — normalised
-    uniform float     uCamFx[N_CAMS];  // raw fx for pixel-density score
+    uniform vec4      uCamK[N_CAMS];   // (fx_n, fy_n, cx_n, cy_n) normalised
+    uniform float     uCamFx[N_CAMS];  // raw fx (pixels) for angular-resolution score
     uniform float     uCamOri[N_CAMS]; // 0=landscape, 1=portrait 90°CW
     uniform int       uDiagMode;
     uniform float     uYOffset;
@@ -254,6 +279,7 @@ function makeProjFragShader(nCams) {
     varying vec3  vColor;
     varying vec3  vWorldPos;
     varying float vSplatR;
+    varying vec3  vNorm;
 
     vec3 sampleCam(int idx, vec2 uv) {
       ${sampleCases}
@@ -264,34 +290,68 @@ function makeProjFragShader(nCams) {
       vec2 pc = gl_PointCoord - 0.5;
       if (dot(pc, pc) > 0.25) discard;
 
-      vec3 camRight = normalize(vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]));
-      vec3 camUp    = normalize(vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]));
-      float splatDiam = vSplatR * 2.0;
-      vec3 fragScene = vWorldPos
-        + (gl_PointCoord.x - 0.5) * splatDiam * camRight
-        - (gl_PointCoord.y - 0.5) * splatDiam * camUp;
-      vec3 fragRaw = vec3(fragScene.x, fragScene.y - uYOffset, fragScene.z);
+      // WPA-2 FIX 1: project the point CENTER only.
+      // Using the per-fragment disc position (old code) caused each sub-pixel of
+      // the splat to sample a different UV from every camera, smearing the texture
+      // across the whole disc.  Every fragment in the disc now gets the same color.
+      vec3 fragRaw = vec3(vWorldPos.x, vWorldPos.y - uYOffset, vWorldPos.z);
 
-      vec3  accColor  = vec3(0.0);
-      float accWeight = 0.0;
+      // ── Pass 1: score every camera, cache UV ─────────────────────────────
+      float scores_arr[N_CAMS];
+      float us_arr[N_CAMS];
+      float vs_arr[N_CAMS];
+      float bestScore = 0.0;
+
       for (int i = 0; i < N_CAMS; i++) {
+        scores_arr[i] = 0.0;
+        us_arr[i]     = 0.0;
+        vs_arr[i]     = 0.0;
+
         vec4  cp    = uW2C[i] * vec4(fragRaw, 1.0);
         if (cp.z >= -0.05) continue;
         float depth = -cp.z;
-        float u0    = uCamK[i].x * cp.x / depth + uCamK[i].z;
-        float v0    = uCamK[i].y * (-cp.y) / depth + uCamK[i].w;
-        float u = u0;
-        float v = v0;
-        int ori = int(floor(uCamOri[i] + 0.5));
-        if (ori == 1) { u = 1.0 - v0; v = u0; }
-        else if (ori == 2) { u = 1.0 - u0; v = 1.0 - v0; }
-        else if (ori == 3) { u = v0;       v = 1.0 - u0; }
-        float mg = 0.02;
+
+        float u0 = uCamK[i].x * cp.x / depth + uCamK[i].z;
+        float v0 = uCamK[i].y * (-cp.y) / depth + uCamK[i].w;
+        float u  = u0;
+        float v  = v0;
+        int   ori = int(floor(uCamOri[i] + 0.5));
+        if      (ori == 1) { u = 1.0 - v0; v = u0;        }
+        else if (ori == 2) { u = 1.0 - u0; v = 1.0 - v0;  }
+        else if (ori == 3) { u = v0;        v = 1.0 - u0;  }
+
+        float mg = 0.04;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
-        float score = uCamFx[i] / (depth * depth + 0.01);
-        float w     = score * score;
-        accColor  += sampleCam(i, vec2(u, 1.0 - v)) * w;
-        accWeight += w;
+
+        // WPA-2 FIX 2: angular resolution × surface-facing² score.
+        // Rotate vNorm into camera space — camera looks in −Z, so a normal
+        // pointing toward the camera has normCam.z < 0 (facing = −normCam.z > 0).
+        // Cameras where the surface faces away get facing=0 → excluded.
+        float angRes  = uCamFx[i] / (depth * depth + 0.001);
+        vec3  normCam = (uW2C[i] * vec4(vNorm, 0.0)).xyz;
+        float facing  = max(0.0, -normCam.z);
+        float score   = angRes * facing * facing;
+
+        scores_arr[i] = score;
+        us_arr[i]     = u;
+        vs_arr[i]     = v;
+        bestScore     = max(bestScore, score);
+      }
+
+      // ── Pass 2: soft WTA blend ────────────────────────────────────────────
+      // WPA-2 FIX 3: only blend cameras within BLEND_RATIO of the best score.
+      // score³ weighting sharpens the blend further so 1–2 cameras dominate.
+      vec3  accColor  = vec3(0.0);
+      float accWeight = 0.0;
+
+      if (bestScore > 0.001) {
+        float thresh = bestScore * BLEND_RATIO;
+        for (int i = 0; i < N_CAMS; i++) {
+          if (scores_arr[i] < thresh) continue;
+          float w = scores_arr[i] * scores_arr[i] * scores_arr[i];
+          accColor  += sampleCam(i, vec2(us_arr[i], 1.0 - vs_arr[i])) * w;
+          accWeight += w;
+        }
       }
 
       vec3 col;
@@ -465,23 +525,44 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     return ih > iw ? 1.0 : 0.0   // portrait JPEG → ori 1 (90° CW)
   }))
 
-  // ── Wegter photo-projection spacing ────────────────────────────────────
-  // Sample ~20 K points; for each find the best camera (angular resolution
-  // score = camFx / depth²) and compute the Wegter splat diameter.
-  // un-sampled points are filled by nearest-sample propagation.
+  // ── WPA-2 photo-projection spacing pre-pass ─────────────────────────────
+  // Sample ~20 K points; for each find the best camera using the WPA-2 score
+  // (angular resolution × surface-facing²) and compute the Wegter splat diameter.
+  // Un-sampled points are filled by linear interpolation between bracketing samples.
   const posAttr    = points.geometry.attributes.position
   const nPts       = posAttr.count
   const sampleStep = Math.max(1, Math.floor(nPts / 20000))
   const w2cElems   = w2cMats.map(m => m.elements)
   const photoSpacings = new Float32Array(nPts)
 
+  // Approximate room geometry for surface-normal estimation (matches vertex shader).
+  const floorY  = oldUni.uFloorY?.value  ?? -0.1
+  const ceilY   = oldUni.uCeilY?.value   ?? 3.0
+  const roomCX  = oldUni.uRoomCX?.value  ?? 0
+  const roomCZ  = oldUni.uRoomCZ?.value  ?? 0
+
   let covered = 0, sampled = 0
-  let usedCamMask = 0  // bitmask of cameras that contributed ≥1 point
+  let usedCamMask = 0
 
   for (let i = 0; i < nPts; i += sampleStep) {
     const xr = posAttr.getX(i)
     const yr = posAttr.getY(i)
     const zr = posAttr.getZ(i)
+
+    // Approximate surface normal (same logic as SPLAT_VERT_PROJ vertex shader)
+    let nx = 0, ny = 0, nz = 0
+    if (yr <= floorY) {
+      ny = 1
+    } else if (yr >= ceilY) {
+      ny = -1
+    } else {
+      const dx  = xr - roomCX
+      const dz  = zr - roomCZ
+      const len = Math.max(Math.sqrt(dx*dx + dz*dz), 0.001)
+      nx = dx / len
+      nz = dz / len
+    }
+
     let bestScore = 0, bestDepth = 0, bestCamIdx = -1
 
     for (let ci = 0; ci < nCams; ci++) {
@@ -495,16 +576,19 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const u0 = k.x * cpx / depth + k.z
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (u < 0.02 || u > 0.98 || v < 0.02 || v > 0.98) continue
-      // Angular resolution score: closer, higher-fx cameras win strongly
-      const score = camFxArr[ci] / (depth * depth + 0.01)
+      if (u < 0.04 || u > 0.96 || v < 0.04 || v > 0.96) continue
+      // WPA-2 score: angular resolution × surface-facing²
+      const angRes  = camFxArr[ci] / (depth * depth + 0.001)
+      const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz  // rotation only (w=0)
+      const facing   = Math.max(0, -normCamZ)
+      const score    = angRes * facing * facing
       if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci }
     }
 
     if (bestCamIdx >= 0) {
-      // Wegter photo-projection equation:
-      //   splatDiam = depth / camFx * OVERLAP
-      // This matches the splat size to the camera pixel footprint at that depth.
+      // Wegter splat-diameter equation: depth / camFx × OVERLAP
+      // Ties splat size to camera pixel footprint at this depth so adjacent
+      // splats always overlap slightly and leave no coverage gaps.
       photoSpacings[i] = Math.max(0.001, Math.min(0.08,
         bestDepth / (camFxArr[bestCamIdx] + 1e-4) * WEGTER_OVERLAP
       ))
