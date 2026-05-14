@@ -1464,8 +1464,10 @@ export default function SpaceBuilderCanvas({
           // served raw by nginx, making large scans take minutes instead of seconds.
           const jwt    = getJwt()
           const device = getDeviceToken()
+          // Cap at 4M points for download: 4M×24B = 96MB raw → ~60MB gzip.
+          // Server subsamples evenly so spatial coverage is maintained.
           const downloadUrl = roomId
-            ? `${BASE}/api/rooms/${roomId}/pointcloud/download`
+            ? `${BASE}/api/rooms/${roomId}/pointcloud/download?maxPoints=4000000`
             : pc.url
           const resp = await fetch(downloadUrl, {
             headers: {
