@@ -362,11 +362,12 @@ function makeProjFragShader(nCams) {
         else if (ori == 2) { u = 1.0 - u0; v = 1.0 - v0;  }
         else if (ori == 3) { u = v0;        v = 1.0 - u0;  }
 
-        // WPA-4: 4% margin (was 6%) — accepts slightly more of the lens periphery.
-        // The 8% CPU pre-pass margin is intentionally stricter so the pre-pass
-        // underestimates coverage (conservative splat spacing) while the GPU
-        // fills in more area at render time.
-        float mg = 0.04;
+        // Ultra-wide guardrail: when fx/fw is small (~0.40), pinhole projection
+        // is less reliable near image periphery (lens distortion / off-axis error).
+        // Increase UV margin for UW cameras while keeping wide cameras unchanged.
+        float fxn = uCamK[i].x;
+        float uwT = clamp((0.52 - fxn) / 0.18, 0.0, 1.0); // 0=wide, 1=ultra-wide
+        float mg = mix(0.08, 0.20, uwT);
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
         // ── WPA-5 score = angRes × facing⁶ × cosView⁴ × spinFactor² ──────
@@ -394,8 +395,12 @@ function makeProjFragShader(nCams) {
         //   duplication (same fix as WPA-2.1 which first eliminated this artifact).
         float cpLen   = length(cp.xyz);
         float cosView = cpLen > 0.001 ? depth / cpLen : 0.0;
+        float minCosView = mix(0.35, 0.62, uwT);
+        if (cosView < minCosView) continue;
         float cv2     = cosView * cosView;
         float cv4     = cv2 * cv2;   // cosView⁴
+        float cv8     = cv4 * cv4;
+        float cv      = mix(cv4, cv8, uwT); // stronger off-axis penalty for UW
 
         // spinFactor²: how well the camera's "up" aligns with the surface's "up".
         //   Perfect face-on capture with phone upright = spinFactor 1.0.
@@ -406,7 +411,7 @@ function makeProjFragShader(nCams) {
         float spinFactor = max(0.25, spinRaw);
         float sf2        = spinFactor * spinFactor;
 
-        float score = angRes * f6 * cv4 * sf2;
+        float score = angRes * f6 * cv * sf2;
 
         scores_arr[i] = score;
         us_arr[i]     = u;
@@ -1020,7 +1025,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const u0 = k.x * cpx / depth + k.z
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (u < 0.08 || u > 0.92 || v < 0.08 || v > 0.92) { uvFail++; continue }
+      const fxn = k.x
+      const uwT = Math.max(0, Math.min(1, (0.52 - fxn) / 0.18))
+      const mg = 0.08 + (0.20 - 0.08) * uwT
+      if (u < mg || u > 1 - mg || v < mg || v > 1 - mg) { uvFail++; continue }
 
       // ── Occlusion culling: reject if a closer point exists in this camera ──
       // Uses the pre-built 128×128 depth map.  15 cm tolerance handles LiDAR
@@ -1043,8 +1051,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const f6       = Math.pow(facing, 6)
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
+      const minCosView = 0.35 + (0.62 - 0.35) * uwT
+      if (cosView < minCosView) continue
       const cv2      = cosView * cosView
       const cv4      = cv2 * cv2   // cosView⁴
+      const cv8      = cv4 * cv4
+      const cv       = cv4 + (cv8 - cv4) * uwT
       // Spin factor: camera Y dot surface-up (WPA-4 in-plane alignment)
       const camYx = camYArr[ci].x, camYy = camYArr[ci].y, camYz = camYArr[ci].z
       // surfaceUp = worldUp − dot(worldUp,normal)*normal; worldUp=(0,1,0)
@@ -1053,7 +1065,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const suLen = Math.sqrt(sux*sux + suy*suy + suz*suz)
       const spinRaw = suLen > 0.01 ? Math.abs((camYx*sux + camYy*suy + camYz*suz)/suLen) : 1
       const sf2 = Math.max(0.25, spinRaw) ** 2
-      const score = angRes * f6 * cv4 * sf2
+      const score = angRes * f6 * cv * sf2
       if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing }
 
       // Track top-3 cameras for GPU vertex attribute
