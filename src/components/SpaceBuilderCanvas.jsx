@@ -718,6 +718,30 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     snaps = selectBestSnapshots(allSnaps, MAX_PROJ_CAMS)
   }
 
+  // Normalize intrinsics from legacy/padded wire layouts into canonical 9-float
+  // column-major form expected by projection code:
+  // [fx,0,0, 0,fy,0, cx,cy,1]
+  snaps = snaps.map(s => {
+    const kRaw = Array.isArray(s.K) ? s.K.map(v => Number(v)) : []
+    let K = kRaw
+    let kLayout = 'canonical9'
+
+    // Common legacy layout from raw SIMD memory with per-column padding:
+    // [fx,0,0,pad, 0,fy,0,pad, cx,cy,1,pad]
+    if (kRaw.length >= 12 && !(kRaw[4] > 0) && (kRaw[5] > 0) && (kRaw[8] > 0)) {
+      K = [kRaw[0], kRaw[1], kRaw[2], kRaw[4], kRaw[5], kRaw[6], kRaw[8], kRaw[9], kRaw[10]]
+      kLayout = 'simd12-padded'
+    }
+    // Older shifted 9-float payloads dropped cy/1; recover a usable approximation.
+    else if (kRaw.length >= 9 && !(kRaw[4] > 0) && (kRaw[5] > 0) && (kRaw[8] > 0)) {
+      const cyGuess = s.fh > 0 ? s.fh * 0.5 : 0
+      K = [kRaw[0], kRaw[1], kRaw[2], 0, kRaw[5], kRaw[6], kRaw[8], cyGuess, 1]
+      kLayout = 'shifted9-recovered'
+    }
+
+    return { ...s, K, _kRawLen: kRaw.length, _kLayout: kLayout }
+  })
+
   // ── Validate snapshot metadata (K, fw, fh, c2w must be populated) ────────
   // If any of these are missing the server returned defaults (K:[], fw:0, fh:0).
   // A camera with K[0]=0 produces score=NaN/0 → bestCamIdx=-1 for every point.
@@ -750,6 +774,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   console.info('[projective] Snapshot intrinsics:',
     snaps.map((s, i) =>
       `[${i}] K=[${s.K?.slice(0,9).map(v=>v?.toFixed(2)).join(',')}] fw=${s.fw} fh=${s.fh} ` +
+      `rawKLen=${s._kRawLen ?? 0} layout=${s._kLayout || 'unknown'} ` +
       `pos=(${s.c2w?.slice(12,14).map(v=>v?.toFixed(2)).join(',')})`
     ).join(' | ')
   )
