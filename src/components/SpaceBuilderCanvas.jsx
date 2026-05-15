@@ -718,6 +718,34 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     snaps = selectBestSnapshots(allSnaps, MAX_PROJ_CAMS)
   }
 
+  // ── Validate snapshot metadata (K, fw, fh, c2w must be populated) ────────
+  // If any of these are missing the server returned defaults (K:[], fw:0, fh:0).
+  // A camera with K[0]=0 produces score=NaN/0 → bestCamIdx=-1 for every point.
+  const invalidSnaps = snaps.filter(s =>
+    !Array.isArray(s.K) || s.K.length < 9 || !(s.K[0] > 0) ||
+    !(s.fw > 0) || !(s.fh > 0) ||
+    !Array.isArray(s.c2w) || s.c2w.length < 16
+  )
+  if (invalidSnaps.length > 0) {
+    console.warn(
+      `[projective] ${invalidSnaps.length}/${snaps.length} snaps have invalid K/fw/fh/c2w — ` +
+      `first invalid: K=${JSON.stringify(invalidSnaps[0].K)}, fw=${invalidSnaps[0].fw}, ` +
+      `fh=${invalidSnaps[0].fh}, c2w.length=${invalidSnaps[0].c2w?.length}`
+    )
+    snaps = snaps.filter(s =>
+      Array.isArray(s.K) && s.K.length >= 9 && s.K[0] > 0 &&
+      s.fw > 0 && s.fh > 0 &&
+      Array.isArray(s.c2w) && s.c2w.length === 16
+    )
+    if (snaps.length === 0) {
+      console.warn('[projective] all snapshots invalid — cannot apply photo projection')
+      if (diagRef) diagRef.current = { ...diagRef.current, projStatus: 'Snapshots missing camera data (K/fw/fh/c2w). Check iOS upload.' }
+      onDiagUpdate?.()
+      onProgress?.(100, 'Snapshot metadata invalid', false)
+      return null
+    }
+  }
+
   // Load textures via fetch+blob so we get proper auth and error visibility.
   // A failed texture gets a 1×1 black placeholder — one bad photo won't abort
   // the whole projection (remaining cameras still contribute).
@@ -747,6 +775,18 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const camKVec = snaps.map(({ K, fw, fh }) =>
     new THREE.Vector4(K[0] / fw, K[4] / fh, K[6] / fw, K[7] / fh))
   const camFxArr = new Float32Array(snaps.map(({ K }) => K[0]))
+
+  // Diagnostic: confirm camera data is populated before expensive CPU passes
+  if (snaps.length > 0) {
+    const s0 = snaps[0]
+    console.info(
+      '[projective] Snap[0] K:', s0.K?.slice(0, 9),
+      '| fw:', s0.fw, 'fh:', s0.fh,
+      '| c2w pos:', s0.c2w?.slice(12, 15)?.map(v => v.toFixed(3)),
+      '| camKVec[0]:', camKVec[0],
+      '| camFxArr[0]:', camFxArr[0]
+    )
+  }
 
   const oldUni = points.material?.uniforms
   if (!oldUni) {
@@ -852,6 +892,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   let occludeRej = 0, occludeTotal = 0  // occlusion culling: pairs that reached depth-test vs rejected
   let facingSum  = 0, facingCount  = 0  // average facing of winning camera (1.0 = perfectly face-on)
   let specklePts = 0                     // wall pts with no valid camera → true uncoloured speckle
+  let frustumFail = 0, uvFail = 0, facingFail = 0  // per-phase rejection counters
 
   // Per-sampled-point top-3 camera assignment (packed for GPU vertex attribute).
   // Encoding: cam0 + cam1×32 + cam2×1024 + count×32768.
@@ -911,13 +952,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const cpx = e[0]*xr + e[4]*yr + e[8]*zr + e[12]
       const cpy = e[1]*xr + e[5]*yr + e[9]*zr + e[13]
       const cpz = e[2]*xr + e[6]*yr + e[10]*zr + e[14]
-      if (cpz >= -0.05) continue
+      if (cpz >= -0.05) { frustumFail++; continue }
       const depth = -cpz
       const k = camKVec[ci]
       const u0 = k.x * cpx / depth + k.z
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (u < 0.06 || u > 0.94 || v < 0.06 || v > 0.94) continue
+      if (u < 0.06 || u > 0.94 || v < 0.06 || v > 0.94) { uvFail++; continue }
 
       // ── Occlusion culling: reject if a closer point exists in this camera ──
       // Uses the pre-built 128×128 depth map.  15 cm tolerance handles LiDAR
@@ -936,7 +977,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
       const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz
       const facing   = Math.max(0, -normCamZ)
-      if (facing < 0.35) continue  // hard cutoff (mirrors GLSL MIN_FACING)
+      if (facing < 0.35) { facingFail++; continue }  // hard cutoff (mirrors GLSL MIN_FACING)
       const f6       = Math.pow(facing, 6)
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
@@ -996,6 +1037,27 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       if (bestCamIdx >= 0) covered++
       else specklePts++   // wall point with zero valid cameras → true uncoloured speckle
     }
+  }
+
+  // Diagnostic: print per-phase rejection summary to help trace 0/N camera failures
+  console.info(
+    `[projective] Scoring pass — ` +
+    `nPts=${nPts} nCams=${nCams} sampleStep=${sampleStep} | ` +
+    `frustumFail=${frustumFail} uvFail=${uvFail} facingFail=${facingFail} ` +
+    `occludeTotal=${occludeTotal} occludeRej=${occludeRej} | ` +
+    `covered=${covered} sampled=${sampled} speckle=${specklePts}`
+  )
+  if (nPts > 0 && nCams > 0) {
+    const x0 = posAttr.getX(0), y0 = posAttr.getY(0), z0 = posAttr.getZ(0)
+    const e0 = w2cElems[0]
+    const cpz0 = e0[2]*x0 + e0[6]*y0 + e0[10]*z0 + e0[14]
+    const cpx0 = e0[0]*x0 + e0[4]*y0 + e0[8]*z0 + e0[12]
+    const cpy0 = e0[1]*x0 + e0[5]*y0 + e0[9]*z0 + e0[13]
+    console.info(
+      `[projective] Point[0] world=(${x0.toFixed(3)},${y0.toFixed(3)},${z0.toFixed(3)})` +
+      ` → cam[0] space=(${cpx0.toFixed(3)},${cpy0.toFixed(3)},${cpz0.toFixed(3)})` +
+      ` cam[0] pos w2c trans=(${e0[12].toFixed(3)},${e0[13].toFixed(3)},${e0[14].toFixed(3)})`
+    )
   }
 
   // Fill un-sampled points by linear interpolation between bracketing samples
