@@ -840,6 +840,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   let covered = 0, sampled = 0
   let usedCamMask = 0
 
+  // WPA-5 extended diagnostics counters
+  let occludeRej = 0, occludeTotal = 0  // occlusion culling: pairs that reached depth-test vs rejected
+  let facingSum  = 0, facingCount  = 0  // average facing of winning camera (1.0 = perfectly face-on)
+  let specklePts = 0                     // wall pts with no valid camera → true uncoloured speckle
+
   // Per-sampled-point top-3 camera assignment (packed for GPU vertex attribute).
   // Encoding: cam0 + cam1×32 + cam2×1024 + count×32768.
   const camAssignSampled = new Float32Array(Math.ceil(nPts / sampleStep) + 1)
@@ -889,7 +894,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     // WPA-4: use PCA-estimated per-point normal
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
 
-    let bestScore = 0, bestDepth = 0, bestCamIdx = -1
+    let bestScore = 0, bestDepth = 0, bestCamIdx = -1, bestFacing = 0
     // top3: small sorted list of {ci, score} for camera assignment attribute
     const top3 = []
 
@@ -912,10 +917,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const ocu = Math.min(DMAP - 1, Math.floor(u * DMAP))
       const ocv = Math.min(DMAP - 1, Math.floor(v * DMAP))
       const minD = depthMaps[ci][ocv * DMAP + ocu]
+      occludeTotal++
       // WPA-5: relative tolerance (15%) — tighter near-camera, looser far-camera.
       // Replaces WPA-4 absolute +0.15m which was too permissive at close range
       // (foreground objects only 1.3m from camera leaked through at < 15cm).
-      if (depth > minD * 1.15) continue   // occluded — relative 15% tolerance
+      if (depth > minD * 1.15) { occludeRej++; continue }   // occluded
 
       // WPA-4 score: angRes × facing⁶ × cosView² × spinFactor² (mirrors GLSL)
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
@@ -935,7 +941,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const spinRaw = suLen > 0.01 ? Math.abs((camYx*sux + camYy*suy + camYz*suz)/suLen) : 1
       const sf2 = Math.max(0.25, spinRaw) ** 2
       const score = angRes * f6 * cv2 * sf2
-      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci }
+      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing }
 
       // Track top-3 cameras for GPU vertex attribute
       top3.push({ ci, score })
@@ -950,6 +956,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         bestDepth / (camFxArr[bestCamIdx] + 1e-4) * WEGTER_OVERLAP
       ))
       if (bestCamIdx < 30) usedCamMask |= (1 << bestCamIdx)
+      facingSum += bestFacing
+      facingCount++
     }
 
     // Pack top-3 camera assignment for GPU vertex attribute
@@ -976,6 +984,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     if (isVertical) {
       sampled++
       if (bestCamIdx >= 0) covered++
+      else specklePts++   // wall point with zero valid cameras → true uncoloured speckle
     }
   }
 
@@ -1007,6 +1016,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // If empty (voxel has no sample), search the 26 immediate neighbours.
   // A 15cm search radius on a ~4mm point cloud essentially always finds a hit.
   const camAssignAll = new Float32Array(nPts)
+  let voxHits = 0, voxNeighHits = 0, voxFails = 0  // WPA-5 propagation quality
   for (let i = 0; i < nPts; i++) {
     const xi = posAttr.getX(i), yi = posAttr.getY(i), zi = posAttr.getZ(i)
     const bx = Math.round(xi / NORM_CELL)
@@ -1014,7 +1024,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     const bz = Math.round(zi / NORM_CELL)
     const key = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
     let assign = camAssignVox.get(key)
-    if (assign === undefined) {
+    if (assign !== undefined) {
+      voxHits++
+    } else {
       // Neighbour search — scan 26 surrounding voxels in 3×3×3 cube.
       // The triple loop is unrolled by the JIT; early-exit via label.
       outer: for (let dx = -1; dx <= 1; dx++) {
@@ -1027,6 +1039,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
           }
         }
       }
+      if (assign !== undefined) voxNeighHits++
+      else voxFails++
     }
     camAssignAll[i] = assign ?? 0  // 0 = no assignment → GPU uses all cameras
   }
@@ -1058,6 +1072,14 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
 
   const medSpacingPx = photoSpacings.slice().sort()[Math.floor(nPts / 2)] ?? 0
   const medSpacingMm = Math.round(medSpacingPx * 1000)
+
+  // WPA-5 derived diagnostics
+  const specklePct    = sampled > 0 ? Math.round(specklePts / sampled * 100) : 0
+  const occludePct    = occludeTotal > 0 ? Math.round(occludeRej / occludeTotal * 100) : 0
+  const avgFacing     = facingCount > 0 ? (facingSum / facingCount).toFixed(3) : null
+  const voxHitPct     = nPts > 0 ? Math.round(voxHits     / nPts * 100) : 0
+  const voxNeighPct   = nPts > 0 ? Math.round(voxNeighHits / nPts * 100) : 0
+  const voxFailPct    = nPts > 0 ? Math.round(voxFails     / nPts * 100) : 0
 
   // Per-camera sampler uniforms: uCamTex0, uCamTex1, …
   const camTexUniforms = {}
@@ -1091,7 +1113,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material = projMat
 
   onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
-  console.info(`[projective] WPA-4: ${nSelected}/${allSnaps.length} snaps selected, ${usedCamCount} active, ${coveragePct}% wall coverage, med splat ${medSpacingMm}mm`)
+  console.info(
+    `[projective] WPA-5: ${nSelected}/${allSnaps.length} snaps, ` +
+    `${usedCamCount} active, ${coveragePct}% wall coverage, ` +
+    `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
+    `voxel ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
+    `med splat ${medSpacingMm}mm`
+  )
 
   if (diagRef) {
     diagRef.current = {
@@ -1104,7 +1132,15 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projCoverage:    coveragePct,
       wegterSpacingMm: medSpacingMm,
       projStatus:      null,
-      colourMethod:    `Photo projection WPA-4 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
+      // WPA-5 extended diagnostics
+      projSpecklePct:  specklePct,   // wall pts with zero valid camera → true speckle
+      projOccludePct:  occludePct,   // % of UV-valid (cam,pt) pairs rejected by occlusion depth map
+      projAvgFacing:   avgFacing,    // avg dot(surfaceNormal, -camDir) of winning camera (1.0 = face-on)
+      projVoxHitPct:   voxHitPct,   // % of pts with direct voxel assignment (no neighbour search)
+      projVoxNeighPct: voxNeighPct, // % assigned via 26-neighbour search
+      projVoxFailPct:  voxFailPct,  // % with no voxel hit in 3×3×3 cube → uses all cameras in GPU
+      projSampleStep:  sampleStep,  // 1 sample per N pts — lower = denser coverage pre-pass
+      colourMethod:    `Photo projection WPA-5 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
     }
   }
   onDiagUpdate?.()
@@ -3068,6 +3104,38 @@ export default function SpaceBuilderCanvas({
                       {s.projCoverage != null ? `${s.projCoverage}%` : '—'}
                       <span className="sbc-diag-dim"> of wall pts</span>
                     </td></tr>
+                    {s.projSpecklePct != null && (
+                      <tr><td>True speckle</td><td>
+                        {s.projSpecklePct}%
+                        <span className="sbc-diag-dim"> wall pts uncovered</span>
+                      </td></tr>
+                    )}
+                    {s.projOccludePct != null && (
+                      <tr><td>Occlusion cull</td><td>
+                        {s.projOccludePct}%
+                        <span className="sbc-diag-dim"> of UV-valid (cam,pt) pairs</span>
+                      </td></tr>
+                    )}
+                    {s.projAvgFacing != null && (
+                      <tr><td>Avg facing</td><td>
+                        {s.projAvgFacing}
+                        <span className="sbc-diag-dim"> (1.0=face-on, 0.25=oblique)</span>
+                      </td></tr>
+                    )}
+                    {s.projVoxHitPct != null && (
+                      <tr><td>Voxel assign</td><td>
+                        {s.projVoxHitPct}% direct
+                        {s.projVoxNeighPct != null && (
+                          <span className="sbc-diag-dim"> / {s.projVoxNeighPct}% neigh / {s.projVoxFailPct}% miss</span>
+                        )}
+                      </td></tr>
+                    )}
+                    {s.projSampleStep != null && (
+                      <tr><td>Pre-pass stride</td><td>
+                        1/{s.projSampleStep}
+                        <span className="sbc-diag-dim"> pts sampled</span>
+                      </td></tr>
+                    )}
                   </>
                 )}
                 {!s.projective && s.projStatus != null && (
