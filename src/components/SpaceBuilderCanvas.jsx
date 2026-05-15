@@ -268,8 +268,11 @@ function makeProjFragShader(nCams) {
     precision highp float;
     precision highp int;
     #define N_CAMS      ${nCams}
-    // WPA-4: tighter WTA blend — only top 50% of best-camera score contribute.
-    #define BLEND_RATIO 0.50
+    // WPA-5 UW FIX: raised from 0.50 back to WPA-2.1's proven 0.70.
+    // At 0.50, cameras 30° off-axis (cv8≈0.317) could still blend; at 0.70 the
+    // effective contribution window is ≈18° off-axis — enough to eliminate the
+    // panoramic wrapping seen with the 102° UW camera.
+    #define BLEND_RATIO 0.70
     // WPA-4: hard facing cutoff — cameras > 70° from surface normal are skipped.
     // Keep this strict to suppress panoramic-style duplication from highly oblique
     // cameras that otherwise survive with non-zero score terms.
@@ -367,7 +370,9 @@ function makeProjFragShader(nCams) {
         // is less reliable near image periphery (lens distortion / off-axis error).
         // Increase UV margin for UW cameras while keeping wide cameras unchanged.
         float fxn = uCamK[i].x;
-        float uwT = clamp((0.52 - fxn) / 0.18, 0.0, 1.0); // 0=wide, 1=ultra-wide
+        // Ramp: denominator 0.11 ensures fxn=0.404 (640×480 UW) maps to uwT=1.0 exactly.
+        // Was 0.18 → uwT=0.644 for UW (only 64% of cv8/mg/minCosView active).
+        float uwT = clamp((0.52 - fxn) / 0.11, 0.0, 1.0); // 0=wide, 1=ultra-wide
         float mg = mix(0.08, 0.20, uwT);
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
@@ -1027,7 +1032,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
       const fxn = k.x
-      const uwT = Math.max(0, Math.min(1, (0.52 - fxn) / 0.18))
+      // Denominator 0.11: fxn=0.404 (640×480 UW) → uwT=1.055 → clamped to 1.0.
+      // Was 0.18 → uwT=0.644 for UW — only partial cv8/mg/minCosView activation.
+      const uwT = Math.max(0, Math.min(1, (0.52 - fxn) / 0.11))
       const mg = 0.08 + (0.20 - 0.08) * uwT
       if (u < mg || u > 1 - mg || v < mg || v > 1 - mg) { uvFail++; continue }
 
@@ -1261,7 +1268,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
 
   onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
   console.info(
-    `[projective] WPA-5: ${nSelected}/${allSnaps.length} snaps, ` +
+    `[projective] WPA-5.1 (BLEND_RATIO=0.70, uwT/0.11→1.0): ${nSelected}/${allSnaps.length} snaps, ` +
     `${usedCamCount} active, ${coveragePct}% wall coverage, ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
     `voxel ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
@@ -1287,7 +1294,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projVoxNeighPct: voxNeighPct, // % assigned via 26-neighbour search
       projVoxFailPct:  voxFailPct,  // % with no voxel hit in 3×3×3 cube → uses all cameras in GPU
       projSampleStep:  sampleStep,  // 1 sample per N pts — lower = denser coverage pre-pass
-      colourMethod:    `Photo projection WPA-5 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
+      colourMethod:    `Photo projection WPA-5.1 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
     }
   }
   onDiagUpdate?.()
