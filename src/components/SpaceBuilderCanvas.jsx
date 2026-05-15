@@ -746,6 +746,14 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
+  // Per-snapshot intrinsics summary — helps confirm K is populated after iOS SIMD-padding fix.
+  console.info('[projective] Snapshot intrinsics:',
+    snaps.map((s, i) =>
+      `[${i}] K=[${s.K?.slice(0,9).map(v=>v?.toFixed(2)).join(',')}] fw=${s.fw} fh=${s.fh} ` +
+      `pos=(${s.c2w?.slice(12,14).map(v=>v?.toFixed(2)).join(',')})`
+    ).join(' | ')
+  )
+
   // Load textures via fetch+blob so we get proper auth and error visibility.
   // A failed texture gets a 1×1 black placeholder — one bad photo won't abort
   // the whole projection (remaining cameras still contribute).
@@ -846,38 +854,68 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     v[3]+=x*x; v[4]+=x*y; v[5]+=x*z; v[6]+=y*y; v[7]+=y*z; v[8]+=z*z; v[9]++
   }
 
-  // Per-point normals: aggregate 27 surrounding voxels, Jacobi → min eigenvec.
-  const normals = new Float32Array(nPts * 3)
+  // Per-voxel PCA normals — compute once per unique voxel, then propagate to
+  // all points with a single O(1) lookup each.
+  //
+  // The previous approach ran 27-neighbour aggregation for every one of the N
+  // points (O(N × 27) map lookups).  For N=8M that is ~216M Map.get() calls,
+  // which blocks the JS thread for 20–60 s and looks like a hang.
+  //
+  // Fix: the 27-neighbour aggregation runs only for each unique voxel (V << N,
+  // typically 50K–200K for a room-sized scan at 15 cm resolution), then every
+  // point simply looks up its own voxel's pre-computed normal — O(N × 1).
+  // Total map lookups: V×27 + N×1 ≈ 5M + 8M = 13M instead of 216M.
   const roomMidY = (floorY + ceilY) * 0.5
-  for (let i = 0; i < nPts; i++) {
-    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i)
-    const bx = Math.round(x / NORM_CELL)
-    const by = Math.round(y / NORM_CELL)
-    const bz = Math.round(z / NORM_CELL)
+
+  // Pass: build per-voxel normals from 27-neighbour PCA.
+  const voxNormals = new Map()  // key → Float32Array([nx, ny, nz])
+  for (const [key, v] of normVox) {
+    // Decode voxel grid coordinates from the packed key.
+    const bz = (key % 4096) - 2048
+    const by = (Math.floor(key / 4096) % 4096) - 2048
+    const bx = (Math.floor(key / 16777216) % 4096) - 2048
     let sx=0,sy=0,sz=0,sxx=0,sxy=0,sxz=0,syy=0,syz=0,szz=0,n=0
     for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++) {
       const k2 = (bx+dx+2048)*16777216 + (by+dy+2048)*4096 + (bz+dz+2048)
-      const v = normVox.get(k2); if (!v) continue
-      sx+=v[0]; sy+=v[1]; sz+=v[2]; sxx+=v[3]; sxy+=v[4]; sxz+=v[5]; syy+=v[6]; syz+=v[7]; szz+=v[8]; n+=v[9]
+      const v2 = normVox.get(k2); if (!v2) continue
+      sx+=v2[0]; sy+=v2[1]; sz+=v2[2]; sxx+=v2[3]; sxy+=v2[4]; sxz+=v2[5]; syy+=v2[6]; syz+=v2[7]; szz+=v2[8]; n+=v2[9]
     }
+    // Voxel centre (used for outward-orientation test — accurate to ±7.5 cm).
+    const vx = bx * NORM_CELL, vy = by * NORM_CELL, vz = bz * NORM_CELL
     let nx, ny, nz
     if (n < 8) {
-      // Fallback: radial from room centre (same as WPA-2 procedural)
-      const dx=x-roomCX, dz=z-roomCZ, len=Math.max(Math.sqrt(dx*dx+dz*dz),0.001)
-      nx=dx/len; ny=0; nz=dz/len
+      const fdx=vx-roomCX, fdz=vz-roomCZ, flen=Math.max(Math.sqrt(fdx*fdx+fdz*fdz),0.001)
+      nx=fdx/flen; ny=0; nz=fdz/flen
     } else {
       const mx=sx/n, my=sy/n, mz=sz/n
       const c00=sxx/n-mx*mx, c01=sxy/n-mx*my, c02=sxz/n-mx*mz
       const c11=syy/n-my*my, c12=syz/n-my*mz, c22=szz/n-mz*mz
       ;[nx, ny, nz] = minEigenvec3(c00, c01, c02, c11, c12, c22)
+      const flip = (nx*(vx-roomCX) + ny*(vy-roomMidY) + nz*(vz-roomCZ)) < 0 ? -1 : 1
+      nx *= flip; ny *= flip; nz *= flip
     }
-    // Orient outward: dot(normal, point − room_interior) should be positive.
-    const flip = (nx*(x-roomCX) + ny*(y-roomMidY) + nz*(z-roomCZ)) < 0 ? -1 : 1
-    normals[i*3]   = nx * flip
-    normals[i*3+1] = ny * flip
-    normals[i*3+2] = nz * flip
+    voxNormals.set(key, new Float32Array([nx, ny, nz]))
   }
-  normVox.clear()  // free memory
+  normVox.clear()
+
+  // Assign normals to all points: one lookup each, no neighbour search needed.
+  const normals = new Float32Array(nPts * 3)
+  for (let i = 0; i < nPts; i++) {
+    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i)
+    const bx = Math.round(x / NORM_CELL)
+    const by = Math.round(y / NORM_CELL)
+    const bz = Math.round(z / NORM_CELL)
+    const key = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
+    const n3  = voxNormals.get(key)
+    if (n3) {
+      normals[i*3] = n3[0]; normals[i*3+1] = n3[1]; normals[i*3+2] = n3[2]
+    } else {
+      // Shouldn't normally occur — every point should map to a voxel we built.
+      const dx=x-roomCX, dz=z-roomCZ, len=Math.max(Math.sqrt(dx*dx+dz*dz),0.001)
+      normals[i*3] = dx/len; normals[i*3+1] = 0; normals[i*3+2] = dz/len
+    }
+  }
+  voxNormals.clear()
 
   // covered/sampled: only count non-horizontal surfaces (walls, furniture).
   // Floor and ceiling points have |ny| > 0.7 (normal mostly vertical) — a
