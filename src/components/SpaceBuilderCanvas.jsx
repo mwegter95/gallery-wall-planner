@@ -241,7 +241,8 @@ const SPLAT_VERT_PROJ = /* glsl */`
 //     vector) samples the wall at a rotated angle and contributes a stretched,
 //     rotated image.  spinFactor = |dot(camY_world, surfaceUp)| penalises
 //     heavily-rotated cameras while rewarding face-on captures.
-//     Score: angRes × facing⁶ × cosView² × spinFactor²
+//     Score: angRes × facing⁶ × cosView⁴ × spinFactor²
+//     (cosView exponent restored to ⁴ from WPA-4's ² to suppress UW panoramic wrapping)
 //
 //   NEW — Hard facing cutoff at 0.35 (≈ 70° incidence angle)
 //     Any camera whose surface-normal–camera-direction angle exceeds 70° is
@@ -369,7 +370,7 @@ function makeProjFragShader(nCams) {
         float mg = 0.04;
         if (u < mg || u > 1.0 - mg || v < mg || v > 1.0 - mg) continue;
 
-        // ── WPA-4 score = angRes × facing⁶ × cosView² × spinFactor² ──────
+        // ── WPA-5 score = angRes × facing⁶ × cosView⁴ × spinFactor² ──────
         //
         // angRes: angular resolution at this depth — closer / higher-fx wins.
         float angRes  = uCamFx[i] / (depth * depth + 0.001);
@@ -383,12 +384,19 @@ function makeProjFragShader(nCams) {
         float f2       = facing * facing;
         float f6       = f2 * f2 * f2;      // facing⁶
 
-        // cosView²: point distance from optical axis — was cosView⁴ in WPA-2.
-        //   Reduced to cosView² because facing⁶ already rejects highly oblique
-        //   cameras; cosView⁴ was doubly penalising edge-of-frame points.
+        // cosView⁴: off-axis penalty — restored to WPA-2.1 exponent.
+        //   WPA-4 reduced this to cosView² reasoning that facing⁶ already handles
+        //   oblique cameras — true for the main camera (76° DFOV), but the ultra-wide
+        //   camera (~120° DFOV) places genuine scene points 50-60° off-axis where the
+        //   pinhole model diverges from the real (barrel-distorted) lens.  At 55° off-
+        //   axis: cosView⁴ ≈ 0.11 vs cosView² ≈ 0.33 — the 3× stronger penalty
+        //   prevents the UW camera winning for edge projections that map to the wrong
+        //   world location, which was the root cause of the panoramic-wrapping
+        //   duplication (same fix as WPA-2.1 which first eliminated this artifact).
         float cpLen   = length(cp.xyz);
         float cosView = cpLen > 0.001 ? depth / cpLen : 0.0;
         float cv2     = cosView * cosView;
+        float cv4     = cv2 * cv2;   // cosView⁴
 
         // spinFactor²: how well the camera's "up" aligns with the surface's "up".
         //   Perfect face-on capture with phone upright = spinFactor 1.0.
@@ -399,7 +407,7 @@ function makeProjFragShader(nCams) {
         float spinFactor = max(0.25, spinRaw);
         float sf2        = spinFactor * spinFactor;
 
-        float score = angRes * f6 * cv2 * sf2;
+        float score = angRes * f6 * cv4 * sf2;
 
         scores_arr[i] = score;
         us_arr[i]     = u;
@@ -923,7 +931,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       // (foreground objects only 1.3m from camera leaked through at < 15cm).
       if (depth > minD * 1.15) { occludeRej++; continue }   // occluded
 
-      // WPA-4 score: angRes × facing⁶ × cosView² × spinFactor² (mirrors GLSL)
+      // WPA-5 score: angRes × facing⁶ × cosView⁴ × spinFactor² (mirrors GLSL)
+      // cosView⁴ restored from WPA-4's cosView² — see GLSL comment for rationale.
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
       const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz
       const facing   = Math.max(0, -normCamZ)
@@ -932,6 +941,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
       const cv2      = cosView * cosView
+      const cv4      = cv2 * cv2   // cosView⁴
       // Spin factor: camera Y dot surface-up (WPA-4 in-plane alignment)
       const camYx = camYArr[ci].x, camYy = camYArr[ci].y, camYz = camYArr[ci].z
       // surfaceUp = worldUp − dot(worldUp,normal)*normal; worldUp=(0,1,0)
@@ -940,7 +950,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const suLen = Math.sqrt(sux*sux + suy*suy + suz*suz)
       const spinRaw = suLen > 0.01 ? Math.abs((camYx*sux + camYy*suy + camYz*suz)/suLen) : 1
       const sf2 = Math.max(0.25, spinRaw) ** 2
-      const score = angRes * f6 * cv2 * sf2
+      const score = angRes * f6 * cv4 * sf2
       if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing }
 
       // Track top-3 cameras for GPU vertex attribute
