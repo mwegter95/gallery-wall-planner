@@ -13,6 +13,7 @@ import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
 import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
+import { loadRecentScanBuffer, saveRecentScanBuffer } from '../utils/recentScanCache'
 import { BASE, getJwt, getDeviceToken, getSnapshots } from '../utils/api'
 
 const IN_TO_M   = 0.0254
@@ -2233,63 +2234,71 @@ export default function SpaceBuilderCanvas({
           buf = pc._buffer
         } else if (pc?.url) {
           const pcUrl = pc.url.startsWith('/') ? `${BASE}${pc.url}` : pc.url
-          const authH  = { 'X-Device-Token': getDeviceToken() }
-          const jwt    = getJwt?.()
-          if (jwt) { authH['Authorization'] = `Bearer ${jwt}`; authH['X-Auth-Token'] = jwt }
-
-          // Single streaming fetch (no blocking HEAD preflight).
-          // The previous HEAD+Range path often stalled for 20-30s and then still
-          // fell back to one request in production proxies.
-          reportRoomLoad(4, 'Downloading scan…')
-          const resp = await fetch(pcUrl, { headers: authH })
-          if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
-
-          const sizeHint = parseInt(
-            resp.headers.get('x-uncompressed-length') ||
-            resp.headers.get('content-length') || '0', 10
-          )
-
-          let ab
-          if (resp.body?.getReader) {
-            const reader = resp.body.getReader()
-            if (sizeHint > 0) {
-              const merged = new Uint8Array(sizeHint)
-              let received = 0
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                if (!value) continue
-                const writeLen = Math.min(value.byteLength, Math.max(0, sizeHint - received))
-                if (writeLen > 0) merged.set(value.subarray(0, writeLen), received)
-                received += value.byteLength
-                if (!cancelled) reportRoomLoad(4 + (34 * Math.min(1, received / sizeHint)), 'Downloading scan…')
-              }
-              ab = merged.buffer
-            } else {
-              const chunks = []
-              let received = 0
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                if (!value) continue
-                chunks.push(value)
-                received += value.byteLength
-                if (!cancelled) {
-                  const pseudoPct = Math.min(0.98, Math.log10(1 + received / (1024 * 1024)) / 3)
-                  reportRoomLoad(4 + (34 * pseudoPct), 'Downloading scan…')
-                }
-              }
-              const merged = new Uint8Array(received)
-              let off = 0
-              for (const c of chunks) {
-                merged.set(c, off)
-                off += c.byteLength
-              }
-              ab = merged.buffer
-            }
-          } else {
-            ab = await resp.arrayBuffer()
+          let ab = await loadRecentScanBuffer({ roomId, url: pcUrl, pointCount: pc.pointCount })
+          if (ab) {
+            reportRoomLoad(38, 'Using last loaded scan cache')
           }
+
+          if (!ab) {
+            const authH  = { 'X-Device-Token': getDeviceToken() }
+            const jwt    = getJwt?.()
+            if (jwt) { authH['Authorization'] = `Bearer ${jwt}`; authH['X-Auth-Token'] = jwt }
+
+            // Single streaming fetch (no blocking HEAD preflight).
+            // The previous HEAD+Range path often stalled for 20-30s and then still
+            // fell back to one request in production proxies.
+            reportRoomLoad(4, 'Downloading scan…')
+            const resp = await fetch(pcUrl, { headers: authH })
+            if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
+
+            const sizeHint = parseInt(
+              resp.headers.get('x-uncompressed-length') ||
+              resp.headers.get('content-length') || '0', 10
+            )
+
+            if (resp.body?.getReader) {
+              const reader = resp.body.getReader()
+              if (sizeHint > 0) {
+                const merged = new Uint8Array(sizeHint)
+                let received = 0
+                while (true) {
+                  const { done, value } = await reader.read()
+                  if (done) break
+                  if (!value) continue
+                  const writeLen = Math.min(value.byteLength, Math.max(0, sizeHint - received))
+                  if (writeLen > 0) merged.set(value.subarray(0, writeLen), received)
+                  received += value.byteLength
+                  if (!cancelled) reportRoomLoad(4 + (34 * Math.min(1, received / sizeHint)), 'Downloading scan…')
+                }
+                ab = merged.buffer
+              } else {
+                const chunks = []
+                let received = 0
+                while (true) {
+                  const { done, value } = await reader.read()
+                  if (done) break
+                  if (!value) continue
+                  chunks.push(value)
+                  received += value.byteLength
+                  if (!cancelled) {
+                    const pseudoPct = Math.min(0.98, Math.log10(1 + received / (1024 * 1024)) / 3)
+                    reportRoomLoad(4 + (34 * pseudoPct), 'Downloading scan…')
+                  }
+                }
+                const merged = new Uint8Array(received)
+                let off = 0
+                for (const c of chunks) {
+                  merged.set(c, off)
+                  off += c.byteLength
+                }
+                ab = merged.buffer
+              }
+            } else {
+              ab = await resp.arrayBuffer()
+            }
+            await saveRecentScanBuffer({ roomId, url: pcUrl, pointCount: pc.pointCount, buffer: ab })
+          }
+
           const arr = new Float32Array(ab)
           const inferredCount = Math.floor(arr.length / 6)
           const safePointCount = Number.isFinite(pc.pointCount) && pc.pointCount > 0
