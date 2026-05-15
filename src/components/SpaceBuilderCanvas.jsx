@@ -545,6 +545,15 @@ function minEigenvec3(c00, c01, c02, c11, c12, c22) {
 const MAX_PROJ_CAMS  = 24
 const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
+function getSafeProjectiveCamLimit(maxFragTextures) {
+  // Most mobile GPUs expose 16 fragment texture units. Keep headroom so
+  // camera samplers never exhaust the budget and invalidate the shader.
+  const texUnits = Number.isFinite(maxFragTextures) ? Math.floor(maxFragTextures) : 0
+  if (texUnits > 0) return Math.max(4, Math.min(MAX_PROJ_CAMS, texUnits - 2))
+  // Conservative fallback when renderer capabilities are unavailable.
+  return Math.min(MAX_PROJ_CAMS, 12)
+}
+
 // Load a snapshot image via fetch (with auth headers) + canvas downscale.
 //
 // Why fetch instead of TextureLoader directly:
@@ -701,7 +710,7 @@ function selectBestSnapshots(allSnaps, k) {
   return selected.sort((a, b) => a - b).map(i => allSnaps[i])
 }
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress }) {
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures }) {
   onProgress?.(5, 'Loading snapshots…')
   let data
   try {
@@ -721,11 +730,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     onProgress?.(100, 'No snapshots found', false)
     return null
   }
-  onProgress?.(10, `Selecting best ${Math.min(allSnaps.length, MAX_PROJ_CAMS)} of ${allSnaps.length} snapshots…`)
+  const projCamLimit = getSafeProjectiveCamLimit(maxFragTextures)
+  onProgress?.(10, `Selecting best ${Math.min(allSnaps.length, projCamLimit)} of ${allSnaps.length} snapshots…`)
 
   let snaps = allSnaps
-  if (snaps.length > MAX_PROJ_CAMS) {
-    snaps = selectBestSnapshots(allSnaps, MAX_PROJ_CAMS)
+  if (snaps.length > projCamLimit) {
+    console.warn(`[projective] capping snapshots to ${projCamLimit} (fragment texture units max=${maxFragTextures ?? 'unknown'})`)
+    snaps = selectBestSnapshots(allSnaps, projCamLimit)
   }
 
   // Normalize intrinsics from legacy/padded wire layouts into canonical 9-float
@@ -1281,7 +1292,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projective:      true,
       projCams:        nCams,
       projTotal:       allSnaps.length,   // total snapshots on server
-      projSelected:    nSelected,         // cameras loaded into GPU (≤ MAX_PROJ_CAMS)
+      projSelected:    nSelected,         // cameras loaded into GPU (≤ device-safe sampler cap)
       projUsed:        usedCamCount,      // cameras that actually covered ≥ 1 point
       projCoverage:    coveragePct,
       wegterSpacingMm: medSpacingMm,
@@ -1295,6 +1306,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projVoxFailPct:  voxFailPct,  // % with no voxel hit in 3×3×3 cube → uses all cameras in GPU
       projSampleStep:  sampleStep,  // 1 sample per N pts — lower = denser coverage pre-pass
       colourMethod:    `Photo projection WPA-5.1 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
+      projCamLimit,
     }
   }
   onDiagUpdate?.()
@@ -2461,6 +2473,7 @@ export default function SpaceBuilderCanvas({
               diagRef: diagStatsRef,
               onDiagUpdate: () => setDiagVersion(v => v + 1),
               onProgress: reportRoomLoad,
+              maxFragTextures: t.renderer?.capabilities?.maxTextures,
             }).catch(err => {
               console.warn('[projective] upgrade error:', err)
               reportRoomLoad(100, 'Photo projection failed', false)
@@ -3334,6 +3347,7 @@ export default function SpaceBuilderCanvas({
                         diagRef: diagStatsRef,
                         onDiagUpdate: () => setDiagVersion(v => v + 1),
                         onProgress: reportRoomLoad,
+                        maxFragTextures: threeRef.current?.renderer?.capabilities?.maxTextures,
                       })
                     } catch (err) {
                       console.warn('[rebuild] projection error:', err)
