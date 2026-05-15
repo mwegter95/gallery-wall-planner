@@ -269,11 +269,10 @@ function makeProjFragShader(nCams) {
     #define N_CAMS      ${nCams}
     // WPA-4: tighter WTA blend — only top 50% of best-camera score contribute.
     #define BLEND_RATIO 0.50
-    // WPA-4: hard facing cutoff — cameras > 75° from surface normal are skipped.
-    // Lowered from 0.35 (70°) to 0.25 (75°): oblique cameras that pass this gate
-    // still get facing⁶ ≈ 0.0002, so they only contribute when NO better camera
-    // exists — preventing black speckle on near-vertical surfaces at scan edges.
-    #define MIN_FACING  0.25
+    // WPA-4: hard facing cutoff — cameras > 70° from surface normal are skipped.
+    // Keep this strict to suppress panoramic-style duplication from highly oblique
+    // cameras that otherwise survive with non-zero score terms.
+    #define MIN_FACING  0.35
 
     ${samplerDecls}
     uniform mat4      uW2C[N_CAMS];
@@ -1021,7 +1020,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const u0 = k.x * cpx / depth + k.z
       const v0 = k.y * (-cpy) / depth + k.w
       const [u, v] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (u < 0.06 || u > 0.94 || v < 0.06 || v > 0.94) { uvFail++; continue }
+      if (u < 0.08 || u > 0.92 || v < 0.08 || v > 0.92) { uvFail++; continue }
 
       // ── Occlusion culling: reject if a closer point exists in this camera ──
       // Uses the pre-built 128×128 depth map.  15 cm tolerance handles LiDAR
@@ -2226,60 +2225,58 @@ export default function SpaceBuilderCanvas({
           const jwt    = getJwt?.()
           if (jwt) { authH['Authorization'] = `Bearer ${jwt}`; authH['X-Auth-Token'] = jwt }
 
-          // 1. HEAD to discover size and Range support (no Accept-Encoding so bytes are plaintext)
-          const head = await fetch(pcUrl, { method: 'HEAD', headers: authH })
-          if (!head.ok) throw new Error(`Point cloud HEAD failed: ${head.status}`)
-          const totalBytes  = parseInt(head.headers.get('Content-Length') || '0', 10)
-          const rangeOk     = head.headers.get('Accept-Ranges') === 'bytes' && totalBytes > 0
+          // Single streaming fetch (no blocking HEAD preflight).
+          // The previous HEAD+Range path often stalled for 20-30s and then still
+          // fell back to one request in production proxies.
+          reportRoomLoad(4, 'Downloading scan…')
+          const resp = await fetch(pcUrl, { headers: authH })
+          if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
+
+          const sizeHint = parseInt(
+            resp.headers.get('x-uncompressed-length') ||
+            resp.headers.get('content-length') || '0', 10
+          )
 
           let ab
-          if (rangeOk) {
-            // 2a. 4 parallel range fetches
-            const N     = 4
-            const chunk = Math.ceil(totalBytes / N)
-            reportRoomLoad(4, 'Downloading scan (4 parallel chunks)…')
-            const bufs = await Promise.all(
-              Array.from({ length: N }, (_, i) => {
-                const start = i * chunk
-                const end   = Math.min(start + chunk - 1, totalBytes - 1)
-                return fetch(pcUrl, { headers: { ...authH, 'Range': `bytes=${start}-${end}` } })
-                  .then(r => {
-                    if (r.status !== 206 && r.status !== 200)
-                      throw new Error(`Point cloud chunk ${i} failed: ${r.status}`)
-                    return r.arrayBuffer()
-                  })
-              })
-            )
-            const merged = new Uint8Array(totalBytes)
-            let off = 0
-            for (const b of bufs) { merged.set(new Uint8Array(b), off); off += b.byteLength }
-            ab = merged.buffer
-            reportRoomLoad(38, 'Scan downloaded')
-          } else {
-            // 2b. Fallback: single streaming fetch (server doesn't support Range yet)
-            const resp = await fetch(pcUrl, { headers: authH })
-            if (!resp.ok) throw new Error(`Failed to load point cloud: ${resp.status}`)
-            const sizeHint = parseInt(
-              resp.headers.get('x-uncompressed-length') ||
-              resp.headers.get('content-length') || '0', 10
-            )
-            if (resp.body?.getReader && sizeHint > 0) {
-              const reader = resp.body.getReader()
+          if (resp.body?.getReader) {
+            const reader = resp.body.getReader()
+            if (sizeHint > 0) {
               const merged = new Uint8Array(sizeHint)
               let received = 0
               while (true) {
                 const { done, value } = await reader.read()
                 if (done) break
                 if (!value) continue
-                const end = Math.min(sizeHint, received + value.byteLength)
-                merged.set(value.subarray(0, end - received), received)
+                const writeLen = Math.min(value.byteLength, Math.max(0, sizeHint - received))
+                if (writeLen > 0) merged.set(value.subarray(0, writeLen), received)
                 received += value.byteLength
-                if (!cancelled) reportRoomLoad(4 + (34 * received / sizeHint), 'Downloading scan…')
+                if (!cancelled) reportRoomLoad(4 + (34 * Math.min(1, received / sizeHint)), 'Downloading scan…')
               }
               ab = merged.buffer
             } else {
-              ab = await resp.arrayBuffer()
+              const chunks = []
+              let received = 0
+              while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                if (!value) continue
+                chunks.push(value)
+                received += value.byteLength
+                if (!cancelled) {
+                  const pseudoPct = Math.min(0.98, Math.log10(1 + received / (1024 * 1024)) / 3)
+                  reportRoomLoad(4 + (34 * pseudoPct), 'Downloading scan…')
+                }
+              }
+              const merged = new Uint8Array(received)
+              let off = 0
+              for (const c of chunks) {
+                merged.set(c, off)
+                off += c.byteLength
+              }
+              ab = merged.buffer
             }
+          } else {
+            ab = await resp.arrayBuffer()
           }
           const arr = new Float32Array(ab)
           const inferredCount = Math.floor(arr.length / 6)
