@@ -268,15 +268,16 @@ function makeProjFragShader(nCams) {
     precision highp float;
     precision highp int;
     #define N_CAMS      ${nCams}
-    // WPA-5 UW FIX: raised from 0.50 back to WPA-2.1's proven 0.70.
-    // At 0.50, cameras 30° off-axis (cv8≈0.317) could still blend; at 0.70 the
-    // effective contribution window is ≈18° off-axis — enough to eliminate the
-    // panoramic wrapping seen with the 102° UW camera.
-    #define BLEND_RATIO 0.70
-    // WPA-4: hard facing cutoff — cameras > 70° from surface normal are skipped.
-    // Keep this strict to suppress panoramic-style duplication from highly oblique
-    // cameras that otherwise survive with non-zero score terms.
-    #define MIN_FACING  0.35
+    // BLEND_RATIO and MIN_FACING are computed adaptively per-point based on the
+    // winning camera's uwT (0=main, 1=ultra-wide):
+    //   blendRatio = mix(0.50, 0.70, bestUwT)
+    //     Main camera: 0.50 → softer multi-camera blend, matches WPA-4 intent.
+    //     UW camera:   0.70 → tight WTA (≈18° window) eliminates panoramic wrapping.
+    //   minFacing  = mix(0.25, 0.35, uwT) per camera
+    //     Main camera: 0.25 → allows up to 75° incidence; recovers speckle at room
+    //       corners/edges where the main (undistorted) lens is still accurate.
+    //     UW camera:   0.35 → keeps the 70° hard cutoff to prevent barrel-distortion
+    //       artefacts from oblique-angle UW projections.
 
     ${samplerDecls}
     uniform mat4      uW2C[N_CAMS];
@@ -333,6 +334,7 @@ function makeProjFragShader(nCams) {
       float us_arr[N_CAMS];
       float vs_arr[N_CAMS];
       float bestScore = 0.0;
+      float bestUwT   = 0.0;   // uwT of the winning camera — drives adaptive blend ratio
 
       for (int i = 0; i < N_CAMS; i++) {
         scores_arr[i] = 0.0;
@@ -383,10 +385,11 @@ function makeProjFragShader(nCams) {
 
         // facing⁶: how squarely the camera sees the surface normal.
         //   • Raised from facing⁴ (WPA-2.2) to facing⁶ for sharper falloff.
-        //   • Hard cutoff at MIN_FACING (≈70° incidence) pre-filters far-off cameras.
+        //   • Adaptive cutoff: 0.25 for main (75° incidence, less distortion),
+        //     0.35 for UW (70° incidence, barrel distortion makes grazing worse).
         vec3  normCam  = (uW2C[i] * vec4(vNorm, 0.0)).xyz;
         float facing   = max(0.0, -normCam.z);
-        if (facing < MIN_FACING) continue;   // WPA-4: hard cutoff
+        if (facing < mix(0.25, 0.35, uwT)) continue;   // adaptive facing cutoff
         float f2       = facing * facing;
         float f6       = f2 * f2 * f2;      // facing⁶
 
@@ -422,16 +425,18 @@ function makeProjFragShader(nCams) {
         scores_arr[i] = score;
         us_arr[i]     = u;
         vs_arr[i]     = v;
-        bestScore     = max(bestScore, score);
+        if (score > bestScore) { bestScore = score; bestUwT = uwT; }
       }
 
       // ── Pass 2: soft winner-takes-all blend ───────────────────────────────
-      // WPA-4: BLEND_RATIO 0.50 + score⁵ weight → typically 1-2 cameras win.
+      // Blend ratio is adaptive: 0.50 for main camera (softer blend, no distortion
+      // risk), 0.70 for ultra-wide (tighter WTA, eliminates panoramic wrapping).
       vec3  accColor  = vec3(0.0);
       float accWeight = 0.0;
 
       if (bestScore > 0.001) {
-        float thresh = bestScore * BLEND_RATIO;
+        float blendRatio = mix(0.50, 0.70, bestUwT);
+        float thresh = bestScore * blendRatio;
         for (int i = 0; i < N_CAMS; i++) {
           if (scores_arr[i] < thresh) continue;
           float w3 = scores_arr[i] * scores_arr[i] * scores_arr[i];
@@ -1066,7 +1071,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const angRes   = camFxArr[ci] / (depth * depth + 0.001)
       const normCamZ = e[2]*nx + e[6]*ny + e[10]*nz
       const facing   = Math.max(0, -normCamZ)
-      if (facing < 0.35) { facingFail++; continue }  // hard cutoff (mirrors GLSL MIN_FACING)
+      const minFacing = 0.25 + 0.10 * uwT  // 0.25 for main (75° incidence), 0.35 for UW (70°)
+      if (facing < minFacing) { facingFail++; continue }
       const f6       = Math.pow(facing, 6)
       const cpLen    = Math.sqrt(cpx*cpx + cpy*cpy + cpz*cpz)
       const cosView  = cpLen > 0.001 ? depth / cpLen : 0
