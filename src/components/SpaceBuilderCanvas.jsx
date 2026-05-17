@@ -1174,6 +1174,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
+  // WPA-6: psMap is built inline below during the scoring pass.
+  // Each sampled point's best-camera UV is used for a direct pixel lookup —
+  // exact per-point colour accuracy instead of coarse 128×128 DMAP blocks.
+  const psMap = new Map()   // voxKey(6 mm) → {r, g, b, score}
+
   onProgress?.(78, 'Scoring camera coverage…')
   for (let i = 0; i < nPts; i += sampleStep) {
     const xr = posAttr.getX(i), yr = posAttr.getY(i), zr = posAttr.getZ(i)
@@ -1181,7 +1186,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     // WPA-4: use PCA-estimated per-point normal
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
 
-    let bestScore = 0, bestDepth = 0, bestCamIdx = -1, bestFacing = 0
+    let bestScore = 0, bestDepth = 0, bestCamIdx = -1, bestFacing = 0, bestU = 0, bestV = 0
     // top3: small sorted list of {ci, score} for camera assignment attribute
     const top3 = []
 
@@ -1240,7 +1245,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const spinRaw = suLen > 0.01 ? Math.abs((camYx*sux + camYy*suy + camYz*suz)/suLen) : 1
       const sf2 = Math.max(0.25, spinRaw) ** 2
       const score = angRes * f6 * cv * sf2
-      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing }
+      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing; bestU = u; bestV = v }
 
       // Track top-3 cameras for GPU vertex attribute
       top3.push({ ci, score })
@@ -1257,6 +1262,27 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       if (bestCamIdx < 30) usedCamMask |= (1 << bestCamIdx)
       facingSum += bestFacing
       facingCount++
+
+      // WPA-6 inline colour bake — sample the photo pixel at the exact UV
+      // already computed above for this sampled point.  Per-point accuracy:
+      // no DMAP cell blocking, no depth-map sparsity gaps.  This fills psMap
+      // with ~20K entries (one per sampled point with a valid camera) so the
+      // propagation pass below covers virtually all of the LiDAR cloud.
+      const td6 = textures[bestCamIdx]
+      if (td6.pixels) {
+        const iu6 = Math.min(td6.pw - 1, Math.max(0, Math.floor(bestU * td6.pw)))
+        const iv6 = Math.min(td6.ph - 1, Math.max(0, Math.floor(bestV * td6.ph)))
+        const pi6 = (iv6 * td6.pw + iu6) * 4
+        const bxp = Math.round(xr / PS_VOXEL)
+        const byp = Math.round(yr / PS_VOXEL)
+        const bzp = Math.round(zr / PS_VOXEL)
+        // winner-takes-all: higher score → better angular resolution → sharper colour
+        const vkp = (bxp+2048)*16777216 + (byp+2048)*4096 + (bzp+2048)
+        const ex6 = psMap.get(vkp)
+        if (!ex6 || bestScore > ex6.score) {
+          psMap.set(vkp, { r: td6.pixels[pi6], g: td6.pixels[pi6+1], b: td6.pixels[pi6+2], score: bestScore })
+        }
+      }
     }
 
     // Pack top-3 camera assignment for GPU vertex attribute
@@ -1366,20 +1392,19 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   camAssignVox.clear() // free ~20K entry map
 
-  // ── WPA-6: Photo-Forward Splatting — bake photo pixels into vertex colours ─
+  // ── WPA-6: Apply inline-baked photo colours to LiDAR vertex colours ─────────
   //
-  // Build a world-space colour map by unprojecting each DMAP cell's photo pixel
-  // using its stored depth (forward splatting: 2D pixel + depth → 3D position).
-  // Then walk every LiDAR point and, if a photosplat voxel covers it, overwrite
-  // the vertex colour attribute with the photosplat RGB and set camAssignAll=-1
-  // so the GLSL skips UV projection and directly outputs the baked colour.
+  // psMap was filled during the scoring pass above: for every sampled point
+  // whose best camera was found, the exact photo pixel at (bestU, bestV) was
+  // read and stored in a 6 mm voxel.  This gives per-point colour accuracy
+  // (vs the old DMAP-cell approach which blocked 40 mm regions with one colour).
+  // Coverage now matches WPA-5 wall coverage (~68%) rather than the old 29%.
   //
-  // Fallback: points not covered by any photosplat keep their WPA-5 assignment
-  // and are rendered via UV projection as before.
-  onProgress?.(83, 'Building photosplat colour map (WPA-6)…')
-  const psMap = buildPhotosplats(snaps, textures, depthMaps, camKVec, camFxArr, camOriArr, DMAP)
-  console.info(`[WPA-6] photosplat map: ${psMap.size} voxels, ${nCams} cameras × ${DMAP}×${DMAP} × ${PS_SUB}²`)
-
+  // Walk every LiDAR point: 6 mm voxel lookup + 3×3×3 neighbour search.
+  // Hits overwrite the vertex colour attribute and set camAssignAll=-1 so the
+  // GLSL fast-paths to the baked colour (pow(0.9) gamma, no UV projection).
+  // Misses fall through to real-time WPA-5 UV projection as before.
+  console.info(`[WPA-6] psMap: ${psMap.size} entries (${nCams} cams, ${Math.floor(nPts/sampleStep)} samples inline)`)
   onProgress?.(89, 'Applying photosplat colours to LiDAR cloud…')
   const colorAttr = points.geometry.attributes.color
   let psHits = 0, psNeighHits = 0, psMisses = 0
