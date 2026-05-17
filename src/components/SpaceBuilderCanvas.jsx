@@ -552,14 +552,28 @@ function sampleCamPx(wx, wy, wz, e, k, ori, td) {
 // starts at the pixel (correct colour by definition) and asks "where in 3D
 // does this pixel's ray land at this depth?" — answering with K is exact.
 //
-// PS_VOXEL: 3D voxel size for photosplat world map (metres).  6 mm gives
-//   ~1 voxel per 4 mm LiDAR point — close enough that the 3×3×3 neighbour
-//   search in the LiDAR lookup virtually eliminates misses.
-// PS_SUB: sub-cell sampling density per DMAP edge.  A 128×128 depth map cell
-//   spans ~30–60 mm at a 2 m wall.  PS_SUB=4 creates 16 splats per cell, at
-//   ~7–15 mm intervals — denser than the 6 mm voxel grid so coverage is full.
-const PS_VOXEL = 0.006   // 6 mm world voxels for the photosplat colour map
-const PS_SUB   = 4        // sub-samples per DMAP cell edge (16 splats / cell)
+// PS_VOXEL: 3D voxel size for the inline WPA-7 gradient map (metres).
+//
+// Sizing constraint: the 3×3×3 neighbour search radius (3 × PS_VOXEL) must
+// exceed the average spatial spacing between sampled LiDAR points.
+//
+// With nPts ≈ 9.8 M and sampleStep ≈ 491, we sample ~20 K points.  Spread
+// over ~130 m² of wall/floor/ceiling that gives ~77 mm average spacing.
+// 3 × PS_VOXEL must be > 77 mm → PS_VOXEL > 26 mm.
+//
+// 60 mm chosen: 3×3×3 radius = 180 mm >> 77 mm spacing → ~94% coverage
+// (Poisson estimate: P(miss) = e^{-N_entry/search_area} ≈ e^{-2.9} ≈ 0.055).
+// Max gradient extrapolation ≈ 90 mm within a voxel — acceptable for smooth
+// paint/plaster; only high-frequency brick mortar joints may alias slightly.
+//
+// NOTE: PS_VOXEL was 6 mm when buildPhotosplats (now dead code) generated
+// ~3.6 M dense splats from DMAP sub-sampling.  The inline bake produces only
+// ~12–20 K entries, so a much coarser grid is required.
+//
+// PS_SUB: sub-samples per DMAP cell edge — used by the legacy buildPhotosplats
+// function (kept for reference; no longer called).
+const PS_VOXEL = 0.060   // 60 mm world voxels for the WPA-7 gradient colour map
+const PS_SUB   = 4        // (legacy buildPhotosplats) sub-samples per DMAP cell edge
 
 // ── WPA-7 Color Gradient Field ────────────────────────────────────────────────
 //
