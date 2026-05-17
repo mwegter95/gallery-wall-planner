@@ -511,6 +511,28 @@ function invertUvOrientation(ud, vd, ori) {
   return [ud, vd]
 }
 
+/**
+ * WPA-7: Project world point (wx,wy,wz) into camera defined by w2c matrix e,
+ * normalised intrinsics k, orientation ori, and texture data td.
+ * Returns [r, g, b] (0–255) or null if out-of-frustum / no pixels.
+ * Used for 3-axis central finite differences in the gradient colour field.
+ */
+function sampleCamPx(wx, wy, wz, e, k, ori, td) {
+  const cpx = e[0]*wx + e[4]*wy + e[8]*wz + e[12]
+  const cpy = e[1]*wx + e[5]*wy + e[9]*wz + e[13]
+  const cpz = e[2]*wx + e[6]*wy + e[10]*wz + e[14]
+  if (cpz >= -0.05) return null
+  const dep = -cpz
+  const u0  = k.x * cpx / dep + k.z
+  const v0  = k.y * (-cpy) / dep + k.w
+  const [u, v] = applyUvOrientation(u0, v0, ori)
+  if (u < 0 || u > 1 || v < 0 || v > 1 || !td.pixels) return null
+  const pu = Math.min(td.pw - 1, Math.max(0, Math.floor(u * td.pw)))
+  const pv = Math.min(td.ph - 1, Math.max(0, Math.floor(v * td.ph)))
+  const pi = (pv * td.pw + pu) * 4
+  return [td.pixels[pi], td.pixels[pi + 1], td.pixels[pi + 2]]
+}
+
 // ── WPA-6 Photo-Forward Splatting (PFS) ──────────────────────────────────────
 //
 // Analogy: DIBR (Depth Image Based Rendering), MPEG-I Immersive Video, instant 3DGS.
@@ -538,6 +560,32 @@ function invertUvOrientation(ud, vd, ori) {
 //   ~7–15 mm intervals — denser than the 6 mm voxel grid so coverage is full.
 const PS_VOXEL = 0.006   // 6 mm world voxels for the photosplat colour map
 const PS_SUB   = 4        // sub-samples per DMAP cell edge (16 splats / cell)
+
+// ── WPA-7 Color Gradient Field ────────────────────────────────────────────────
+//
+// Analogy: first-order Taylor series / FEM linear shape functions / gradient-
+// domain rendering (Pérez 2003 Poisson image editing).
+//
+// WPA-6 stores a single flat colour {r,g,b} per 6mm voxel sampled from the best
+// camera's photo.  Every LiDAR point within 6mm of the sample gets exactly that
+// colour — constant within the voxel.  This produces visible "blocky" colour
+// patches at voxel boundaries when the underlying texture has a gradient (e.g.
+// a brick wall with light/shadow transition).
+//
+// WPA-7 stores a first-order Taylor expansion of the photo's colour field around
+// each sample point: colour(x) ≈ colour(p) + ∇colour · (x − p).  The gradient
+// is computed by central finite differences: project (p ± ε) into the same
+// camera frame and sample the resulting pixel.  GR_EPS = 1.5 cm captures texture
+// features down to ~7.5 mm at 2 m depth (Nyquist: half the step size).
+//
+// Apply pass: for each LiDAR point x we look up its 6mm psMap voxel (hit rate
+// ~68%), read the Taylor coefficients, and compute the extrapolated colour:
+//   r(x) = clamp(ps.r + dr_dx·Δx + dr_dy·Δy + dr_dz·Δz, 0, 255)
+// This gives per-point colours that smoothly track the photo's texture gradient
+// rather than freezing at the nearest voxel's flat sample.
+//
+// Performance: 6 extra projections × 20K sampled points ≈ +120K ops ≈ +0.5ms.
+const GR_EPS = 0.015  // 1.5 cm central-difference step for colour gradient
 
 /**
  * buildPhotosplats — WPA-6 Photo-Forward Splatting
@@ -1263,11 +1311,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       facingSum += bestFacing
       facingCount++
 
-      // WPA-6 inline colour bake — sample the photo pixel at the exact UV
-      // already computed above for this sampled point.  Per-point accuracy:
-      // no DMAP cell blocking, no depth-map sparsity gaps.  This fills psMap
-      // with ~20K entries (one per sampled point with a valid camera) so the
-      // propagation pass below covers virtually all of the LiDAR cloud.
+      // WPA-7 inline colour bake + gradient field ─────────────────────────────
+      // Sample the photo pixel at (bestU, bestV) for the base colour, then
+      // compute the world-space colour gradient via 3-axis central finite
+      // differences (GR_EPS = 1.5 cm).  Store a first-order Taylor expansion
+      // in psMap so nearby LiDAR points can extrapolate colour rather than
+      // inheriting a flat constant from their nearest voxel centre.
       const td6 = textures[bestCamIdx]
       if (td6.pixels) {
         const iu6 = Math.min(td6.pw - 1, Math.max(0, Math.floor(bestU * td6.pw)))
@@ -1280,7 +1329,48 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         const vkp = (bxp+2048)*16777216 + (byp+2048)*4096 + (bzp+2048)
         const ex6 = psMap.get(vkp)
         if (!ex6 || bestScore > ex6.score) {
-          psMap.set(vkp, { r: td6.pixels[pi6], g: td6.pixels[pi6+1], b: td6.pixels[pi6+2], score: bestScore })
+          // Base colour at sample point
+          const rc = td6.pixels[pi6], gc = td6.pixels[pi6+1], bc = td6.pixels[pi6+2]
+
+          // WPA-7: 3-axis central finite differences for colour gradient.
+          // e7/k7/o7 are the w2c matrix, K vector, and orientation for the best camera.
+          const e7 = w2cElems[bestCamIdx]
+          const k7 = camKVec[bestCamIdx]
+          const o7 = camOriArr[bestCamIdx] | 0
+
+          let dr_dx = 0, dr_dy = 0, dr_dz = 0
+          let dg_dx = 0, dg_dy = 0, dg_dz = 0
+          let db_dx = 0, db_dy = 0, db_dz = 0
+
+          // X-axis gradient
+          const pxp = sampleCamPx(xr + GR_EPS, yr, zr, e7, k7, o7, td6)
+          const pxm = sampleCamPx(xr - GR_EPS, yr, zr, e7, k7, o7, td6)
+          if      (pxp && pxm) { const inv2 = 1 / (2 * GR_EPS); dr_dx = (pxp[0]-pxm[0])*inv2; dg_dx = (pxp[1]-pxm[1])*inv2; db_dx = (pxp[2]-pxm[2])*inv2 }
+          else if (pxp)        { const inv  = 1 / GR_EPS;       dr_dx = (pxp[0]-rc)*inv;       dg_dx = (pxp[1]-gc)*inv;       db_dx = (pxp[2]-bc)*inv }
+          else if (pxm)        { const inv  = 1 / GR_EPS;       dr_dx = (rc-pxm[0])*inv;       dg_dx = (gc-pxm[1])*inv;       db_dx = (bc-pxm[2])*inv }
+
+          // Y-axis gradient
+          const pyp = sampleCamPx(xr, yr + GR_EPS, zr, e7, k7, o7, td6)
+          const pym = sampleCamPx(xr, yr - GR_EPS, zr, e7, k7, o7, td6)
+          if      (pyp && pym) { const inv2 = 1 / (2 * GR_EPS); dr_dy = (pyp[0]-pym[0])*inv2; dg_dy = (pyp[1]-pym[1])*inv2; db_dy = (pyp[2]-pym[2])*inv2 }
+          else if (pyp)        { const inv  = 1 / GR_EPS;       dr_dy = (pyp[0]-rc)*inv;       dg_dy = (pyp[1]-gc)*inv;       db_dy = (pyp[2]-bc)*inv }
+          else if (pym)        { const inv  = 1 / GR_EPS;       dr_dy = (rc-pym[0])*inv;       dg_dy = (gc-pym[1])*inv;       db_dy = (bc-pym[2])*inv }
+
+          // Z-axis gradient
+          const pzp = sampleCamPx(xr, yr, zr + GR_EPS, e7, k7, o7, td6)
+          const pzm = sampleCamPx(xr, yr, zr - GR_EPS, e7, k7, o7, td6)
+          if      (pzp && pzm) { const inv2 = 1 / (2 * GR_EPS); dr_dz = (pzp[0]-pzm[0])*inv2; dg_dz = (pzp[1]-pzm[1])*inv2; db_dz = (pzp[2]-pzm[2])*inv2 }
+          else if (pzp)        { const inv  = 1 / GR_EPS;       dr_dz = (pzp[0]-rc)*inv;       dg_dz = (pzp[1]-gc)*inv;       db_dz = (pzp[2]-bc)*inv }
+          else if (pzm)        { const inv  = 1 / GR_EPS;       dr_dz = (rc-pzm[0])*inv;       dg_dz = (gc-pzm[1])*inv;       db_dz = (bc-pzm[2])*inv }
+
+          psMap.set(vkp, {
+            r: rc, g: gc, b: bc,
+            px: xr, py: yr, pz: zr,
+            dr_dx, dr_dy, dr_dz,
+            dg_dx, dg_dy, dg_dz,
+            db_dx, db_dy, db_dz,
+            score: bestScore
+          })
         }
       }
     }
@@ -1392,20 +1482,18 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   camAssignVox.clear() // free ~20K entry map
 
-  // ── WPA-6: Apply inline-baked photo colours to LiDAR vertex colours ─────────
+  // ── WPA-7: Apply gradient-field colour bake to LiDAR vertex colours ─────────
   //
-  // psMap was filled during the scoring pass above: for every sampled point
-  // whose best camera was found, the exact photo pixel at (bestU, bestV) was
-  // read and stored in a 6 mm voxel.  This gives per-point colour accuracy
-  // (vs the old DMAP-cell approach which blocked 40 mm regions with one colour).
-  // Coverage now matches WPA-5 wall coverage (~68%) rather than the old 29%.
-  //
-  // Walk every LiDAR point: 6 mm voxel lookup + 3×3×3 neighbour search.
-  // Hits overwrite the vertex colour attribute and set camAssignAll=-1 so the
-  // GLSL fast-paths to the baked colour (pow(0.9) gamma, no UV projection).
-  // Misses fall through to real-time WPA-5 UV projection as before.
-  console.info(`[WPA-6] psMap: ${psMap.size} entries (${nCams} cams, ${Math.floor(nPts/sampleStep)} samples inline)`)
-  onProgress?.(89, 'Applying photosplat colours to LiDAR cloud…')
+  // psMap was filled during the scoring pass: each entry is a first-order
+  // Taylor expansion of the photo's colour field around a sampled world point.
+  // Walk every LiDAR point, do a 6 mm voxel lookup + 3×3×3 neighbour search,
+  // then compute the extrapolated colour:
+  //   r(x) = clamp( ps.r + dr_dx·(x-px) + dr_dy·(y-py) + dr_dz·(z-pz), 0, 255 )
+  // This tracks the photo's texture gradient across the 6 mm voxel instead of
+  // applying a flat constant — sub-voxel colour accuracy vs WPA-6.
+  // Misses fall through to real-time WPA-5 UV projection in the GPU shader.
+  console.info(`[WPA-7] psMap: ${psMap.size} entries (${nCams} cams, ${Math.floor(nPts/sampleStep)} samples + gradients)`)
+  onProgress?.(89, 'Applying WPA-7 gradient colour field to LiDAR cloud…')
   const colorAttr = points.geometry.attributes.color
   let psHits = 0, psNeighHits = 0, psMisses = 0
 
@@ -1434,8 +1522,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       else    psMisses++
     }
     if (ps && colorAttr) {
-      // Overwrite vertex colour with photosplat photo RGB (0–255 → 0–1).
-      colorAttr.setXYZ(i, ps.r / 255, ps.g / 255, ps.b / 255)
+      // WPA-7: Taylor-expand the colour around the sample point using the
+      // world-space gradient field.  Δ = displacement from voxel sample centre.
+      const Δx = xi - ps.px, Δy = yi - ps.py, Δz = zi - ps.pz
+      const rVal = Math.max(0, Math.min(255, ps.r + ps.dr_dx*Δx + ps.dr_dy*Δy + ps.dr_dz*Δz))
+      const gVal = Math.max(0, Math.min(255, ps.g + ps.dg_dx*Δx + ps.dg_dy*Δy + ps.dg_dz*Δz))
+      const bVal = Math.max(0, Math.min(255, ps.b + ps.db_dx*Δx + ps.db_dy*Δy + ps.db_dz*Δz))
+      colorAttr.setXYZ(i, rVal / 255, gVal / 255, bVal / 255)
       // Sentinel -1: GLSL detects this and uses vColor directly (no UV projection).
       camAssignAll[i] = -1
     }
@@ -1446,7 +1539,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const psHitPct   = nPts > 0 ? Math.round((psHits + psNeighHits) / nPts * 100) : 0
   const psMissPct  = nPts > 0 ? Math.round(psMisses / nPts * 100) : 0
   console.info(
-    `[WPA-6] photosplat bake: ${psHits} direct + ${psNeighHits} neigh = ` +
+    `[WPA-7] gradient bake: ${psHits} direct + ${psNeighHits} neigh = ` +
     `${psHits+psNeighHits}/${nPts} pts (${psHitPct}% covered), ${psMisses} miss (${psMissPct}%)`
   )
 
@@ -1516,11 +1609,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  onProgress?.(95, `Photo projection applied (${coveragePct}% WPA-5 + ${psHitPct}% WPA-6 photosplat)…`)
+  onProgress?.(95, `Photo projection applied (${coveragePct}% WPA-5 + ${psHitPct}% WPA-7 gradient)…`)
   console.info(
-    `[projective] WPA-6 (photosplat+WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
+    `[projective] WPA-7 (gradient-field+WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
     `${usedCamCount} active | WPA-5: ${coveragePct}% wall coverage | ` +
-    `WPA-6 photosplat: ${psHitPct}% pts baked (${psMissPct}% miss→WPA-5 fallback) | ` +
+    `WPA-7 gradient bake: ${psHitPct}% pts (${psMissPct}% miss→WPA-5 fallback) | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
     `voxel ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
     `med splat ${medSpacingMm}mm`
@@ -1545,10 +1638,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projVoxNeighPct: voxNeighPct, // % assigned via 26-neighbour search
       projVoxFailPct:  voxFailPct,  // % with no voxel hit in 3×3×3 cube → uses all cameras in GPU
       projSampleStep:  sampleStep,  // 1 sample per N pts — lower = denser coverage pre-pass
-      // WPA-6 photosplat diagnostics
-      psPct:           psHitPct,    // % of LiDAR pts baked with photosplat colour
+      // WPA-7 gradient-field diagnostics
+      psPct:           psHitPct,    // % of LiDAR pts baked with gradient-field colour
       psMissPct,                    // % falling back to WPA-5 UV projection
-      colourMethod:    `WPA-6 PFS (${psHitPct}% photosplat) + WPA-5 fallback (${coveragePct}% wall UV)`,
+      colourMethod:    `WPA-7 gradient (${psHitPct}% baked, GR_EPS=${GR_EPS*100}cm) + WPA-5 fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }
