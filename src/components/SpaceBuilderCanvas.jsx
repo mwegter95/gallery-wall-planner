@@ -1236,11 +1236,6 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
-  // WPA-6: psMap is built inline below during the scoring pass.
-  // Each sampled point's best-camera UV is used for a direct pixel lookup —
-  // exact per-point colour accuracy instead of coarse 128×128 DMAP blocks.
-  const psMap = new Map()   // voxKey(6 mm) → {r, g, b, score}
-
   onProgress?.(78, 'Scoring camera coverage…')
   for (let i = 0; i < nPts; i += sampleStep) {
     const xr = posAttr.getX(i), yr = posAttr.getY(i), zr = posAttr.getZ(i)
@@ -1248,7 +1243,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     // WPA-4: use PCA-estimated per-point normal
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
 
-    let bestScore = 0, bestDepth = 0, bestCamIdx = -1, bestFacing = 0, bestU = 0, bestV = 0
+    let bestScore = 0, bestDepth = 0, bestCamIdx = -1, bestFacing = 0
     // top3: small sorted list of {ci, score} for camera assignment attribute
     const top3 = []
 
@@ -1307,7 +1302,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const spinRaw = suLen > 0.01 ? Math.abs((camYx*sux + camYy*suy + camYz*suz)/suLen) : 1
       const sf2 = Math.max(0.25, spinRaw) ** 2
       const score = angRes * f6 * cv * sf2
-      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing; bestU = u; bestV = v }
+      if (score > bestScore) { bestScore = score; bestDepth = depth; bestCamIdx = ci; bestFacing = facing }
 
       // Track top-3 cameras for GPU vertex attribute
       top3.push({ ci, score })
@@ -1325,68 +1320,6 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       facingSum += bestFacing
       facingCount++
 
-      // WPA-7 inline colour bake + gradient field ─────────────────────────────
-      // Sample the photo pixel at (bestU, bestV) for the base colour, then
-      // compute the world-space colour gradient via 3-axis central finite
-      // differences (GR_EPS = 1.5 cm).  Store a first-order Taylor expansion
-      // in psMap so nearby LiDAR points can extrapolate colour rather than
-      // inheriting a flat constant from their nearest voxel centre.
-      const td6 = textures[bestCamIdx]
-      if (td6.pixels) {
-        const iu6 = Math.min(td6.pw - 1, Math.max(0, Math.floor(bestU * td6.pw)))
-        const iv6 = Math.min(td6.ph - 1, Math.max(0, Math.floor(bestV * td6.ph)))
-        const pi6 = (iv6 * td6.pw + iu6) * 4
-        const bxp = Math.round(xr / PS_VOXEL)
-        const byp = Math.round(yr / PS_VOXEL)
-        const bzp = Math.round(zr / PS_VOXEL)
-        // winner-takes-all: higher score → better angular resolution → sharper colour
-        const vkp = (bxp+2048)*16777216 + (byp+2048)*4096 + (bzp+2048)
-        const ex6 = psMap.get(vkp)
-        if (!ex6 || bestScore > ex6.score) {
-          // Base colour at sample point
-          const rc = td6.pixels[pi6], gc = td6.pixels[pi6+1], bc = td6.pixels[pi6+2]
-
-          // WPA-7: 3-axis central finite differences for colour gradient.
-          // e7/k7/o7 are the w2c matrix, K vector, and orientation for the best camera.
-          const e7 = w2cElems[bestCamIdx]
-          const k7 = camKVec[bestCamIdx]
-          const o7 = camOriArr[bestCamIdx] | 0
-
-          let dr_dx = 0, dr_dy = 0, dr_dz = 0
-          let dg_dx = 0, dg_dy = 0, dg_dz = 0
-          let db_dx = 0, db_dy = 0, db_dz = 0
-
-          // X-axis gradient
-          const pxp = sampleCamPx(xr + GR_EPS, yr, zr, e7, k7, o7, td6)
-          const pxm = sampleCamPx(xr - GR_EPS, yr, zr, e7, k7, o7, td6)
-          if      (pxp && pxm) { const inv2 = 1 / (2 * GR_EPS); dr_dx = (pxp[0]-pxm[0])*inv2; dg_dx = (pxp[1]-pxm[1])*inv2; db_dx = (pxp[2]-pxm[2])*inv2 }
-          else if (pxp)        { const inv  = 1 / GR_EPS;       dr_dx = (pxp[0]-rc)*inv;       dg_dx = (pxp[1]-gc)*inv;       db_dx = (pxp[2]-bc)*inv }
-          else if (pxm)        { const inv  = 1 / GR_EPS;       dr_dx = (rc-pxm[0])*inv;       dg_dx = (gc-pxm[1])*inv;       db_dx = (bc-pxm[2])*inv }
-
-          // Y-axis gradient
-          const pyp = sampleCamPx(xr, yr + GR_EPS, zr, e7, k7, o7, td6)
-          const pym = sampleCamPx(xr, yr - GR_EPS, zr, e7, k7, o7, td6)
-          if      (pyp && pym) { const inv2 = 1 / (2 * GR_EPS); dr_dy = (pyp[0]-pym[0])*inv2; dg_dy = (pyp[1]-pym[1])*inv2; db_dy = (pyp[2]-pym[2])*inv2 }
-          else if (pyp)        { const inv  = 1 / GR_EPS;       dr_dy = (pyp[0]-rc)*inv;       dg_dy = (pyp[1]-gc)*inv;       db_dy = (pyp[2]-bc)*inv }
-          else if (pym)        { const inv  = 1 / GR_EPS;       dr_dy = (rc-pym[0])*inv;       dg_dy = (gc-pym[1])*inv;       db_dy = (bc-pym[2])*inv }
-
-          // Z-axis gradient
-          const pzp = sampleCamPx(xr, yr, zr + GR_EPS, e7, k7, o7, td6)
-          const pzm = sampleCamPx(xr, yr, zr - GR_EPS, e7, k7, o7, td6)
-          if      (pzp && pzm) { const inv2 = 1 / (2 * GR_EPS); dr_dz = (pzp[0]-pzm[0])*inv2; dg_dz = (pzp[1]-pzm[1])*inv2; db_dz = (pzp[2]-pzm[2])*inv2 }
-          else if (pzp)        { const inv  = 1 / GR_EPS;       dr_dz = (pzp[0]-rc)*inv;       dg_dz = (pzp[1]-gc)*inv;       db_dz = (pzp[2]-bc)*inv }
-          else if (pzm)        { const inv  = 1 / GR_EPS;       dr_dz = (rc-pzm[0])*inv;       dg_dz = (gc-pzm[1])*inv;       db_dz = (bc-pzm[2])*inv }
-
-          psMap.set(vkp, {
-            r: rc, g: gc, b: bc,
-            px: xr, py: yr, pz: zr,
-            dr_dx, dr_dy, dr_dz,
-            dg_dx, dg_dy, dg_dz,
-            db_dx, db_dy, db_dz,
-            score: bestScore
-          })
-        }
-      }
     }
 
     // Pack top-3 camera assignment for GPU vertex attribute
@@ -1496,65 +1429,104 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   camAssignVox.clear() // free ~20K entry map
 
-  // ── WPA-7: Apply gradient-field colour bake to LiDAR vertex colours ─────────
+  // ── WPA-7 Direct CPU Projection ──────────────────────────────────────────────
   //
-  // psMap was filled during the scoring pass: each entry is a first-order
-  // Taylor expansion of the photo's colour field around a sampled world point.
-  // Walk every LiDAR point, do a 6 mm voxel lookup + 3×3×3 neighbour search,
-  // then compute the extrapolated colour:
-  //   r(x) = clamp( ps.r + dr_dx·(x-px) + dr_dy·(y-py) + dr_dz·(z-pz), 0, 255 )
-  // This tracks the photo's texture gradient across the 6 mm voxel instead of
-  // applying a flat constant — sub-voxel colour accuracy vs WPA-6.
-  // Misses fall through to real-time WPA-5 UV projection in the GPU shader.
-  console.info(`[WPA-7] psMap: ${psMap.size} entries (${nCams} cams, ${Math.floor(nPts/sampleStep)} samples + gradients)`)
-  onProgress?.(89, 'Applying WPA-7 gradient colour field to LiDAR cloud…')
+  // Zero voxelisation.  For every LiDAR point that has a camera assignment
+  // (from the camAssignAll propagation above), project THAT EXACT 3D point
+  // into its assigned camera and sample the pixel.  Bake the result directly
+  // into the vertex colour attribute.
+  //
+  // Analogy: this is the CPU equivalent of the GPU WPA-5 UV projection shader,
+  // run once at load time instead of per fragment per frame.  Because each point
+  // gets its own UV — not an interpolated or voxel-quantised UV — there are no
+  // grid boundaries and no colour blocking.
+  //
+  // Points with no camera assignment (camAssignAll=0) keep camAssignAll=0 and
+  // fall through to the real-time GPU WPA-5 multi-camera search as before.
+  // Points with a hit get camAssignAll=-1 so the GLSL fast-path outputs vColor.
+  //
+  // Performance: ~9.8 M pts × ~40 arithmetic ops ≈ 0.2–0.5 s in V8.
+  // All inner-loop data is pre-flattened into TypedArrays for JIT efficiency.
+  onProgress?.(89, 'Baking photo colours onto LiDAR cloud (direct projection)…')
   const colorAttr = points.geometry.attributes.color
-  let psHits = 0, psNeighHits = 0, psMisses = 0
+  const colorArr  = colorAttr?.array         // Float32Array stride-3
+
+  // Pre-flatten camera matrices into one contiguous Float32Array.
+  // Layout per camera: [ e0,e4,e8,e12,  e1,e5,e9,e13,  e2,e6,e10,e14 ]
+  // (the three rows of the w2c matrix we actually need for projection).
+  const w2cFlat = new Float32Array(nCams * 12)
+  for (let ci = 0; ci < nCams; ci++) {
+    const e = w2cElems[ci], b = ci * 12
+    w2cFlat[b]   = e[0];  w2cFlat[b+1] = e[4];  w2cFlat[b+2]  = e[8];  w2cFlat[b+3]  = e[12]
+    w2cFlat[b+4] = e[1];  w2cFlat[b+5] = e[5];  w2cFlat[b+6]  = e[9];  w2cFlat[b+7]  = e[13]
+    w2cFlat[b+8] = e[2];  w2cFlat[b+9] = e[6];  w2cFlat[b+10] = e[10]; w2cFlat[b+11] = e[14]
+  }
+  const camKFlat = new Float32Array(nCams * 4)
+  for (let ci = 0; ci < nCams; ci++) {
+    const k = camKVec[ci], b = ci * 4
+    camKFlat[b] = k.x; camKFlat[b+1] = k.y; camKFlat[b+2] = k.z; camKFlat[b+3] = k.w
+  }
+  const camOriInt = new Int32Array(nCams)
+  for (let ci = 0; ci < nCams; ci++) camOriInt[ci] = camOriArr[ci] | 0
+  const camPxArr = textures.map(t => t.pixels)   // Uint8Array or null per camera
+  const camPW    = new Int32Array(textures.map(t => t.pw))
+  const camPH    = new Int32Array(textures.map(t => t.ph))
+
+  const posArr = posAttr.array   // Float32Array stride-3
+  let directHits = 0, directMisses = 0
 
   for (let i = 0; i < nPts; i++) {
-    const xi = posAttr.getX(i), yi = posAttr.getY(i), zi = posAttr.getZ(i)
-    const bx = Math.round(xi / PS_VOXEL)
-    const by = Math.round(yi / PS_VOXEL)
-    const bz = Math.round(zi / PS_VOXEL)
-    const key = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
-    let ps = psMap.get(key)
-    if (ps) {
-      psHits++
-    } else {
-      // 3×3×3 neighbour search — handles LiDAR points that fall between splat voxels
-      outer6: for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dz = -1; dz <= 1; dz++) {
-            if (!dx && !dy && !dz) continue
-            const k2 = (bx+dx+2048)*16777216 + (by+dy+2048)*4096 + (bz+dz+2048)
-            const p2 = psMap.get(k2)
-            if (p2) { ps = p2; break outer6 }
-          }
-        }
-      }
-      if (ps) psNeighHits++
-      else    psMisses++
-    }
-    if (ps && colorAttr) {
-      // WPA-7: Taylor-expand the colour around the sample point using the
-      // world-space gradient field.  Δ = displacement from voxel sample centre.
-      const Δx = xi - ps.px, Δy = yi - ps.py, Δz = zi - ps.pz
-      const rVal = Math.max(0, Math.min(255, ps.r + ps.dr_dx*Δx + ps.dr_dy*Δy + ps.dr_dz*Δz))
-      const gVal = Math.max(0, Math.min(255, ps.g + ps.dg_dx*Δx + ps.dg_dy*Δy + ps.dg_dz*Δz))
-      const bVal = Math.max(0, Math.min(255, ps.b + ps.db_dx*Δx + ps.db_dy*Δy + ps.db_dz*Δz))
-      colorAttr.setXYZ(i, rVal / 255, gVal / 255, bVal / 255)
-      // Sentinel -1: GLSL detects this and uses vColor directly (no UV projection).
-      camAssignAll[i] = -1
-    }
-  }
-  if (colorAttr) colorAttr.needsUpdate = true
-  psMap.clear()
+    const packed = camAssignAll[i]
+    if (!packed) { directMisses++; continue }   // no camera assignment → GPU WPA-5
 
-  const psHitPct   = nPts > 0 ? Math.round((psHits + psNeighHits) / nPts * 100) : 0
-  const psMissPct  = nPts > 0 ? Math.round(psMisses / nPts * 100) : 0
+    const c0 = packed & 31                      // best camera index (5 bits)
+    const px = camPxArr[c0]
+    if (!px) { directMisses++; continue }       // camera had no pixel data
+
+    const i3   = i * 3
+    const xi   = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
+    const b    = c0 * 12
+    // Transform world point into camera space (column-major w2c applied as rows)
+    const cpx  = w2cFlat[b]   * xi + w2cFlat[b+1]  * yi + w2cFlat[b+2]  * zi + w2cFlat[b+3]
+    const cpy  = w2cFlat[b+4] * xi + w2cFlat[b+5]  * yi + w2cFlat[b+6]  * zi + w2cFlat[b+7]
+    const cpz  = w2cFlat[b+8] * xi + w2cFlat[b+9]  * yi + w2cFlat[b+10] * zi + w2cFlat[b+11]
+    if (cpz >= -0.05) { directMisses++; continue }   // behind camera
+
+    const dep  = -cpz
+    const kb   = c0 * 4
+    const u0   = camKFlat[kb]   * cpx / dep + camKFlat[kb + 2]
+    const v0   = camKFlat[kb+1] * (-cpy) / dep + camKFlat[kb + 3]
+
+    // Inline UV orientation (avoids array allocation from applyUvOrientation)
+    let u, v
+    const ori = camOriInt[c0]
+    if      (ori === 1) { u = 1 - v0; v = u0 }
+    else if (ori === 2) { u = 1 - u0; v = 1 - v0 }
+    else if (ori === 3) { u = v0;     v = 1 - u0 }
+    else                { u = u0;     v = v0 }
+
+    if (u < 0 || u > 1 || v < 0 || v > 1) { directMisses++; continue }
+
+    // Sample pixel (nearest-neighbour, matching loadSnapshotTex resolution)
+    const pu = Math.min(camPW[c0] - 1, (u * camPW[c0]) | 0)
+    const pv = Math.min(camPH[c0] - 1, (v * camPH[c0]) | 0)
+    const pi = (pv * camPW[c0] + pu) * 4
+
+    if (colorArr) {
+      colorArr[i3]     = px[pi]     / 255
+      colorArr[i3 + 1] = px[pi + 1] / 255
+      colorArr[i3 + 2] = px[pi + 2] / 255
+    }
+    camAssignAll[i] = -1   // GLSL fast-path: output vColor directly, no UV re-projection
+    directHits++
+  }
+  if (colorArr) colorAttr.needsUpdate = true
+
+  const psHitPct  = nPts > 0 ? Math.round(directHits  / nPts * 100) : 0
+  const psMissPct = nPts > 0 ? Math.round(directMisses / nPts * 100) : 0
   console.info(
-    `[WPA-7] gradient bake: ${psHits} direct + ${psNeighHits} neigh = ` +
-    `${psHits+psNeighHits}/${nPts} pts (${psHitPct}% covered), ${psMisses} miss (${psMissPct}%)`
+    `[WPA-7] direct CPU bake: ${directHits}/${nPts} pts (${psHitPct}% hit), ` +
+    `${directMisses} miss (${psMissPct}% → GPU WPA-5 fallback)`
   )
 
   // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
@@ -1623,13 +1595,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  onProgress?.(95, `Photo projection applied (${coveragePct}% WPA-5 + ${psHitPct}% WPA-7 gradient)…`)
+  onProgress?.(95, `Photo projection applied (${psHitPct}% CPU-baked + ${psMissPct}% GPU WPA-5)…`)
   console.info(
-    `[projective] WPA-7 (gradient-field+WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
-    `${usedCamCount} active | WPA-5: ${coveragePct}% wall coverage | ` +
-    `WPA-7 gradient bake: ${psHitPct}% pts (${psMissPct}% miss→WPA-5 fallback) | ` +
+    `[projective] WPA-7 direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
+    `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | WPA-5 wall coverage: ${coveragePct}% | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
-    `voxel ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
+    `voxel assign ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
     `med splat ${medSpacingMm}mm`
   )
 
@@ -1652,10 +1623,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projVoxNeighPct: voxNeighPct, // % assigned via 26-neighbour search
       projVoxFailPct:  voxFailPct,  // % with no voxel hit in 3×3×3 cube → uses all cameras in GPU
       projSampleStep:  sampleStep,  // 1 sample per N pts — lower = denser coverage pre-pass
-      // WPA-7 gradient-field diagnostics
-      psPct:           psHitPct,    // % of LiDAR pts baked with gradient-field colour
-      psMissPct,                    // % falling back to WPA-5 UV projection
-      colourMethod:    `WPA-7 gradient (${psHitPct}% baked, GR_EPS=${GR_EPS*100}cm) + WPA-5 fallback (${coveragePct}% wall UV)`,
+      // WPA-7 direct CPU bake diagnostics
+      psPct:           psHitPct,    // % of LiDAR pts with CPU-baked colour (no voxelisation)
+      psMissPct,                    // % falling back to GPU WPA-5 UV projection
+      colourMethod:    `WPA-7 direct CPU (${psHitPct}% baked) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }
