@@ -304,6 +304,18 @@ function makeProjFragShader(nCams) {
       vec2 pc = gl_PointCoord - 0.5;
       if (dot(pc, pc) > 0.25) discard;
 
+      // WPA-6 photosplat fast-path ───────────────────────────────────────────
+      // When the CPU photosplat builder has baked a photo pixel directly into
+      // the vertex colour attribute (vColor), it sets aCamAssign = -1 as a
+      // sentinel so the GPU skips UV projection entirely and just uses the
+      // pre-baked colour.  The same pow(0.9) gamma as the UV projection path
+      // is applied so photosplat / WPA-5 boundary pixels are invisible.
+      if (vCamAssign < 0.0) {
+        vec3 psc = pow(clamp(vColor, 0.0, 1.0), vec3(0.9));
+        gl_FragColor = vec4(psc, 1.0);
+        return;
+      }
+
       // Project the point centre (not per-fragment disc position) so every
       // sub-pixel of a splat gets the same UV — no smearing as camera moves.
       vec3 fragRaw = vec3(vWorldPos.x, vWorldPos.y - uYOffset, vWorldPos.z);
@@ -485,6 +497,137 @@ function applyUvOrientation(u0, v0, ori) {
   return [u0, v0]
 }
 
+// WPA-6: inverse of applyUvOrientation — converts display UV back to sensor/K frame.
+// applyUvOrientation: (u0, v0) sensor → (ud, vd) display
+// invertUvOrientation: (ud, vd) display → (u0, v0) sensor
+//   ori=0: identity         → inverse: identity
+//   ori=1: ud=1-v0, vd=u0   → u0=vd, v0=1-ud
+//   ori=2: ud=1-u0, vd=1-v0 → u0=1-ud, v0=1-vd
+//   ori=3: ud=v0, vd=1-u0   → u0=1-vd, v0=ud
+function invertUvOrientation(ud, vd, ori) {
+  if (ori === 1) return [vd, 1 - ud]
+  if (ori === 2) return [1 - ud, 1 - vd]
+  if (ori === 3) return [1 - vd, ud]
+  return [ud, vd]
+}
+
+// ── WPA-6 Photo-Forward Splatting (PFS) ──────────────────────────────────────
+//
+// Analogy: DIBR (Depth Image Based Rendering), MPEG-I Immersive Video, instant 3DGS.
+//
+// Core insight: instead of projecting LiDAR points INTO photos (WPA-5), unproject
+// PHOTO PIXELS into 3D world space using the depth maps already built for
+// occlusion culling.  Photo pixels already carry the correct colour for their
+// view ray — the only error source is depth map accuracy (±5 mm), not lens model.
+//
+// This completely eliminates the pinhole model error that caused UW panoramic
+// wrapping: UW barrel distortion only matters when projecting 3D→2D.  When we
+// go 2D→3D (pixel + depth → world position), the K matrix is only used to
+// compute the ideal ray direction — and the K matrix IS correct even for UW
+// cameras (it describes the nodal-point ray angle, not the distorted pixel
+// position).  The distortion error in WPA-5 comes from pinhole projection of a
+// 3D point back to a UW-distorted image and sampling the wrong pixel.  WPA-6
+// starts at the pixel (correct colour by definition) and asks "where in 3D
+// does this pixel's ray land at this depth?" — answering with K is exact.
+//
+// PS_VOXEL: 3D voxel size for photosplat world map (metres).  6 mm gives
+//   ~1 voxel per 4 mm LiDAR point — close enough that the 3×3×3 neighbour
+//   search in the LiDAR lookup virtually eliminates misses.
+// PS_SUB: sub-cell sampling density per DMAP edge.  A 128×128 depth map cell
+//   spans ~30–60 mm at a 2 m wall.  PS_SUB=4 creates 16 splats per cell, at
+//   ~7–15 mm intervals — denser than the 6 mm voxel grid so coverage is full.
+const PS_VOXEL = 0.006   // 6 mm world voxels for the photosplat colour map
+const PS_SUB   = 4        // sub-samples per DMAP cell edge (16 splats / cell)
+
+/**
+ * buildPhotosplats — WPA-6 Photo-Forward Splatting
+ *
+ * Iterates over all cameras × DMAP cells × PS_SUB² sub-samples.
+ * For each sub-sample:
+ *   1. Convert display-frame DMAP UV to sensor-frame UV via invertUvOrientation.
+ *   2. Unproject sensor-frame UV + cell depth → 3D world position using c2w.
+ *   3. Sample display-frame image pixel at display UV.
+ *   4. Insert into a Map<voxKey, {r,g,b,score}> with winner-takes-all by
+ *      angular-resolution score (camFx / depth²) — the same metric as WPA-5.
+ *
+ * Returns the colour map for lookup during LiDAR vertex-colour baking.
+ *
+ * @param {Array} snaps        — snapshot metadata (c2w, K, …)
+ * @param {Array} textures     — [{tex, pixels, pw, ph}, …] from loadSnapshotTex
+ * @param {Array} depthMaps    — Float32Array[DMAP×DMAP] per camera (built in WPA-5 pass)
+ * @param {Array} camKVec      — THREE.Vector4(fxn,fyn,cxn,cyn) per camera
+ * @param {Float32Array} camFxArr — raw focal length (px) per camera
+ * @param {Float32Array} camOriArr — 0=landscape, 1=portrait per camera
+ * @param {number} DMAP        — depth map edge resolution (128)
+ * @returns {Map<number, {r:number, g:number, b:number, score:number}>}
+ */
+function buildPhotosplats(snaps, textures, depthMaps, camKVec, camFxArr, camOriArr, DMAP) {
+  const nCams = snaps.length
+  const psMap = new Map()   // voxKey → {r, g, b, score}
+
+  for (let ci = 0; ci < nCams; ci++) {
+    const { pixels, pw, ph } = textures[ci]
+    if (!pixels) continue   // black1x1 fallback — no pixel data
+
+    const kv    = camKVec[ci]
+    const fxn   = kv.x, fyn = kv.y, cxn = kv.z, cyn = kv.w
+    const camFx = camFxArr[ci]
+    const ori   = camOriArr[ci] | 0
+    const c2w   = snaps[ci].c2w   // column-major 4×4 camera→world
+
+    for (let dv = 0; dv < DMAP; dv++) {
+      for (let du = 0; du < DMAP; du++) {
+        const depth = depthMaps[ci][dv * DMAP + du]
+        if (depth > 1e8) continue   // no geometry in this cell
+        const score = camFx / (depth * depth + 0.001)
+
+        for (let sdv = 0; sdv < PS_SUB; sdv++) {
+          for (let sdu = 0; sdu < PS_SUB; sdu++) {
+            // Display-frame UV at sub-cell centre
+            const ud = (du + (sdu + 0.5) / PS_SUB) / DMAP
+            const vd = (dv + (sdv + 0.5) / PS_SUB) / DMAP
+
+            // Convert display UV → sensor (K-frame) UV for ray unproject
+            const [us, vs] = invertUvOrientation(ud, vd, ori)
+
+            // Camera-space ray using pinhole K:
+            //   rcx = (us - cxn) / fxn,  rcy = -(vs - cyn) / fyn,  rcz = -1
+            // Scale by depth to get camera-space 3D point (no normalisation needed).
+            const cpx =  depth * (us - cxn) / fxn
+            const cpy = -depth * (vs - cyn) / fyn
+            const cpz = -depth   // camera looks down -Z
+
+            // Camera-space → world via c2w (column-major: c2w[0..3]=col0, etc.)
+            const wx = c2w[0]*cpx + c2w[4]*cpy + c2w[8]*cpz  + c2w[12]
+            const wy = c2w[1]*cpx + c2w[5]*cpy + c2w[9]*cpz  + c2w[13]
+            const wz = c2w[2]*cpx + c2w[6]*cpy + c2w[10]*cpz + c2w[14]
+
+            // 6 mm voxel key — same formula as NORM_CELL grid (safe for ±12 m rooms)
+            const bx = Math.round(wx / PS_VOXEL)
+            const by = Math.round(wy / PS_VOXEL)
+            const bz = Math.round(wz / PS_VOXEL)
+            const vkey = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
+
+            // Sample colour from display-frame image (matches what the texture shows)
+            const iu = Math.min(pw - 1, Math.max(0, Math.floor(ud * pw)))
+            const iv = Math.min(ph - 1, Math.max(0, Math.floor(vd * ph)))
+            const pidx = (iv * pw + iu) * 4
+            const r = pixels[pidx], g = pixels[pidx + 1], b = pixels[pidx + 2]
+
+            // Winner-takes-all: keep the camera with the best angular resolution.
+            const existing = psMap.get(vkey)
+            if (!existing || score > existing.score) {
+              psMap.set(vkey, { r, g, b, score })
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return psMap
+}
+
 // ── Jacobi eigendecomposition for 3×3 symmetric matrix ───────────────────────
 // Returns the eigenvector corresponding to the MINIMUM eigenvalue — this is the
 // surface normal direction (the direction of least point-cloud variance).
@@ -610,6 +753,10 @@ async function loadSnapshotTex(url) {
   ctx2d.drawImage(img, 0, 0, w, h)
   ctx2d.filter = 'none'
 
+  // WPA-6: capture pixel data AFTER blur so photosplat colours match the texture.
+  // Returns Uint8ClampedArray of RGBA bytes (0–255) in display-frame order.
+  const imgData = ctx2d.getImageData(0, 0, w, h)
+
   // WPA-4 sampling quality — mirrors the photoMesh.js pyramid/bicubic spec
   // on the GPU path instead of the (dead) CPU path:
   //
@@ -634,7 +781,8 @@ async function loadSnapshotTex(url) {
   tex.minFilter      = THREE.LinearMipMapLinearFilter  // trilinear — pyramid
   tex.magFilter      = THREE.LinearFilter              // bilinear close-up
   tex.anisotropy     = 4                               // reduce oblique shimmer
-  return tex
+  // Return as a struct so the photosplat builder can access raw pixels.
+  return { tex, pixels: imgData.data, pw: w, ph: h }
 }
 
 /**
@@ -816,14 +964,15 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   })()
   const textures = await Promise.all(snaps.map(async (s, si) => {
     try {
-      const tex = await loadSnapshotTex(s.url)
+      const td = await loadSnapshotTex(s.url)  // { tex, pixels, pw, ph }
       texLoaded++
       onProgress?.(10 + Math.round(55 * texLoaded / snaps.length), `Loading textures (${texLoaded}/${snaps.length})…`)
-      return tex
+      return td
     } catch (err) {
       console.error(`[projective] snapshot ${si} (${s.url}) failed: ${err.message}`)
       texLoaded++
-      return black1x1
+      // pixels: null signals buildPhotosplats to skip this camera.
+      return { tex: black1x1, pixels: null, pw: 1, ph: 1 }
     }
   }))
 
@@ -857,11 +1006,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // ARKit intrinsics (K) are in the native sensor frame (landscape).
   // If the loaded JPEG's display height > width, the phone was held portrait
   // and we need a 90° CW UV rotation (ori=1) to align with the K matrix.
-  const camOriArr = new Float32Array(textures.map(tex => {
-    const iw = tex.image?.naturalWidth  ?? tex.image?.width  ?? 1
-    const ih = tex.image?.naturalHeight ?? tex.image?.height ?? 1
-    return ih > iw ? 1.0 : 0.0   // portrait JPEG → ori 1 (90° CW)
-  }))
+  // WPA-6: textures is now [{tex, pixels, pw, ph}, …]; pw/ph reflect the canvas
+  // display dimensions which preserve the JPEG's original aspect ratio after scaling.
+  const camOriArr = new Float32Array(textures.map(({ ph, pw }) =>
+    ph > pw ? 1.0 : 0.0   // portrait canvas (ph > pw) → ori 1 (90° CW)
+  ))
 
   // ── WPA-2 photo-projection spacing pre-pass ─────────────────────────────
   // Sample ~20 K points; for each find the best camera using the WPA-2 score
@@ -1217,6 +1366,65 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   camAssignVox.clear() // free ~20K entry map
 
+  // ── WPA-6: Photo-Forward Splatting — bake photo pixels into vertex colours ─
+  //
+  // Build a world-space colour map by unprojecting each DMAP cell's photo pixel
+  // using its stored depth (forward splatting: 2D pixel + depth → 3D position).
+  // Then walk every LiDAR point and, if a photosplat voxel covers it, overwrite
+  // the vertex colour attribute with the photosplat RGB and set camAssignAll=-1
+  // so the GLSL skips UV projection and directly outputs the baked colour.
+  //
+  // Fallback: points not covered by any photosplat keep their WPA-5 assignment
+  // and are rendered via UV projection as before.
+  onProgress?.(83, 'Building photosplat colour map (WPA-6)…')
+  const psMap = buildPhotosplats(snaps, textures, depthMaps, camKVec, camFxArr, camOriArr, DMAP)
+  console.info(`[WPA-6] photosplat map: ${psMap.size} voxels, ${nCams} cameras × ${DMAP}×${DMAP} × ${PS_SUB}²`)
+
+  onProgress?.(89, 'Applying photosplat colours to LiDAR cloud…')
+  const colorAttr = points.geometry.attributes.color
+  let psHits = 0, psNeighHits = 0, psMisses = 0
+
+  for (let i = 0; i < nPts; i++) {
+    const xi = posAttr.getX(i), yi = posAttr.getY(i), zi = posAttr.getZ(i)
+    const bx = Math.round(xi / PS_VOXEL)
+    const by = Math.round(yi / PS_VOXEL)
+    const bz = Math.round(zi / PS_VOXEL)
+    const key = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
+    let ps = psMap.get(key)
+    if (ps) {
+      psHits++
+    } else {
+      // 3×3×3 neighbour search — handles LiDAR points that fall between splat voxels
+      outer6: for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            if (!dx && !dy && !dz) continue
+            const k2 = (bx+dx+2048)*16777216 + (by+dy+2048)*4096 + (bz+dz+2048)
+            const p2 = psMap.get(k2)
+            if (p2) { ps = p2; break outer6 }
+          }
+        }
+      }
+      if (ps) psNeighHits++
+      else    psMisses++
+    }
+    if (ps && colorAttr) {
+      // Overwrite vertex colour with photosplat photo RGB (0–255 → 0–1).
+      colorAttr.setXYZ(i, ps.r / 255, ps.g / 255, ps.b / 255)
+      // Sentinel -1: GLSL detects this and uses vColor directly (no UV projection).
+      camAssignAll[i] = -1
+    }
+  }
+  if (colorAttr) colorAttr.needsUpdate = true
+  psMap.clear()
+
+  const psHitPct   = nPts > 0 ? Math.round((psHits + psNeighHits) / nPts * 100) : 0
+  const psMissPct  = nPts > 0 ? Math.round(psMisses / nPts * 100) : 0
+  console.info(
+    `[WPA-6] photosplat bake: ${psHits} direct + ${psNeighHits} neigh = ` +
+    `${psHits+psNeighHits}/${nPts} pts (${psHitPct}% covered), ${psMisses} miss (${psMissPct}%)`
+  )
+
   // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
   const oldSpacingAttr = points.geometry.attributes.aLocalSpacing
   if (oldSpacingAttr && oldSpacingAttr.array.length === nPts) {
@@ -1254,7 +1462,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
 
   // Per-camera sampler uniforms: uCamTex0, uCamTex1, …
   const camTexUniforms = {}
-  textures.forEach((tex, i) => { camTexUniforms[`uCamTex${i}`] = { value: tex } })
+  textures.forEach(({ tex }, i) => { camTexUniforms[`uCamTex${i}`] = { value: tex } })
 
   const projMat = new THREE.ShaderMaterial({
     vertexColors: true,
@@ -1283,10 +1491,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  onProgress?.(95, `Photo projection applied (${coveragePct}% covered)…`)
+  onProgress?.(95, `Photo projection applied (${coveragePct}% WPA-5 + ${psHitPct}% WPA-6 photosplat)…`)
   console.info(
-    `[projective] WPA-5.1 (BLEND_RATIO=0.70, uwT/0.11→1.0): ${nSelected}/${allSnaps.length} snaps, ` +
-    `${usedCamCount} active, ${coveragePct}% wall coverage, ` +
+    `[projective] WPA-6 (photosplat+WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
+    `${usedCamCount} active | WPA-5: ${coveragePct}% wall coverage | ` +
+    `WPA-6 photosplat: ${psHitPct}% pts baked (${psMissPct}% miss→WPA-5 fallback) | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
     `voxel ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
     `med splat ${medSpacingMm}mm`
@@ -1311,7 +1520,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       projVoxNeighPct: voxNeighPct, // % assigned via 26-neighbour search
       projVoxFailPct:  voxFailPct,  // % with no voxel hit in 3×3×3 cube → uses all cameras in GPU
       projSampleStep:  sampleStep,  // 1 sample per N pts — lower = denser coverage pre-pass
-      colourMethod:    `Photo projection WPA-5.1 (${usedCamCount}/${nSelected} cams, ${coveragePct}% walls)`,
+      // WPA-6 photosplat diagnostics
+      psPct:           psHitPct,    // % of LiDAR pts baked with photosplat colour
+      psMissPct,                    // % falling back to WPA-5 UV projection
+      colourMethod:    `WPA-6 PFS (${psHitPct}% photosplat) + WPA-5 fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }

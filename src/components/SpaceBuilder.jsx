@@ -1126,7 +1126,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 {!rooms[space.id] && (
                   <option value={space.id}>{space.name || 'New Room'}</option>
                 )}
-                {Object.values(rooms).map(r => (
+                {Object.values(rooms).sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(r => (
                   <option key={r.id} value={r.id}>{r.name}</option>
                 ))}
               </select>

@@ -9,7 +9,7 @@ export default function SpacesManager({ spaces = {}, onEdit, onDelete, onNew, on
 
   const spaceList = Object.values(spaces)
     .filter(r => r.roomType === 'space')
-    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
 
   return (
     <div className="rm-backdrop" onClick={e => e.target === e.currentTarget && onClose()}>

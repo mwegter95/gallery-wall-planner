@@ -24,7 +24,7 @@ export default function RoomManager({
   const [nameErr, setNameErr]   = useState('')
   const [confirmDel, setConfirmDel] = useState(null)
 
-  const roomList = Object.values(rooms).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+  const roomList = Object.values(rooms).sort((a, b) => (a.name || '').localeCompare(b.name || ''))
 
   const unit = unitSystem === 'metric' ? 'cm' : '"'
 
