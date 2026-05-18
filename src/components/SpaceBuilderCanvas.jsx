@@ -7,10 +7,12 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { Line2 } from 'three/addons/lines/Line2.js'
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
-import { reconstructPlanarSurfaces } from '../utils/scanReconstructionPipeline'
 import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM_MAX } from '../utils/cameraControls'
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
 import { loadRecentScanBuffer, saveRecentScanBuffer } from '../utils/recentScanCache'
@@ -533,264 +535,9 @@ function sampleCamPx(wx, wy, wz, e, k, ori, td) {
   return [td.pixels[pi], td.pixels[pi + 1], td.pixels[pi + 2]]
 }
 
-function buildPlanarSurfaceAtlas({
-  segments,
-  w2cElems,
-  camKVec,
-  camOriArr,
-  textures,
-  depthMaps,
-  dmapSize,
-  yOffset = 0,
-  maxAtlasSize = 4096,
-}) {
-  if (!segments?.length) return null
-
-  let segs = segments.filter(s =>
-    s?.positions?.length >= 9 &&
-    s?.indices?.length >= 3 &&
-    s?.uvs?.length === (s.positions.length / 3) * 2,
-  )
-  if (!segs.length) return null
-
-  const padding = 8
-  const minTileSize = 96
-  while (segs.length > 1) {
-    const cols = Math.max(1, Math.ceil(Math.sqrt(segs.length)))
-    const rows = Math.max(1, Math.ceil(segs.length / cols))
-    if (cols * minTileSize <= maxAtlasSize && rows * minTileSize <= maxAtlasSize) break
-    segs = segs.slice(0, -1)
-  }
-
-  const cols = Math.max(1, Math.ceil(Math.sqrt(segs.length)))
-  const rows = Math.max(1, Math.ceil(segs.length / cols))
-  const tileSize = Math.max(
-    minTileSize,
-    Math.min(192, Math.floor(Math.min(maxAtlasSize / cols, maxAtlasSize / rows))),
-  )
-  const atlasW = cols * tileSize
-  const atlasH = rows * tileSize
-
-  const canvas = document.createElement('canvas')
-  canvas.width = atlasW
-  canvas.height = atlasH
-  const ctx = canvas.getContext('2d')
-  const img = ctx.createImageData(atlasW, atlasH)
-  const out = img.data
-  const geomMask = new Uint8Array(atlasW * atlasH)
-  const sampleMask = new Uint8Array(atlasW * atlasH)
-
-  const atlasUvsBySeg = new Map()
-
-  const samplePointFromBestCamera = (wp, n) => {
-    const wpRawY = wp[1] - yOffset
-    let bestScore = -1
-    let br = 42, bg = 42, bb = 42
-    for (let ci = 0; ci < w2cElems.length; ci++) {
-      const e = w2cElems[ci]
-      const td = textures[ci]
-      if (!td?.pixels) continue
-
-      const cpx = e[0] * wp[0] + e[4] * wpRawY + e[8] * wp[2] + e[12]
-      const cpy = e[1] * wp[0] + e[5] * wpRawY + e[9] * wp[2] + e[13]
-      const cpz = e[2] * wp[0] + e[6] * wpRawY + e[10] * wp[2] + e[14]
-      if (cpz >= -0.05) continue
-      const dep = -cpz
-
-      const k = camKVec[ci]
-      const u0 = k.x * cpx / dep + k.z
-      const v0 = k.y * (-cpy) / dep + k.w
-      const [uu, vv] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-      if (uu < 0.01 || uu > 0.99 || vv < 0.01 || vv > 0.99) continue
-
-      if (depthMaps?.[ci]) {
-        const du = Math.min(dmapSize - 1, Math.max(0, Math.floor(uu * dmapSize)))
-        const dv = Math.min(dmapSize - 1, Math.max(0, Math.floor(vv * dmapSize)))
-        const minD = depthMaps[ci][dv * dmapSize + du]
-        if (Number.isFinite(minD) && minD < 1e8 && dep > minD * 1.45) continue
-      }
-
-      const pu = Math.min(td.pw - 1, Math.max(0, Math.floor(uu * td.pw)))
-      const pv = Math.min(td.ph - 1, Math.max(0, Math.floor(vv * td.ph)))
-      const pi = (pv * td.pw + pu) * 4
-
-      const facing = Math.max(0, -(e[2] * n[0] + e[6] * n[1] + e[10] * n[2]))
-      if (facing < 0.04) continue
-      const score = (0.1 + facing * facing) / (0.2 + dep * dep)
-      if (score <= bestScore) continue
-
-      bestScore = score
-      br = td.pixels[pi]
-      bg = td.pixels[pi + 1]
-      bb = td.pixels[pi + 2]
-    }
-    if (bestScore < 0) return null
-    return [br, bg, bb]
-  }
-
-  for (let si = 0; si < segs.length; si++) {
-    const segment = segs[si]
-    const n = segment.normal || [0, 0, 1]
-
-    const cx = si % cols
-    const cy = (si / cols) | 0
-    const x0 = cx * tileSize + padding
-    const y0 = cy * tileSize + padding
-    const drawW = tileSize - padding * 2
-    const drawH = tileSize - padding * 2
-
-    const vertexCount = segment.positions.length / 3
-    const segAtlasUv = new Float32Array(vertexCount * 2)
-    for (let vi = 0; vi < vertexCount; vi++) {
-      const su = segment.uvs[vi * 2]
-      const sv = segment.uvs[vi * 2 + 1]
-      segAtlasUv[vi * 2] = (x0 + 0.5 + su * Math.max(1, drawW - 1)) / atlasW
-      segAtlasUv[vi * 2 + 1] = (y0 + 0.5 + sv * Math.max(1, drawH - 1)) / atlasH
-    }
-    atlasUvsBySeg.set(segment.id, segAtlasUv)
-
-    const meanCol = (() => {
-      if (!segment.colors?.length) return [42, 42, 42]
-      let sr = 0, sg = 0, sb = 0
-      const nC = segment.colors.length / 3
-      for (let ci = 0; ci < segment.colors.length; ci += 3) {
-        sr += segment.colors[ci]
-        sg += segment.colors[ci + 1]
-        sb += segment.colors[ci + 2]
-      }
-      const inv = nC > 0 ? 1 / nC : 1
-      const to8 = v => Math.max(0, Math.min(255, Math.round((v <= 1 ? v * 255 : v) * inv)))
-      return [to8(sr), to8(sg), to8(sb)]
-    })()
-
-    for (let py = cy * tileSize; py < (cy + 1) * tileSize; py++) {
-      for (let px = cx * tileSize; px < (cx + 1) * tileSize; px++) {
-        const oi = (py * atlasW + px) * 4
-        out[oi] = meanCol[0]
-        out[oi + 1] = meanCol[1]
-        out[oi + 2] = meanCol[2]
-        out[oi + 3] = 255
-      }
-    }
-
-    for (let ti = 0; ti < segment.indices.length; ti += 3) {
-      const i0 = segment.indices[ti]
-      const i1 = segment.indices[ti + 1]
-      const i2 = segment.indices[ti + 2]
-
-      const u0 = segment.uvs[i0 * 2] * Math.max(1, drawW - 1) + x0 + 0.5
-      const v0 = segment.uvs[i0 * 2 + 1] * Math.max(1, drawH - 1) + y0 + 0.5
-      const u1 = segment.uvs[i1 * 2] * Math.max(1, drawW - 1) + x0 + 0.5
-      const v1 = segment.uvs[i1 * 2 + 1] * Math.max(1, drawH - 1) + y0 + 0.5
-      const u2 = segment.uvs[i2 * 2] * Math.max(1, drawW - 1) + x0 + 0.5
-      const v2 = segment.uvs[i2 * 2 + 1] * Math.max(1, drawH - 1) + y0 + 0.5
-
-      const minX = Math.max(x0, Math.floor(Math.min(u0, u1, u2)))
-      const maxX = Math.min(x0 + drawW - 1, Math.ceil(Math.max(u0, u1, u2)))
-      const minY = Math.max(y0, Math.floor(Math.min(v0, v1, v2)))
-      const maxY = Math.min(y0 + drawH - 1, Math.ceil(Math.max(v0, v1, v2)))
-
-      const den = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
-      if (Math.abs(den) < 1e-8) continue
-
-      const p0x = segment.positions[i0 * 3]
-      const p0y = segment.positions[i0 * 3 + 1]
-      const p0z = segment.positions[i0 * 3 + 2]
-      const p1x = segment.positions[i1 * 3]
-      const p1y = segment.positions[i1 * 3 + 1]
-      const p1z = segment.positions[i1 * 3 + 2]
-      const p2x = segment.positions[i2 * 3]
-      const p2y = segment.positions[i2 * 3 + 1]
-      const p2z = segment.positions[i2 * 3 + 2]
-
-      for (let py = minY; py <= maxY; py++) {
-        for (let px = minX; px <= maxX; px++) {
-          const sx = px + 0.5
-          const sy = py + 0.5
-          const w0 = ((v1 - v2) * (sx - u2) + (u2 - u1) * (sy - v2)) / den
-          const w1 = ((v2 - v0) * (sx - u2) + (u0 - u2) * (sy - v2)) / den
-          const w2 = 1 - w0 - w1
-          if (w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4) continue
-
-          const ai = py * atlasW + px
-          geomMask[ai] = 1
-
-          const wp = [
-            p0x * w0 + p1x * w1 + p2x * w2,
-            p0y * w0 + p1y * w1 + p2y * w2,
-            p0z * w0 + p1z * w1 + p2z * w2,
-          ]
-          const col = samplePointFromBestCamera(wp, n)
-          if (!col) continue
-
-          const oi = ai * 4
-          out[oi] = col[0]
-          out[oi + 1] = col[1]
-          out[oi + 2] = col[2]
-          out[oi + 3] = 255
-          sampleMask[ai] = 1
-        }
-      }
-    }
-
-    for (let pass = 0; pass < 6; pass++) {
-      let changed = 0
-      for (let py = y0 + 1; py < y0 + drawH - 1; py++) {
-        for (let px = x0 + 1; px < x0 + drawW - 1; px++) {
-          const ai = py * atlasW + px
-          if (!geomMask[ai] || sampleMask[ai]) continue
-
-          let cr = 0, cg = 0, cb = 0, cc = 0
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              if (!dx && !dy) continue
-              const ni = (py + dy) * atlasW + (px + dx)
-              if (!sampleMask[ni]) continue
-              const oiN = ni * 4
-              cr += out[oiN]
-              cg += out[oiN + 1]
-              cb += out[oiN + 2]
-              cc++
-            }
-          }
-          if (!cc) continue
-          const oi = ai * 4
-          out[oi] = Math.round(cr / cc)
-          out[oi + 1] = Math.round(cg / cc)
-          out[oi + 2] = Math.round(cb / cc)
-          out[oi + 3] = 255
-          sampleMask[ai] = 1
-          changed++
-        }
-      }
-      if (!changed) break
-    }
-
-    for (let py = y0; py < y0 + drawH; py++) {
-      for (let px = x0; px < x0 + drawW; px++) {
-        const ai = py * atlasW + px
-        if (!geomMask[ai] || sampleMask[ai]) continue
-        const oi = ai * 4
-        out[oi] = meanCol[0]
-        out[oi + 1] = meanCol[1]
-        out[oi + 2] = meanCol[2]
-        out[oi + 3] = 255
-      }
-    }
-  }
-
-  ctx.putImageData(img, 0, 0)
-  const tex = new THREE.CanvasTexture(canvas)
-  tex.flipY = false
-  tex.colorSpace = THREE.SRGBColorSpace
-  tex.generateMipmaps = false
-  tex.minFilter = THREE.LinearFilter
-  tex.magFilter = THREE.LinearFilter
-  tex.wrapS = THREE.ClampToEdgeWrapping
-  tex.wrapT = THREE.ClampToEdgeWrapping
-  tex.anisotropy = 1
-
-  return { tex, atlasUvsBySeg, atlasW, atlasH }
+function buildPlanarSurfaceAtlas() {
+  // Retired in WPA-10. Planar atlas reconstruction is intentionally disabled.
+  return null
 }
 
 // ── WPA-6 Photo-Forward Splatting (PFS) ──────────────────────────────────────
@@ -1186,7 +933,190 @@ function selectBestSnapshots(allSnaps, k) {
   return selected.sort((a, b) => a - b).map(i => allSnaps[i])
 }
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, maxTextureSize, rawBuffer, preferSurfaceAtlas = true }) {
+function disposeWpa10LineWeave(points) {
+  for (let i = points.children.length - 1; i >= 0; i--) {
+    const child = points.children[i]
+    if (!child?.userData?.wpa10Line) continue
+    points.remove(child)
+    child.traverse(obj => {
+      if (obj.geometry?.dispose) obj.geometry.dispose()
+      if (obj.material) {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
+        mats.forEach(m => m?.dispose?.())
+      }
+    })
+  }
+}
+
+function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSeedPoints = 36000, maxSegments = 90000 }) {
+  const posAttr = points.geometry?.attributes?.position
+  const colAttr = points.geometry?.attributes?.color
+  if (!posAttr?.array || !colAttr?.array) return null
+
+  const posArr = posAttr.array
+  const colArr = colAttr.array
+  const nPts = posAttr.count
+  if (nPts < 2) return null
+
+  const seedStep = Math.max(1, Math.floor(nPts / maxSeedPoints))
+  const CELL = 0.13
+  const OFF = 4096
+  const keyFor = (x, y, z) => {
+    const bx = Math.round(x / CELL)
+    const by = Math.round(y / CELL)
+    const bz = Math.round(z / CELL)
+    return (bx + OFF) * 33554432 + (by + OFF) * 8192 + (bz + OFF)
+  }
+
+  const seeds = []
+  const cellPts = new Map()
+  const cellStats = new Map()
+
+  for (let i = 0; i < nPts; i += seedStep) {
+    const i3 = i * 3
+    const key = keyFor(posArr[i3], posArr[i3 + 1], posArr[i3 + 2])
+    seeds.push(i)
+    let arr = cellPts.get(key)
+    if (!arr) { arr = []; cellPts.set(key, arr) }
+    if (arr.length < 24) arr.push(i)
+
+    let stats = cellStats.get(key)
+    if (!stats) { stats = new Float32Array(4); cellStats.set(key, stats) }
+    stats[0] += colArr[i3]
+    stats[1] += colArr[i3 + 1]
+    stats[2] += colArr[i3 + 2]
+    stats[3] += 1
+  }
+  if (seeds.length < 2) return null
+
+  const bins = [
+    { width: 1.15, pos: [], col: [] },
+    { width: 1.9, pos: [], col: [] },
+    { width: 2.9, pos: [], col: [] },
+  ]
+
+  const sz = new THREE.Vector2()
+  renderer?.getSize?.(sz)
+  let segmentCount = 0
+
+  for (let si = 0; si < seeds.length; si++) {
+    const i = seeds[si]
+    const i3 = i * 3
+    const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
+    const niX = normals?.[i3] ?? 0, niY = normals?.[i3 + 1] ?? 1, niZ = normals?.[i3 + 2] ?? 0
+    const key = keyFor(xi, yi, zi)
+    const kx = Math.floor(key / 33554432) - OFF
+    const ky = Math.floor(key / 8192) % 4096 - OFF
+    const kz = key % 8192 - OFF
+
+    const localCandidates = []
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const k2 = (kx + dx + OFF) * 33554432 + (ky + dy + OFF) * 8192 + (kz + dz + OFF)
+          const arr = cellPts.get(k2)
+          if (!arr) continue
+          for (let t = 0; t < arr.length; t++) localCandidates.push(arr[t])
+        }
+      }
+    }
+
+    let links = 0
+    for (let c = 0; c < localCandidates.length; c++) {
+      const j = localCandidates[c]
+      if (j <= i) continue
+      const j3 = j * 3
+      const xj = posArr[j3], yj = posArr[j3 + 1], zj = posArr[j3 + 2]
+      const dx = xj - xi, dy = yj - yi, dz = zj - zi
+      const d2 = dx * dx + dy * dy + dz * dz
+
+      const sI = photoSpacings?.[i] ?? 0.004
+      const sJ = photoSpacings?.[j] ?? 0.004
+      const s = Math.max(0.0035, Math.min(0.020, 0.5 * (sI + sJ)))
+      const minD = Math.max(0.010, s * 0.8)
+      const maxD = Math.min(0.160, Math.max(0.035, s * 8.0))
+      if (d2 < minD * minD || d2 > maxD * maxD) continue
+
+      if (normals) {
+        const njX = normals[j3], njY = normals[j3 + 1], njZ = normals[j3 + 2]
+        const nd = niX * njX + niY * njY + niZ * njZ
+        if (nd < 0.40) continue
+      }
+
+      const dr = colArr[i3] - colArr[j3]
+      const dg = colArr[i3 + 1] - colArr[j3 + 1]
+      const db = colArr[i3 + 2] - colArr[j3 + 2]
+      const dCol = Math.sqrt(dr * dr + dg * dg + db * db)
+      if (dCol > 0.70) continue
+
+      const statsI = cellStats.get(key)
+      const keyJ = keyFor(xj, yj, zj)
+      const statsJ = cellStats.get(keyJ)
+      const nI = statsI?.[3] ?? 1
+      const nJ = statsJ?.[3] ?? 1
+      const dAvg = (nI + nJ) * 0.5
+      const densityNorm = Math.max(0, Math.min(1, (dAvg - 2) / 14))
+      const bIdx = densityNorm > 0.70 ? 2 : (densityNorm > 0.35 ? 1 : 0)
+      const bin = bins[bIdx]
+
+      const mIR = statsI && statsI[3] > 0 ? statsI[0] / statsI[3] : colArr[i3]
+      const mIG = statsI && statsI[3] > 0 ? statsI[1] / statsI[3] : colArr[i3 + 1]
+      const mIB = statsI && statsI[3] > 0 ? statsI[2] / statsI[3] : colArr[i3 + 2]
+      const mJR = statsJ && statsJ[3] > 0 ? statsJ[0] / statsJ[3] : colArr[j3]
+      const mJG = statsJ && statsJ[3] > 0 ? statsJ[1] / statsJ[3] : colArr[j3 + 1]
+      const mJB = statsJ && statsJ[3] > 0 ? statsJ[2] / statsJ[3] : colArr[j3 + 2]
+
+      const surroundBlend = Math.max(0.16, Math.min(0.56, 0.22 + dCol * 0.55))
+      const r0 = colArr[i3] * (1 - surroundBlend) + mIR * surroundBlend
+      const g0 = colArr[i3 + 1] * (1 - surroundBlend) + mIG * surroundBlend
+      const b0 = colArr[i3 + 2] * (1 - surroundBlend) + mIB * surroundBlend
+      const r1 = colArr[j3] * (1 - surroundBlend) + mJR * surroundBlend
+      const g1 = colArr[j3 + 1] * (1 - surroundBlend) + mJG * surroundBlend
+      const b1 = colArr[j3 + 2] * (1 - surroundBlend) + mJB * surroundBlend
+
+      bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
+      bin.col.push(r0, g0, b0, r1, g1, b1)
+      segmentCount++
+      links++
+
+      if (segmentCount >= maxSegments) break
+      if (links >= 4) break
+    }
+    if (segmentCount >= maxSegments) break
+  }
+
+  if (!segmentCount) return null
+
+  const group = new THREE.Group()
+  group.userData.wpa10Line = true
+  for (const bin of bins) {
+    if (!bin.pos.length) continue
+    const geo = new LineGeometry()
+    geo.setPositions(bin.pos)
+    geo.setColors(bin.col)
+
+    const mat = new LineMaterial({
+      linewidth: bin.width,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.94,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    })
+    mat.resolution.set(Math.max(1, sz.x), Math.max(1, sz.y))
+
+    const mesh = new Line2(geo, mat)
+    mesh.userData.wpa10Line = true
+    mesh.frustumCulled = false
+    mesh.computeLineDistances()
+    group.add(mesh)
+  }
+
+  return { group, segmentCount }
+}
+
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, renderer, enableLineWeave = true }) {
   onProgress?.(5, 'Loading snapshots…')
   let data
   try {
@@ -2157,71 +2087,27 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  // WPA-9: optional reconstructed surface mesh with UV texture atlas.
-  // This bypasses point splat limits and renders textured surfaces as triangles.
-  let atlasSegments = 0
-  if (preferSurfaceAtlas && rawBuffer) {
+  // WPA-10: remove planar reconstruction and render a density-aware line weave
+  // directly from the WPA-8 projected point cloud colours.
+  let lineSegments = 0
+  if (enableLineWeave) {
     try {
-      onProgress?.(96, 'Building reconstructed surface atlas…')
-      const reconstruction = await reconstructPlanarSurfaces(rawBuffer, { yOffset })
-      if (reconstruction?.segments?.length) {
-        const atlas = buildPlanarSurfaceAtlas({
-          segments: reconstruction.segments,
-          w2cElems,
-          camKVec,
-          camOriArr,
-          textures,
-          depthMaps,
-          dmapSize: DMAP,
-          yOffset,
-          maxAtlasSize: Math.min(maxTextureSize || 4096, 4096),
-        })
-        if (atlas?.tex) {
-          const segments = reconstruction.segments
-          let totalPos = 0, totalIdx = 0
-          for (const s of segments) { totalPos += s.positions.length; totalIdx += s.indices.length }
-          const atlasPos = new Float32Array(totalPos)
-          const atlasUv = new Float32Array((totalPos / 3) * 2)
-          const atlasIdx = new Uint32Array(totalIdx)
-          let pOff = 0, uvOff = 0, iOff = 0, vOff = 0
-          for (const s of segments) {
-            atlasPos.set(s.positions, pOff)
-            const uv = atlas.atlasUvsBySeg.get(s.id) || s.uvs
-            if (uv?.length === (s.positions.length / 3) * 2) {
-              atlasUv.set(uv, uvOff)
-            } else if (s.uvs?.length === (s.positions.length / 3) * 2) {
-              atlasUv.set(s.uvs, uvOff)
-            }
-            for (let i = 0; i < s.indices.length; i++) atlasIdx[iOff + i] = s.indices[i] + vOff
-            pOff += s.positions.length
-            uvOff += (s.positions.length / 3) * 2
-            iOff += s.indices.length
-            vOff += s.positions.length / 3
-          }
-
-          const atlasGeo = new THREE.BufferGeometry()
-          atlasGeo.setAttribute('position', new THREE.BufferAttribute(atlasPos, 3))
-          atlasGeo.setAttribute('uv', new THREE.BufferAttribute(atlasUv, 2))
-          atlasGeo.setIndex(new THREE.BufferAttribute(atlasIdx, 1))
-          atlasGeo.computeVertexNormals()
-
-          const atlasMat = new THREE.MeshBasicMaterial({
-            map: atlas.tex,
-            side: THREE.DoubleSide,
-            polygonOffset: true,
-            polygonOffsetFactor: -1,
-            polygonOffsetUnits: -1,
-          })
-          const atlasMesh = new THREE.Mesh(atlasGeo, atlasMat)
-          atlasMesh.renderOrder = 1
-          points.parent?.add(atlasMesh)
-          points.visible = true
-          atlasSegments = atlas.atlasUvsBySeg.size
-          console.info(`[WPA-9] reconstructed atlas mesh enabled: ${atlasSegments} segments, ${atlas.atlasW}x${atlas.atlasH}`)
-        }
+      onProgress?.(96, 'Building WPA-10 line weave…')
+      disposeWpa10LineWeave(points)
+      const weave = buildWpa10LineWeave({
+        points,
+        yOffset,
+        normals,
+        photoSpacings,
+        renderer,
+      })
+      if (weave?.group) {
+        points.add(weave.group)
+        lineSegments = weave.segmentCount
+        console.info(`[WPA-10] projected line weave enabled: ${lineSegments} segments`)
       }
     } catch (err) {
-      console.warn('[WPA-9] reconstructed atlas build failed:', err)
+      console.warn('[WPA-10] line weave build failed:', err)
     }
   }
 
@@ -2230,7 +2116,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     `[projective] WPA-8 shotgun direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
     `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | closure ${closurePct}% | total baked ${postClosureBakePct}% | WPA-5 wall coverage: ${coveragePct}% | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
-    `rescue ${rescuePct}%, atlasSegs ${atlasSegments}, ` +
+    `rescue ${rescuePct}%, lineSegs ${lineSegments}, ` +
     `voxel assign ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
     `med splat ${medSpacingMm}mm`
   )
@@ -2266,9 +2152,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       psClosurePct:    closurePct,  // % of all points filled by WPA-8 spatial closure
       psTotalBakedPct: postClosureBakePct, // direct + closure baked share
       psDetailLift:    Number(detailLift), // avg high-frequency detail residual reinjected per baked point
-      atlasSegments,   // reconstructed segments rendered via UV texture atlas
-      colourMethod: atlasSegments > 0
-        ? `WPA-9 reconstructed surface atlas (${atlasSegments} segs) + WPA-8 bake fallback`
+      lineSegments,
+      colourMethod: lineSegments > 0
+        ? `WPA-10 projected line weave (${lineSegments} segs) + WPA-8/WPA-5 point cloud`
         : `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
@@ -2420,8 +2306,6 @@ const JOY_THUMB  = 13   // thumb radius px
 const JOY_SPEED    = 0.014  // halved from 0.028 — was too sensitive
 const PAN_SPEED    = 0.04   // orbit.center translation per frame per unit joystick deflection
 const DOLLY_SPEED  = 0.04   // radius change per frame (same units as PAN_SPEED)
-const ENABLE_RECONSTRUCTION_OVERLAY = false
-
 export default function SpaceBuilderCanvas({
   space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap, requestCropId,
   roomScan = null,
@@ -2954,7 +2838,6 @@ export default function SpaceBuilderCanvas({
   // ── Point cloud / room scan rendering ────────────────────────────────────
   const pointCloudMeshRef    = useRef(null)
   const planeMeshesRef       = useRef([])
-  const reconstructionMeshesRef = useRef([])
   const yOffsetRef           = useRef(0)
   const rawBufferRef         = useRef(null)  // decoded PointCloudBuffer for LiDAR measurement
   const diagStatsRef         = useRef(null)  // { rawPts, renderedPts, fboW, fboH, dpr }
@@ -3007,11 +2890,6 @@ export default function SpaceBuilderCanvas({
       deepDispose(m)
     }
     planeMeshesRef.current = []
-    for (const m of reconstructionMeshesRef.current) {
-      t.scene.remove(m)
-      deepDispose(m)
-    }
-    reconstructionMeshesRef.current = []
 
     // Switch orbit style based on whether a scan is loaded
     cameraFPSRef.current = !!roomScan
@@ -3438,9 +3316,8 @@ export default function SpaceBuilderCanvas({
               onDiagUpdate: () => setDiagVersion(v => v + 1),
               onProgress: reportRoomLoad,
               maxFragTextures: t.renderer?.capabilities?.maxTextures,
-              maxTextureSize: t.renderer?.capabilities?.maxTextureSize,
-              rawBuffer: rawBufferRef.current,
-              preferSurfaceAtlas: true,
+              renderer: t.renderer,
+              enableLineWeave: true,
             }).catch(err => {
               console.warn('[projective] upgrade error:', err)
               reportRoomLoad(100, 'Photo projection failed', false)
@@ -3714,48 +3591,6 @@ export default function SpaceBuilderCanvas({
       } catch (err) {
         console.warn('[SpaceBuilderCanvas] Could not render point cloud:', err)
         reportRoomLoad(100, 'Scan load failed', false)
-      }
-
-      if (ENABLE_RECONSTRUCTION_OVERLAY) {
-        try {
-          const reconstruction = await reconstructPlanarSurfaces(buf, {
-            yOffset: yOffsetRef.current,
-          })
-
-          if (!cancelled && reconstruction?.segments?.length) {
-            for (const segment of reconstruction.segments) {
-              const geo = new THREE.BufferGeometry()
-              geo.setAttribute('position', new THREE.BufferAttribute(segment.positions, 3))
-              const colors = segment.textureColors || segment.colors
-              if (colors?.length) {
-                geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-              }
-              geo.setAttribute('uv', new THREE.BufferAttribute(segment.uvs, 2))
-              geo.setIndex(new THREE.BufferAttribute(segment.indices, 1))
-              geo.computeVertexNormals()
-
-              const mat = new THREE.MeshBasicMaterial({
-                vertexColors: !!colors?.length,
-                transparent: true,
-                opacity: segment.classification === 'ceiling' ? 0.2 : 0.28,
-                side: THREE.DoubleSide,
-                depthWrite: false,
-              })
-              const mesh = new THREE.Mesh(geo, mat)
-              mesh.renderOrder = 2
-
-              const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.18, transparent: true })
-              const wireGeo = new THREE.EdgesGeometry(geo)
-              const wire = new THREE.LineSegments(wireGeo, wireMat)
-              mesh.add(wire)
-
-              t.scene.add(mesh)
-              reconstructionMeshesRef.current.push(mesh)
-            }
-          }
-        } catch (err) {
-          console.warn('[SpaceBuilderCanvas] Could not render reconstructed mesh:', err)
-        }
       }
 
       // ── Build ghost plane meshes from detected planes ─────────────────
@@ -4315,9 +4150,8 @@ export default function SpaceBuilderCanvas({
                         onDiagUpdate: () => setDiagVersion(v => v + 1),
                         onProgress: reportRoomLoad,
                         maxFragTextures: threeRef.current?.renderer?.capabilities?.maxTextures,
-                        maxTextureSize: threeRef.current?.renderer?.capabilities?.maxTextureSize,
-                        rawBuffer: rawBufferRef.current,
-                        preferSurfaceAtlas: true,
+                        renderer: threeRef.current?.renderer,
+                        enableLineWeave: true,
                       })
                     } catch (err) {
                       console.warn('[rebuild] projection error:', err)
