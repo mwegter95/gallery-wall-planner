@@ -7,8 +7,8 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
-import { Line2 } from 'three/addons/lines/Line2.js'
-import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
@@ -1120,7 +1120,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   group.userData.wpa10Line = true
   for (const bin of bins) {
     if (!bin.pos.length) continue
-    const geo = new LineGeometry()
+    const geo = new LineSegmentsGeometry()
     geo.setPositions(bin.pos)
     geo.setColors(bin.col)
 
@@ -1135,7 +1135,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     })
     mat.resolution.set(Math.max(1, sz.x), Math.max(1, sz.y))
 
-    const mesh = new Line2(geo, mat)
+    const mesh = new LineSegments2(geo, mat)
     mesh.userData.wpa10Line = true
     mesh.frustumCulled = false
     mesh.computeLineDistances()
