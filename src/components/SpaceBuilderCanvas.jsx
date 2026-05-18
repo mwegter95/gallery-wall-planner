@@ -7,9 +7,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
-import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
-import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
@@ -948,7 +945,7 @@ function disposeWpa10LineWeave(points) {
   }
 }
 
-function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSeedPoints = 0, maxSegments = 0 }) {
+function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, maxSegments = 10000000, onProgress }) {
   const posAttr = points.geometry?.attributes?.position
   const colAttr = points.geometry?.attributes?.color
   if (!posAttr?.array || !colAttr?.array) return null
@@ -958,15 +955,10 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   const nPts = posAttr.count
   if (nPts < 2) return null
 
-  const seedBudget = maxSeedPoints > 0
-    ? maxSeedPoints
-    : Math.min(180000, Math.max(60000, Math.floor(nPts * 0.018)))
-  const segBudget = maxSegments > 0
-    ? maxSegments
-    : Math.min(850000, Math.max(180000, Math.floor(seedBudget * 5.5)))
+  const segBudget = Math.max(1, Math.min(maxSegments, nPts))
+  const pointStep = Math.max(1, Math.ceil(nPts / segBudget))
 
-  const seedStep = Math.max(1, Math.floor(nPts / seedBudget))
-  const CELL = 0.06
+  const CELL = 0.032
   const OFF = 4096
   const keyFromGrid = (bx, by, bz) => {
     return (bx + OFF) * 33554432 + (by + OFF) * 8192 + (bz + OFF)
@@ -978,22 +970,27 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     return keyFromGrid(bx, by, bz)
   }
 
-  const seeds = []
-  const seedGrid = []
-  const cellPts = new Map()
+  const cellHead = new Map()
+  const next = new Int32Array(nPts)
+  next.fill(-1)
   const cellStats = new Map()
+  const bxAll = new Int32Array(nPts)
+  const byAll = new Int32Array(nPts)
+  const bzAll = new Int32Array(nPts)
 
-  for (let i = 0; i < nPts; i += seedStep) {
+  for (let i = 0; i < nPts; i++) {
     const i3 = i * 3
     const bx = Math.round(posArr[i3] / CELL)
     const by = Math.round(posArr[i3 + 1] / CELL)
     const bz = Math.round(posArr[i3 + 2] / CELL)
+    bxAll[i] = bx
+    byAll[i] = by
+    bzAll[i] = bz
     const key = keyFromGrid(bx, by, bz)
-    seeds.push(i)
-    seedGrid.push([bx, by, bz, key])
-    let arr = cellPts.get(key)
-    if (!arr) { arr = []; cellPts.set(key, arr) }
-    if (arr.length < 96) arr.push(i)
+
+    const head = cellHead.get(key)
+    next[i] = head == null ? -1 : head
+    cellHead.set(key, i)
 
     let stats = cellStats.get(key)
     if (!stats) { stats = new Float32Array(4); cellStats.set(key, stats) }
@@ -1002,94 +999,69 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     stats[2] += colArr[i3 + 2]
     stats[3] += 1
   }
-  if (seeds.length < 2) return null
-
-  const bins = [
-    { width: 1.15, pos: [], col: [] },
-    { width: 1.9, pos: [], col: [] },
-    { width: 2.9, pos: [], col: [] },
-  ]
-
-  const sz = new THREE.Vector2()
-  renderer?.getSize?.(sz)
+  const posOut = new Float32Array(segBudget * 6)
+  const colOut = new Uint8Array(segBudget * 6)
   let segmentCount = 0
-  const nearestLimit = 6
+  let unresolved = 0
 
-  for (let si = 0; si < seeds.length; si++) {
-    const i = seeds[si]
+  for (let i = 0; i < nPts; i += pointStep) {
     const i3 = i * 3
     const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
     const niX = normals?.[i3] ?? 0, niY = normals?.[i3 + 1] ?? 1, niZ = normals?.[i3 + 2] ?? 0
-    const [kx, ky, kz, key] = seedGrid[si]
+    const kx = bxAll[i], ky = byAll[i], kz = bzAll[i]
+    const sI = photoSpacings?.[i] ?? 0.004
+    const maxD = Math.min(0.12, Math.max(0.022, sI * 8.5))
+    const maxD2 = maxD * maxD
 
-    const localCandidates = []
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          const k2 = keyFromGrid(kx + dx, ky + dy, kz + dz)
-          const arr = cellPts.get(k2)
-          if (!arr) continue
-          for (let t = 0; t < arr.length; t++) localCandidates.push(arr[t])
+    let bestJ = -1
+    let bestD2 = Infinity
+    let bestDCol = 0
+
+    for (let rad = 0; rad <= 2; rad++) {
+      const rmin = -rad, rmax = rad
+      for (let dx = rmin; dx <= rmax; dx++) {
+        for (let dy = rmin; dy <= rmax; dy++) {
+          for (let dz = rmin; dz <= rmax; dz++) {
+            if (rad > 0 && Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) !== rad) continue
+            const k2 = keyFromGrid(kx + dx, ky + dy, kz + dz)
+            let j = cellHead.get(k2)
+            while (j != null && j >= 0) {
+              if (j !== i) {
+                const j3 = j * 3
+                const xj = posArr[j3], yj = posArr[j3 + 1], zj = posArr[j3 + 2]
+                const ddx = xj - xi, ddy = yj - yi, ddz = zj - zi
+                const d2 = ddx * ddx + ddy * ddy + ddz * ddz
+                if (d2 > 1e-8 && d2 <= maxD2 && d2 < bestD2) {
+                  if (normals) {
+                    const njX = normals[j3], njY = normals[j3 + 1], njZ = normals[j3 + 2]
+                    const nd = niX * njX + niY * njY + niZ * njZ
+                    if (nd < 0.52) { j = next[j]; continue }
+                  }
+                  const dr = colArr[i3] - colArr[j3]
+                  const dg = colArr[i3 + 1] - colArr[j3 + 1]
+                  const db = colArr[i3 + 2] - colArr[j3 + 2]
+                  const dCol = Math.sqrt(dr * dr + dg * dg + db * db)
+                  if (dCol > 0.90) { j = next[j]; continue }
+                  bestD2 = d2
+                  bestJ = j
+                  bestDCol = dCol
+                }
+              }
+              j = next[j]
+            }
+          }
         }
       }
+      if (bestJ >= 0) break
     }
 
-    const nearest = []
-    for (let c = 0; c < localCandidates.length; c++) {
-      const j = localCandidates[c]
-      if (j <= i) continue
-      const j3 = j * 3
+    if (bestJ >= 0) {
+      const j3 = bestJ * 3
       const xj = posArr[j3], yj = posArr[j3 + 1], zj = posArr[j3 + 2]
-      const dx = xj - xi, dy = yj - yi, dz = zj - zi
-      const d2 = dx * dx + dy * dy + dz * dz
-
-      const sI = photoSpacings?.[i] ?? 0.004
-      const sJ = photoSpacings?.[j] ?? 0.004
-      const s = Math.max(0.0035, Math.min(0.020, 0.5 * (sI + sJ)))
-      const minD = Math.max(0.010, s * 0.8)
-      const maxD = Math.min(0.11, Math.max(0.025, s * 7.5))
-      if (d2 < minD * minD || d2 > maxD * maxD) continue
-      if (Math.abs(dy) > maxD * 0.9) continue
-
-      if (normals) {
-        const njX = normals[j3], njY = normals[j3 + 1], njZ = normals[j3 + 2]
-        const nd = niX * njX + niY * njY + niZ * njZ
-        if (nd < 0.60) continue
-      }
-
-      const dr = colArr[i3] - colArr[j3]
-      const dg = colArr[i3 + 1] - colArr[j3 + 1]
-      const db = colArr[i3 + 2] - colArr[j3 + 2]
-      const dCol = Math.sqrt(dr * dr + dg * dg + db * db)
-      if (dCol > 0.70) continue
-
-      const rankScore = d2 * (1 + dCol * 0.28)
-      if (nearest.length < nearestLimit) {
-        nearest.push({ j, j3, xj, yj, zj, dCol, rankScore })
-      } else {
-        let worstIdx = 0
-        for (let n = 1; n < nearest.length; n++) {
-          if (nearest[n].rankScore > nearest[worstIdx].rankScore) worstIdx = n
-        }
-        if (rankScore < nearest[worstIdx].rankScore) {
-          nearest[worstIdx] = { j, j3, xj, yj, zj, dCol, rankScore }
-        }
-      }
-    }
-
-    nearest.sort((a, b) => a.rankScore - b.rankScore)
-    for (let n = 0; n < nearest.length; n++) {
-      const { j3, xj, yj, zj, dCol } = nearest[n]
-
-      const statsI = cellStats.get(key)
-      const keyJ = keyFor(xj, yj, zj)
+      const keyI = keyFromGrid(kx, ky, kz)
+      const keyJ = keyFromGrid(bxAll[bestJ], byAll[bestJ], bzAll[bestJ])
+      const statsI = cellStats.get(keyI)
       const statsJ = cellStats.get(keyJ)
-      const nI = statsI?.[3] ?? 1
-      const nJ = statsJ?.[3] ?? 1
-      const dAvg = (nI + nJ) * 0.5
-      const densityNorm = Math.max(0, Math.min(1, (dAvg - 2) / 14))
-      const bIdx = densityNorm > 0.70 ? 2 : (densityNorm > 0.35 ? 1 : 0)
-      const bin = bins[bIdx]
 
       const mIR = statsI && statsI[3] > 0 ? statsI[0] / statsI[3] : colArr[i3]
       const mIG = statsI && statsI[3] > 0 ? statsI[1] / statsI[3] : colArr[i3 + 1]
@@ -1098,7 +1070,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       const mJG = statsJ && statsJ[3] > 0 ? statsJ[1] / statsJ[3] : colArr[j3 + 1]
       const mJB = statsJ && statsJ[3] > 0 ? statsJ[2] / statsJ[3] : colArr[j3 + 2]
 
-      const surroundBlend = Math.max(0.16, Math.min(0.56, 0.22 + dCol * 0.55))
+      const surroundBlend = Math.max(0.14, Math.min(0.52, 0.20 + bestDCol * 0.45))
       const r0 = colArr[i3] * (1 - surroundBlend) + mIR * surroundBlend
       const g0 = colArr[i3 + 1] * (1 - surroundBlend) + mIG * surroundBlend
       const b0 = colArr[i3 + 2] * (1 - surroundBlend) + mIB * surroundBlend
@@ -1106,43 +1078,62 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       const g1 = colArr[j3 + 1] * (1 - surroundBlend) + mJG * surroundBlend
       const b1 = colArr[j3 + 2] * (1 - surroundBlend) + mJB * surroundBlend
 
-      bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
-      bin.col.push(r0, g0, b0, r1, g1, b1)
+      const p = segmentCount * 6
+      posOut[p] = xi
+      posOut[p + 1] = yi + yOffset
+      posOut[p + 2] = zi
+      posOut[p + 3] = xj
+      posOut[p + 4] = yj + yOffset
+      posOut[p + 5] = zj
+
+      colOut[p] = Math.max(0, Math.min(255, Math.round(r0 * 255)))
+      colOut[p + 1] = Math.max(0, Math.min(255, Math.round(g0 * 255)))
+      colOut[p + 2] = Math.max(0, Math.min(255, Math.round(b0 * 255)))
+      colOut[p + 3] = Math.max(0, Math.min(255, Math.round(r1 * 255)))
+      colOut[p + 4] = Math.max(0, Math.min(255, Math.round(g1 * 255)))
+      colOut[p + 5] = Math.max(0, Math.min(255, Math.round(b1 * 255)))
+
       segmentCount++
-      if (segmentCount >= segBudget) break
+    } else {
+      unresolved++
+    }
+
+    if ((i & 0x3ffff) === 0) {
+      onProgress?.(96 + Math.min(3, (i / nPts) * 3), `Building WPA-10 nearest-neighbour lines (${segmentCount.toLocaleString()} segs)…`)
     }
     if (segmentCount >= segBudget) break
   }
 
   if (!segmentCount) return null
 
+  const positions = posOut.subarray(0, segmentCount * 6)
+  const colors = colOut.subarray(0, segmentCount * 6)
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geo.setAttribute('color', new THREE.Uint8BufferAttribute(colors, 3, true))
+
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.86,
+    depthTest: true,
+    depthWrite: false,
+  })
+
+  const mesh = new THREE.LineSegments(geo, mat)
+  mesh.userData.wpa10Line = true
+  mesh.frustumCulled = false
+
   const group = new THREE.Group()
   group.userData.wpa10Line = true
-  for (const bin of bins) {
-    if (!bin.pos.length) continue
-    const geo = new LineSegmentsGeometry()
-    geo.setPositions(bin.pos)
-    geo.setColors(bin.col)
-
-    const mat = new LineMaterial({
-      linewidth: bin.width,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.94,
-      depthTest: true,
-      depthWrite: false,
-      toneMapped: false,
-    })
-    mat.resolution.set(Math.max(1, sz.x), Math.max(1, sz.y))
-
-    const mesh = new LineSegments2(geo, mat)
-    mesh.userData.wpa10Line = true
-    mesh.frustumCulled = false
-    mesh.computeLineDistances()
-    group.add(mesh)
+  group.add(mesh)
+  return {
+    group,
+    segmentCount,
+    seedCount: Math.ceil(nPts / pointStep),
+    segBudget,
+    unresolved,
   }
-
-  return { group, segmentCount, seedCount: seeds.length, segBudget }
 }
 
 async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, renderer, enableLineWeave = true }) {
@@ -2134,8 +2125,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         points.add(weave.group)
         lineSegments = weave.segmentCount
         console.info(
-          `[WPA-10] projected line weave enabled: ${lineSegments} segments ` +
-          `(seeds=${weave.seedCount}, cap=${weave.segBudget})`
+          `[WPA-10] projected nearest-neighbour line weave enabled: ${lineSegments} segments ` +
+          `(seeds=${weave.seedCount}, cap=${weave.segBudget}, unresolved=${weave.unresolved})`
         )
       }
     } catch (err) {
