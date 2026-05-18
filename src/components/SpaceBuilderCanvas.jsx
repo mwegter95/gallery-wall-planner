@@ -1429,25 +1429,19 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   camAssignVox.clear() // free ~20K entry map
 
-  // ── WPA-7 Direct CPU Projection ──────────────────────────────────────────────
+  // ── WPA-7.1 Direct CPU Projection ────────────────────────────────────────────
   //
-  // Zero voxelisation.  For every LiDAR point that has a camera assignment
-  // (from the camAssignAll propagation above), project THAT EXACT 3D point
-  // into its assigned camera and sample the pixel.  Bake the result directly
-  // into the vertex colour attribute.
+  // Zero voxelisation. For each LiDAR point, decode up to 3 candidate cameras
+  // from aCamAssign, project into each valid camera, then blend colours using
+  // depth/facing confidence. Sampling is bilinear and uses local image gradients
+  // (from the same 2x2 footprint) to favour cameras that preserve detail.
   //
-  // Analogy: this is the CPU equivalent of the GPU WPA-5 UV projection shader,
-  // run once at load time instead of per fragment per frame.  Because each point
-  // gets its own UV — not an interpolated or voxel-quantised UV — there are no
-  // grid boundaries and no colour blocking.
-  //
-  // Points with no camera assignment (camAssignAll=0) keep camAssignAll=0 and
-  // fall through to the real-time GPU WPA-5 multi-camera search as before.
-  // Points with a hit get camAssignAll=-1 so the GLSL fast-path outputs vColor.
-  //
-  // Performance: ~9.8 M pts × ~40 arithmetic ops ≈ 0.2–0.5 s in V8.
-  // All inner-loop data is pre-flattened into TypedArrays for JIT efficiency.
-  onProgress?.(89, 'Baking photo colours onto LiDAR cloud (direct projection)…')
+  // This removes nearest-neighbour quantisation, reduces hard camera seams,
+  // and increases CPU-baked coverage by falling back to c1/c2 when c0 misses.
+  // Points with no valid CPU projection keep their packed assignment for the
+  // GPU WPA-5 fallback. Points with a CPU hit set aCamAssign=-1 so GLSL outputs
+  // pre-baked vColor directly.
+  onProgress?.(89, 'Baking photo colours onto LiDAR cloud (WPA-7.1 gradient blend)…')
   const colorAttr = points.geometry.attributes.color
   const colorArr  = colorAttr?.array         // Float32Array stride-3
 
@@ -1474,59 +1468,127 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
 
   const posArr = posAttr.array   // Float32Array stride-3
   let directHits = 0, directMisses = 0
+  let rank0Hits = 0, rank1Hits = 0, rank2Hits = 0
+  let blendContribTotal = 0
 
   for (let i = 0; i < nPts; i++) {
-    const packed = camAssignAll[i]
-    if (!packed) { directMisses++; continue }   // no camera assignment → GPU WPA-5
+    const packed = camAssignAll[i] | 0
+    if (packed <= 0) { directMisses++; continue } // no camera assignment → GPU WPA-5
 
-    const c0 = packed & 31                      // best camera index (5 bits)
-    const px = camPxArr[c0]
-    if (!px) { directMisses++; continue }       // camera had no pixel data
+    const cnt = (packed >> 15) & 3
+    if (cnt <= 0) { directMisses++; continue }
 
-    const i3   = i * 3
-    const xi   = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
-    const b    = c0 * 12
-    // Transform world point into camera space (column-major w2c applied as rows)
-    const cpx  = w2cFlat[b]   * xi + w2cFlat[b+1]  * yi + w2cFlat[b+2]  * zi + w2cFlat[b+3]
-    const cpy  = w2cFlat[b+4] * xi + w2cFlat[b+5]  * yi + w2cFlat[b+6]  * zi + w2cFlat[b+7]
-    const cpz  = w2cFlat[b+8] * xi + w2cFlat[b+9]  * yi + w2cFlat[b+10] * zi + w2cFlat[b+11]
-    if (cpz >= -0.05) { directMisses++; continue }   // behind camera
+    const c0 = packed & 31
+    const c1 = (packed >> 5) & 31
+    const c2 = (packed >> 10) & 31
 
-    const dep  = -cpz
-    const kb   = c0 * 4
-    const u0   = camKFlat[kb]   * cpx / dep + camKFlat[kb + 2]
-    const v0   = camKFlat[kb+1] * (-cpy) / dep + camKFlat[kb + 3]
+    const i3 = i * 3
+    const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
+    const nx = normals[i3], ny = normals[i3 + 1], nz = normals[i3 + 2]
 
-    // Inline UV orientation (avoids array allocation from applyUvOrientation)
-    let u, v
-    const ori = camOriInt[c0]
-    if      (ori === 1) { u = 1 - v0; v = u0 }
-    else if (ori === 2) { u = 1 - u0; v = 1 - v0 }
-    else if (ori === 3) { u = v0;     v = 1 - u0 }
-    else                { u = u0;     v = v0 }
+    let accR = 0, accG = 0, accB = 0, accW = 0
+    let firstValidRank = -1
+    let pointContrib = 0
 
-    if (u < 0 || u > 1 || v < 0 || v > 1) { directMisses++; continue }
+    for (let rank = 0; rank < cnt; rank++) {
+      const ci = rank === 0 ? c0 : (rank === 1 ? c1 : c2)
+      if (ci < 0 || ci >= nCams) continue
 
-    // Sample pixel (nearest-neighbour, matching loadSnapshotTex resolution)
-    const pu = Math.min(camPW[c0] - 1, (u * camPW[c0]) | 0)
-    const pv = Math.min(camPH[c0] - 1, (v * camPH[c0]) | 0)
-    const pi = (pv * camPW[c0] + pu) * 4
+      const px = camPxArr[ci]
+      if (!px) continue
+
+      const b = ci * 12
+      const cpx = w2cFlat[b] * xi + w2cFlat[b + 1] * yi + w2cFlat[b + 2] * zi + w2cFlat[b + 3]
+      const cpy = w2cFlat[b + 4] * xi + w2cFlat[b + 5] * yi + w2cFlat[b + 6] * zi + w2cFlat[b + 7]
+      const cpz = w2cFlat[b + 8] * xi + w2cFlat[b + 9] * yi + w2cFlat[b + 10] * zi + w2cFlat[b + 11]
+      if (cpz >= -0.05) continue
+
+      const dep = -cpz
+      const kb = ci * 4
+      const u0 = camKFlat[kb] * cpx / dep + camKFlat[kb + 2]
+      const v0 = camKFlat[kb + 1] * (-cpy) / dep + camKFlat[kb + 3]
+
+      let u, v
+      const ori = camOriInt[ci]
+      if      (ori === 1) { u = 1 - v0; v = u0 }
+      else if (ori === 2) { u = 1 - u0; v = 1 - v0 }
+      else if (ori === 3) { u = v0;     v = 1 - u0 }
+      else                { u = u0;     v = v0 }
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue
+
+      // Bilinear sample with local gradient estimate from the same 2x2 footprint.
+      const pw = camPW[ci], ph = camPH[ci]
+      const fx = Math.max(0, Math.min(pw - 1, u * pw - 0.5))
+      const fy = Math.max(0, Math.min(ph - 1, v * ph - 0.5))
+      const x0 = fx | 0, y0 = fy | 0
+      const x1 = Math.min(pw - 1, x0 + 1), y1 = Math.min(ph - 1, y0 + 1)
+      const tx = fx - x0, ty = fy - y0
+      const w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty), w01 = (1 - tx) * ty, w11 = tx * ty
+
+      const i00 = (y0 * pw + x0) * 4, i10 = (y0 * pw + x1) * 4
+      const i01 = (y1 * pw + x0) * 4, i11 = (y1 * pw + x1) * 4
+
+      const r00 = px[i00], g00 = px[i00 + 1], b00 = px[i00 + 2]
+      const r10 = px[i10], g10 = px[i10 + 1], b10 = px[i10 + 2]
+      const r01 = px[i01], g01 = px[i01 + 1], b01 = px[i01 + 2]
+      const r11 = px[i11], g11 = px[i11 + 1], b11 = px[i11 + 2]
+
+      const r = r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11
+      const g = g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11
+      const bcol = b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11
+
+      // Camera confidence: depth x facing x gradient-detail preference.
+      const l00 = (r00 + g00 + b00) * 0.3333333333
+      const l10 = (r10 + g10 + b10) * 0.3333333333
+      const l01 = (r01 + g01 + b01) * 0.3333333333
+      const l11 = (r11 + g11 + b11) * 0.3333333333
+      const gx0 = l10 - l00, gx1 = l11 - l01
+      const gy0 = l01 - l00, gy1 = l11 - l10
+      const gx = gx0 + (gx1 - gx0) * ty
+      const gy = gy0 + (gy1 - gy0) * tx
+      const gradMag = Math.sqrt(gx * gx + gy * gy)
+
+      const facing = Math.max(0, -(w2cFlat[b + 8] * nx + w2cFlat[b + 9] * ny + w2cFlat[b + 10] * nz))
+      const depthW = 1 / (0.16 + dep * dep)
+      const detailW = 1 + Math.min(1.0, gradMag / 24)
+      const conf = (0.25 + facing * facing) * depthW * detailW
+      if (conf <= 0) continue
+      if (firstValidRank < 0) firstValidRank = rank
+
+      accR += r * conf
+      accG += g * conf
+      accB += bcol * conf
+      accW += conf
+      pointContrib++
+    }
+
+    if (accW <= 0) { directMisses++; continue }
+
+    if (firstValidRank === 0) rank0Hits++
+    else if (firstValidRank === 1) rank1Hits++
+    else if (firstValidRank === 2) rank2Hits++
+    blendContribTotal += pointContrib
 
     if (colorArr) {
-      colorArr[i3]     = px[pi]     / 255
-      colorArr[i3 + 1] = px[pi + 1] / 255
-      colorArr[i3 + 2] = px[pi + 2] / 255
+      colorArr[i3] = Math.min(1, Math.max(0, (accR / accW) / 255))
+      colorArr[i3 + 1] = Math.min(1, Math.max(0, (accG / accW) / 255))
+      colorArr[i3 + 2] = Math.min(1, Math.max(0, (accB / accW) / 255))
     }
-    camAssignAll[i] = -1   // GLSL fast-path: output vColor directly, no UV re-projection
+    camAssignAll[i] = -1 // GLSL fast-path: output vColor directly, no UV re-projection
     directHits++
   }
   if (colorArr) colorAttr.needsUpdate = true
 
   const psHitPct  = nPts > 0 ? Math.round(directHits  / nPts * 100) : 0
   const psMissPct = nPts > 0 ? Math.round(directMisses / nPts * 100) : 0
+  const rank0Pct = directHits > 0 ? Math.round(rank0Hits / directHits * 100) : 0
+  const rank1Pct = directHits > 0 ? Math.round(rank1Hits / directHits * 100) : 0
+  const rank2Pct = directHits > 0 ? Math.round(rank2Hits / directHits * 100) : 0
+  const blendAvg = directHits > 0 ? (blendContribTotal / directHits).toFixed(2) : '0.00'
   console.info(
-    `[WPA-7] direct CPU bake: ${directHits}/${nPts} pts (${psHitPct}% hit), ` +
-    `${directMisses} miss (${psMissPct}% → GPU WPA-5 fallback)`
+    `[WPA-7.1] gradient CPU bake: ${directHits}/${nPts} pts (${psHitPct}% hit), ` +
+    `${directMisses} miss (${psMissPct}% → GPU WPA-5 fallback) | ` +
+    `rank source c0/c1/c2=${rank0Pct}%/${rank1Pct}%/${rank2Pct}% | blendAvg=${blendAvg} cams`
   )
 
   // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
@@ -1595,9 +1657,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  onProgress?.(95, `Photo projection applied (${psHitPct}% CPU-baked + ${psMissPct}% GPU WPA-5)…`)
+  onProgress?.(95, `Photo projection applied (${psHitPct}% WPA-7.1 CPU-baked + ${psMissPct}% GPU WPA-5)…`)
   console.info(
-    `[projective] WPA-7 direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
+    `[projective] WPA-7.1 gradient direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
     `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | WPA-5 wall coverage: ${coveragePct}% | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
     `voxel assign ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
@@ -1626,7 +1688,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       // WPA-7 direct CPU bake diagnostics
       psPct:           psHitPct,    // % of LiDAR pts with CPU-baked colour (no voxelisation)
       psMissPct,                    // % falling back to GPU WPA-5 UV projection
-      colourMethod:    `WPA-7 direct CPU (${psHitPct}% baked) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
+      psRank0Pct:      rank0Pct,    // % of CPU baked points with c0 as first valid projection
+      psRank1Pct:      rank1Pct,    // % of CPU baked points with c1 as first valid projection
+      psRank2Pct:      rank2Pct,    // % of CPU baked points with c2 as first valid projection
+      psBlendAvgCams:  Number(blendAvg), // avg number of contributing cameras per CPU baked point
+      colourMethod:    `WPA-7.1 gradient CPU (${psHitPct}% baked) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }
