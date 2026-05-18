@@ -770,12 +770,13 @@ function getSafeProjectiveCamLimit(maxFragTextures) {
 //   The snapshot URL goes through /api/ (Flask-CORS), not /uploads/ (nginx,
 //   no CORS headers).  The fetch sends auth headers and gets a proper response.
 //
-// Why canvas downscale to 1024px:
+// Why canvas downscale to 1536px:
 //   16 ARKit photos at native 4032×3024 = ~800 MB GPU texture memory on iOS —
-//   well past the point where WebGL context loss becomes likely.  At 1024px max
-//   each texture is ~4 MB → 16 × 4 MB = 64 MB total, well within iOS limits.
+//   well past the point where WebGL context loss becomes likely.  At 1536px max
+//   each texture is ~9 MB (before mip-chain) and remains workable for typical
+//   12-16 camera sessions while retaining substantially more texture detail.
 //   Projection quality is limited by point density, not texture resolution.
-const SNAP_TEX_MAX_PX = 1024
+const SNAP_TEX_MAX_PX = 1536
 async function loadSnapshotTex(url) {
   const jwt    = getJwt()
   const device = getDeviceToken()
@@ -805,13 +806,13 @@ async function loadSnapshotTex(url) {
   const canvas = document.createElement('canvas')
   canvas.width  = w
   canvas.height = h
-  // WPA-5: deblocking — a 1px Gaussian blur at the source image level removes
+  // WPA-8: lighter deblocking — keep JPEG blocking under control while
+  // preserving higher-frequency wall/fabric detail for detail reinjection.
   // the hard DCT-block boundaries that JPEG introduces at low quality settings
-  // (60–80 KB captures at 25% resolution).  At 1px the blur is sub-perceptual
-  // for real scene detail (which spans dozens of pixels) but smooths the abrupt
+  // (60–80 KB captures at 25% resolution).  At 0.35px we smooth the abrupt
   // 8-pixel-period colour steps produced by the discrete cosine transform.
   const ctx2d = canvas.getContext('2d')
-  ctx2d.filter = 'blur(1px)'
+  ctx2d.filter = 'blur(0.35px)'
   ctx2d.drawImage(img, 0, 0, w, h)
   ctx2d.filter = 'none'
 
@@ -1525,6 +1526,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   let rescueHits = 0
   let rescueContribTotal = 0
   let closureHits = 0
+  let detailEnergyTotal = 0
 
   for (let i = 0; i < nPts; i++) {
     const packed = camAssignAll[i] | 0
@@ -1540,6 +1542,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     let accR = 0, accG = 0, accB = 0, accW = 0
     let firstValidRank = -1
     let pointContrib = 0
+    let bestDetailScore = 0
+    let bestDetailR = 0, bestDetailG = 0, bestDetailB = 0
 
     for (let rank = 0; rank < cnt; rank++) {
       const ci = rank === 0 ? c0 : (rank === 1 ? c1 : c2)
@@ -1596,6 +1600,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const rg = r * camGainR[ci]
       const gg = g * camGainG[ci]
       const bg = bcol * camGainB[ci]
+      const lr = ((r00 + r10 + r01 + r11) * 0.25) * camGainR[ci]
+      const lg = ((g00 + g10 + g01 + g11) * 0.25) * camGainG[ci]
+      const lb = ((b00 + b10 + b01 + b11) * 0.25) * camGainB[ci]
 
       // Camera confidence: depth x facing x gradient-detail preference.
       const l00 = (r00 + g00 + b00) * 0.3333333333
@@ -1614,6 +1621,14 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const conf = (0.25 + facing * facing) * depthW * detailW
       if (conf <= 0) continue
       if (firstValidRank < 0) firstValidRank = rank
+
+      const detailScore = conf * (1 + Math.min(2.5, gradMag / 8))
+      if (detailScore > bestDetailScore) {
+        bestDetailScore = detailScore
+        bestDetailR = rg - lr
+        bestDetailG = gg - lg
+        bestDetailB = bg - lb
+      }
 
       accR += rg * conf
       accG += gg * conf
@@ -1679,6 +1694,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         const rg = r * camGainR[ci]
         const gg = g * camGainG[ci]
         const bg = bcol * camGainB[ci]
+        const lr = ((r00 + r10 + r01 + r11) * 0.25) * camGainR[ci]
+        const lg = ((g00 + g10 + g01 + g11) * 0.25) * camGainG[ci]
+        const lb = ((b00 + b10 + b01 + b11) * 0.25) * camGainB[ci]
 
         const l00 = (r00 + g00 + b00) * 0.3333333333
         const l10 = (r10 + g10 + b10) * 0.3333333333
@@ -1696,6 +1714,14 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         const detailW = 1 + Math.min(1.2, gradMag / 20)
         const conf = (0.20 + facing * facing) * depthW * detailW
         if (conf <= 0) continue
+
+        const detailScore = conf * (1 + Math.min(2.5, gradMag / 8))
+        if (detailScore > bestDetailScore) {
+          bestDetailScore = detailScore
+          bestDetailR = rg - lr
+          bestDetailG = gg - lg
+          bestDetailB = bg - lb
+        }
 
         rescueR += rg * conf
         rescueG += gg * conf
@@ -1724,9 +1750,14 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     blendContribTotal += pointContrib
 
     if (colorArr) {
-      colorArr[i3] = Math.min(1, Math.max(0, (accR / accW) / 255))
-      colorArr[i3 + 1] = Math.min(1, Math.max(0, (accG / accW) / 255))
-      colorArr[i3 + 2] = Math.min(1, Math.max(0, (accB / accW) / 255))
+      const detailGain = pointContrib > 1 ? 0.90 : 0.70
+      const outR = (accR / accW) + bestDetailR * detailGain
+      const outG = (accG / accW) + bestDetailG * detailGain
+      const outB = (accB / accW) + bestDetailB * detailGain
+      colorArr[i3] = Math.min(1, Math.max(0, outR / 255))
+      colorArr[i3 + 1] = Math.min(1, Math.max(0, outG / 255))
+      colorArr[i3 + 2] = Math.min(1, Math.max(0, outB / 255))
+      detailEnergyTotal += (Math.abs(bestDetailR) + Math.abs(bestDetailG) + Math.abs(bestDetailB)) / 3
     }
     camAssignAll[i] = -1 // GLSL fast-path: output vColor directly, no UV re-projection
     directHits++
@@ -1791,12 +1822,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const blendAvg = directHits > 0 ? (blendContribTotal / directHits).toFixed(2) : '0.00'
   const rescuePct = directHits > 0 ? Math.round(rescueHits / directHits * 100) : 0
   const rescueBlendAvg = rescueHits > 0 ? (rescueContribTotal / rescueHits).toFixed(2) : '0.00'
+  const detailLift = directHits > 0 ? (detailEnergyTotal / directHits).toFixed(2) : '0.00'
   console.info(
     `[WPA-8] shotgun CPU bake: ${directHits}/${nPts} pts (${psHitPct}% direct hit), ` +
     `${directMisses} miss (${psMissPct}% → GPU WPA-5 fallback) | ` +
     `rank source c0/c1/c2=${rank0Pct}%/${rank1Pct}%/${rank2Pct}% | blendAvg=${blendAvg} cams | ` +
     `rescue=${rescuePct}% (avg ${rescueBlendAvg} cams) | ` +
-    `closure=${closurePct}% | total baked=${postClosureBakePct}%`
+    `closure=${closurePct}% | total baked=${postClosureBakePct}% | detailLift=${detailLift}`
   )
 
   // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
@@ -1905,6 +1937,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       psRescueBlendAvgCams: Number(rescueBlendAvg), // avg contributing cams within rescue hits
       psClosurePct:    closurePct,  // % of all points filled by WPA-8 spatial closure
       psTotalBakedPct: postClosureBakePct, // direct + closure baked share
+      psDetailLift:    Number(detailLift), // avg high-frequency detail residual reinjected per baked point
       colourMethod:    `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
