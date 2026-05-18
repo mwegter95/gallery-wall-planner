@@ -368,11 +368,23 @@ function finalizeSegment(segment) {
     uvs[i * 2 + 1] = (projected[i * 2 + 1] - minV) / height
   }
 
+  let area = 0
+  for (let i = 0; i < segment.indices.length; i += 3) {
+    const ia = segment.indices[i] * 3
+    const ib = segment.indices[i + 1] * 3
+    const ic = segment.indices[i + 2] * 3
+    const a = [segment.positions[ia], segment.positions[ia + 1], segment.positions[ia + 2]]
+    const b = [segment.positions[ib], segment.positions[ib + 1], segment.positions[ib + 2]]
+    const c = [segment.positions[ic], segment.positions[ic + 1], segment.positions[ic + 2]]
+    area += 0.5 * length(cross(subtract(b, a), subtract(c, a)))
+  }
+
   return {
     ...segment,
     uvs,
     basis: { tangent, bitangent },
     extent: { width, height },
+    area,
   }
 }
 
@@ -490,21 +502,26 @@ export async function reconstructPlanarSurfaces(buf, {
     })
     if (reconstructedMesh?.positions?.length && reconstructedMesh?.indices?.length) {
       dynamicSegments = segmentReconstructedMesh(reconstructedMesh, {
-        minTriangles: 8,
-        normalTolerance: 0.09,
-        planeTolerance: 0.14,
+        minTriangles: 24,
+        normalTolerance: 0.18,
+        planeTolerance: 0.24,
       })
     }
   } catch {
     dynamicSegments = []
   }
 
-  const filteredDynamic = segmentation
-    ? dynamicSegments.filter(segment => {
-      if (segment.classification === 'wall') return true
-      return true
-    })
-    : dynamicSegments
+  const filteredDynamic = (segmentation ? dynamicSegments.filter(segment => {
+    if (segment.classification === 'wall') return true
+    return true
+  }) : dynamicSegments)
+    .filter(segment => (
+      (segment.classification === 'wall' || segment.classification === 'floor' || segment.classification === 'ceiling') &&
+      segment.triangleCount >= 24 &&
+      (segment.area || 0) >= 0.75
+    ))
+    .sort((a, b) => (b.area || 0) - (a.area || 0))
+    .slice(0, 96)
 
   if (filteredDynamic.length) {
     return {

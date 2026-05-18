@@ -542,20 +542,32 @@ function buildPlanarSurfaceAtlas({
   depthMaps,
   dmapSize,
   yOffset = 0,
+  maxAtlasSize = 4096,
 }) {
   if (!segments?.length) return null
 
-  const segs = segments.filter(s =>
+  let segs = segments.filter(s =>
     s?.positions?.length >= 9 &&
     s?.indices?.length >= 3 &&
     s?.uvs?.length === (s.positions.length / 3) * 2,
   )
   if (!segs.length) return null
 
-  const tileSize = 224
   const padding = 8
+  const minTileSize = 96
+  while (segs.length > 1) {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(segs.length)))
+    const rows = Math.max(1, Math.ceil(segs.length / cols))
+    if (cols * minTileSize <= maxAtlasSize && rows * minTileSize <= maxAtlasSize) break
+    segs = segs.slice(0, -1)
+  }
+
   const cols = Math.max(1, Math.ceil(Math.sqrt(segs.length)))
   const rows = Math.max(1, Math.ceil(segs.length / cols))
+  const tileSize = Math.max(
+    minTileSize,
+    Math.min(192, Math.floor(Math.min(maxAtlasSize / cols, maxAtlasSize / rows))),
+  )
   const atlasW = cols * tileSize
   const atlasH = rows * tileSize
 
@@ -632,8 +644,8 @@ function buildPlanarSurfaceAtlas({
     for (let vi = 0; vi < vertexCount; vi++) {
       const su = segment.uvs[vi * 2]
       const sv = segment.uvs[vi * 2 + 1]
-      segAtlasUv[vi * 2] = (x0 + su * drawW) / atlasW
-      segAtlasUv[vi * 2 + 1] = (y0 + sv * drawH) / atlasH
+      segAtlasUv[vi * 2] = (x0 + 0.5 + su * Math.max(1, drawW - 1)) / atlasW
+      segAtlasUv[vi * 2 + 1] = (y0 + 0.5 + sv * Math.max(1, drawH - 1)) / atlasH
     }
     atlasUvsBySeg.set(segment.id, segAtlasUv)
 
@@ -651,17 +663,27 @@ function buildPlanarSurfaceAtlas({
       return [to8(sr), to8(sg), to8(sb)]
     })()
 
+    for (let py = cy * tileSize; py < (cy + 1) * tileSize; py++) {
+      for (let px = cx * tileSize; px < (cx + 1) * tileSize; px++) {
+        const oi = (py * atlasW + px) * 4
+        out[oi] = meanCol[0]
+        out[oi + 1] = meanCol[1]
+        out[oi + 2] = meanCol[2]
+        out[oi + 3] = 255
+      }
+    }
+
     for (let ti = 0; ti < segment.indices.length; ti += 3) {
       const i0 = segment.indices[ti]
       const i1 = segment.indices[ti + 1]
       const i2 = segment.indices[ti + 2]
 
-      const u0 = segment.uvs[i0 * 2] * drawW + x0
-      const v0 = segment.uvs[i0 * 2 + 1] * drawH + y0
-      const u1 = segment.uvs[i1 * 2] * drawW + x0
-      const v1 = segment.uvs[i1 * 2 + 1] * drawH + y0
-      const u2 = segment.uvs[i2 * 2] * drawW + x0
-      const v2 = segment.uvs[i2 * 2 + 1] * drawH + y0
+      const u0 = segment.uvs[i0 * 2] * Math.max(1, drawW - 1) + x0 + 0.5
+      const v0 = segment.uvs[i0 * 2 + 1] * Math.max(1, drawH - 1) + y0 + 0.5
+      const u1 = segment.uvs[i1 * 2] * Math.max(1, drawW - 1) + x0 + 0.5
+      const v1 = segment.uvs[i1 * 2 + 1] * Math.max(1, drawH - 1) + y0 + 0.5
+      const u2 = segment.uvs[i2 * 2] * Math.max(1, drawW - 1) + x0 + 0.5
+      const v2 = segment.uvs[i2 * 2 + 1] * Math.max(1, drawH - 1) + y0 + 0.5
 
       const minX = Math.max(x0, Math.floor(Math.min(u0, u1, u2)))
       const maxX = Math.min(x0 + drawW - 1, Math.ceil(Math.max(u0, u1, u2)))
@@ -761,10 +783,12 @@ function buildPlanarSurfaceAtlas({
   const tex = new THREE.CanvasTexture(canvas)
   tex.flipY = false
   tex.colorSpace = THREE.SRGBColorSpace
-  tex.generateMipmaps = true
-  tex.minFilter = THREE.LinearMipMapLinearFilter
+  tex.generateMipmaps = false
+  tex.minFilter = THREE.LinearFilter
   tex.magFilter = THREE.LinearFilter
-  tex.anisotropy = 4
+  tex.wrapS = THREE.ClampToEdgeWrapping
+  tex.wrapT = THREE.ClampToEdgeWrapping
+  tex.anisotropy = 1
 
   return { tex, atlasUvsBySeg, atlasW, atlasH }
 }
@@ -1162,7 +1186,7 @@ function selectBestSnapshots(allSnaps, k) {
   return selected.sort((a, b) => a - b).map(i => allSnaps[i])
 }
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, rawBuffer, preferSurfaceAtlas = true }) {
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, maxTextureSize, rawBuffer, preferSurfaceAtlas = true }) {
   onProgress?.(5, 'Loading snapshots…')
   let data
   try {
@@ -2150,6 +2174,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
           depthMaps,
           dmapSize: DMAP,
           yOffset,
+          maxAtlasSize: Math.min(maxTextureSize || 4096, 4096),
         })
         if (atlas?.tex) {
           const segments = reconstruction.segments
@@ -2183,12 +2208,15 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
           const atlasMat = new THREE.MeshBasicMaterial({
             map: atlas.tex,
             side: THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1,
           })
           const atlasMesh = new THREE.Mesh(atlasGeo, atlasMat)
           atlasMesh.renderOrder = 1
           points.parent?.add(atlasMesh)
-          points.visible = false
-          atlasSegments = segments.length
+          points.visible = true
+          atlasSegments = atlas.atlasUvsBySeg.size
           console.info(`[WPA-9] reconstructed atlas mesh enabled: ${atlasSegments} segments, ${atlas.atlasW}x${atlas.atlasH}`)
         }
       }
@@ -3410,6 +3438,7 @@ export default function SpaceBuilderCanvas({
               onDiagUpdate: () => setDiagVersion(v => v + 1),
               onProgress: reportRoomLoad,
               maxFragTextures: t.renderer?.capabilities?.maxTextures,
+              maxTextureSize: t.renderer?.capabilities?.maxTextureSize,
               rawBuffer: rawBufferRef.current,
               preferSurfaceAtlas: true,
             }).catch(err => {
@@ -4286,6 +4315,7 @@ export default function SpaceBuilderCanvas({
                         onDiagUpdate: () => setDiagVersion(v => v + 1),
                         onProgress: reportRoomLoad,
                         maxFragTextures: threeRef.current?.renderer?.capabilities?.maxTextures,
+                        maxTextureSize: threeRef.current?.renderer?.capabilities?.maxTextureSize,
                         rawBuffer: rawBufferRef.current,
                         preferSurfaceAtlas: true,
                       })
