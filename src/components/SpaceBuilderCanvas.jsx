@@ -7,6 +7,9 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { SURFACE_COLORS, warpSurface } from '../utils/spaceAssembler'
 import { warpPerspectiveAsync } from '../utils/homography'
 import { PointCloudBuffer, planesFromJSON } from '../utils/pointCloud'
@@ -945,7 +948,7 @@ function disposeWpa10LineWeave(points) {
   }
 }
 
-function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, maxSegments = 10000000, onProgress }) {
+function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSegments = 10000000, onProgress }) {
   const posAttr = points.geometry?.attributes?.position
   const colAttr = points.geometry?.attributes?.color
   if (!posAttr?.array || !colAttr?.array) return null
@@ -1001,6 +1004,11 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, maxSegme
   }
   const posOut = new Float32Array(segBudget * 6)
   const colOut = new Uint8Array(segBudget * 6)
+  const thickBins = [
+    { width: 1.35, max: 280000, pos: [], col: [] },
+    { width: 2.05, max: 210000, pos: [], col: [] },
+    { width: 2.95, max: 140000, pos: [], col: [] },
+  ]
   let segmentCount = 0
   let unresolved = 0
 
@@ -1062,6 +1070,9 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, maxSegme
       const keyJ = keyFromGrid(bxAll[bestJ], byAll[bestJ], bzAll[bestJ])
       const statsI = cellStats.get(keyI)
       const statsJ = cellStats.get(keyJ)
+      const nI = statsI?.[3] ?? 1
+      const nJ = statsJ?.[3] ?? 1
+      const dAvg = (nI + nJ) * 0.5
 
       const mIR = statsI && statsI[3] > 0 ? statsI[0] / statsI[3] : colArr[i3]
       const mIG = statsI && statsI[3] > 0 ? statsI[1] / statsI[3] : colArr[i3 + 1]
@@ -1092,6 +1103,25 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, maxSegme
       colOut[p + 3] = Math.max(0, Math.min(255, Math.round(r1 * 255)))
       colOut[p + 4] = Math.max(0, Math.min(255, Math.round(g1 * 255)))
       colOut[p + 5] = Math.max(0, Math.min(255, Math.round(b1 * 255)))
+
+      // Adaptive thickness overlay: emphasise sparse regions and wider local spacing.
+      const sJ = photoSpacings?.[bestJ] ?? sI
+      const sAvg = Math.max(0.003, 0.5 * (sI + sJ))
+      const densityNorm = Math.max(0, Math.min(1, (dAvg - 4) / 36))
+      const spacingNorm = Math.max(0, Math.min(1, (sAvg - 0.004) / 0.014))
+      const fillNeed = Math.max(0, Math.min(1, 0.58 * (1 - densityNorm) + 0.42 * spacingNorm))
+      if (fillNeed > 0.18) {
+        const h = ((i * 73856093) ^ (bestJ * 19349663)) & 1023
+        const threshold = Math.floor(fillNeed * 1023)
+        if (h <= threshold) {
+          const bIdx = fillNeed > 0.74 ? 2 : (fillNeed > 0.46 ? 1 : 0)
+          const bin = thickBins[bIdx]
+          if ((bin.pos.length / 6) < bin.max) {
+            bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
+            bin.col.push(r0, g0, b0, r1, g1, b1)
+          }
+        }
+      }
 
       segmentCount++
     } else {
@@ -1124,15 +1154,43 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, maxSegme
   mesh.userData.wpa10Line = true
   mesh.frustumCulled = false
 
+  const viewport = new THREE.Vector2(1, 1)
+  renderer?.getSize?.(viewport)
+
   const group = new THREE.Group()
   group.userData.wpa10Line = true
   group.add(mesh)
+
+  let thickSegmentCount = 0
+  for (const bin of thickBins) {
+    if (!bin.pos.length) continue
+    const g = new LineSegmentsGeometry()
+    g.setPositions(bin.pos)
+    g.setColors(bin.col)
+    const m = new LineMaterial({
+      linewidth: bin.width,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.62,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    })
+    m.resolution.set(Math.max(1, viewport.x), Math.max(1, viewport.y))
+    const fat = new LineSegments2(g, m)
+    fat.userData.wpa10Line = true
+    fat.frustumCulled = false
+    group.add(fat)
+    thickSegmentCount += (bin.pos.length / 6) | 0
+  }
+
   return {
     group,
     segmentCount,
     seedCount: Math.ceil(nPts / pointStep),
     segBudget,
     unresolved,
+    thickSegmentCount,
   }
 }
 
@@ -2110,6 +2168,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // WPA-10: remove planar reconstruction and render a density-aware line weave
   // directly from the WPA-8 projected point cloud colours.
   let lineSegments = 0
+  let lineFillSegments = 0
   if (enableLineWeave) {
     try {
       onProgress?.(96, 'Building WPA-10 line weave…')
@@ -2124,9 +2183,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       if (weave?.group) {
         points.add(weave.group)
         lineSegments = weave.segmentCount
+        lineFillSegments = weave.thickSegmentCount || 0
         console.info(
           `[WPA-10] projected nearest-neighbour line weave enabled: ${lineSegments} segments ` +
-          `(seeds=${weave.seedCount}, cap=${weave.segBudget}, unresolved=${weave.unresolved})`
+          `(seeds=${weave.seedCount}, cap=${weave.segBudget}, unresolved=${weave.unresolved}, thick=${lineFillSegments})`
         )
       }
     } catch (err) {
@@ -2176,8 +2236,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       psTotalBakedPct: postClosureBakePct, // direct + closure baked share
       psDetailLift:    Number(detailLift), // avg high-frequency detail residual reinjected per baked point
       lineSegments,
+      lineFillSegments,
       colourMethod: lineSegments > 0
-        ? `WPA-10 projected line weave (${lineSegments} segs) + WPA-8/WPA-5 point cloud`
+        ? `WPA-10 projected line weave (${lineSegments} base + ${lineFillSegments} thick fill segs) + WPA-8/WPA-5 point cloud`
         : `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
