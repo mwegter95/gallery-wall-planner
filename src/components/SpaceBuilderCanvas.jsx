@@ -948,7 +948,7 @@ function disposeWpa10LineWeave(points) {
   }
 }
 
-function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSeedPoints = 36000, maxSegments = 90000 }) {
+function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSeedPoints = 0, maxSegments = 0 }) {
   const posAttr = points.geometry?.attributes?.position
   const colAttr = points.geometry?.attributes?.color
   if (!posAttr?.array || !colAttr?.array) return null
@@ -958,27 +958,42 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   const nPts = posAttr.count
   if (nPts < 2) return null
 
-  const seedStep = Math.max(1, Math.floor(nPts / maxSeedPoints))
-  const CELL = 0.13
+  const seedBudget = maxSeedPoints > 0
+    ? maxSeedPoints
+    : Math.min(180000, Math.max(60000, Math.floor(nPts * 0.018)))
+  const segBudget = maxSegments > 0
+    ? maxSegments
+    : Math.min(850000, Math.max(180000, Math.floor(seedBudget * 5.5)))
+
+  const seedStep = Math.max(1, Math.floor(nPts / seedBudget))
+  const CELL = 0.06
   const OFF = 4096
+  const keyFromGrid = (bx, by, bz) => {
+    return (bx + OFF) * 33554432 + (by + OFF) * 8192 + (bz + OFF)
+  }
   const keyFor = (x, y, z) => {
     const bx = Math.round(x / CELL)
     const by = Math.round(y / CELL)
     const bz = Math.round(z / CELL)
-    return (bx + OFF) * 33554432 + (by + OFF) * 8192 + (bz + OFF)
+    return keyFromGrid(bx, by, bz)
   }
 
   const seeds = []
+  const seedGrid = []
   const cellPts = new Map()
   const cellStats = new Map()
 
   for (let i = 0; i < nPts; i += seedStep) {
     const i3 = i * 3
-    const key = keyFor(posArr[i3], posArr[i3 + 1], posArr[i3 + 2])
+    const bx = Math.round(posArr[i3] / CELL)
+    const by = Math.round(posArr[i3 + 1] / CELL)
+    const bz = Math.round(posArr[i3 + 2] / CELL)
+    const key = keyFromGrid(bx, by, bz)
     seeds.push(i)
+    seedGrid.push([bx, by, bz, key])
     let arr = cellPts.get(key)
     if (!arr) { arr = []; cellPts.set(key, arr) }
-    if (arr.length < 24) arr.push(i)
+    if (arr.length < 96) arr.push(i)
 
     let stats = cellStats.get(key)
     if (!stats) { stats = new Float32Array(4); cellStats.set(key, stats) }
@@ -998,22 +1013,20 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   const sz = new THREE.Vector2()
   renderer?.getSize?.(sz)
   let segmentCount = 0
+  const nearestLimit = 6
 
   for (let si = 0; si < seeds.length; si++) {
     const i = seeds[si]
     const i3 = i * 3
     const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
     const niX = normals?.[i3] ?? 0, niY = normals?.[i3 + 1] ?? 1, niZ = normals?.[i3 + 2] ?? 0
-    const key = keyFor(xi, yi, zi)
-    const kx = Math.floor(key / 33554432) - OFF
-    const ky = Math.floor(key / 8192) % 4096 - OFF
-    const kz = key % 8192 - OFF
+    const [kx, ky, kz, key] = seedGrid[si]
 
     const localCandidates = []
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         for (let dz = -1; dz <= 1; dz++) {
-          const k2 = (kx + dx + OFF) * 33554432 + (ky + dy + OFF) * 8192 + (kz + dz + OFF)
+          const k2 = keyFromGrid(kx + dx, ky + dy, kz + dz)
           const arr = cellPts.get(k2)
           if (!arr) continue
           for (let t = 0; t < arr.length; t++) localCandidates.push(arr[t])
@@ -1021,7 +1034,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       }
     }
 
-    let links = 0
+    const nearest = []
     for (let c = 0; c < localCandidates.length; c++) {
       const j = localCandidates[c]
       if (j <= i) continue
@@ -1034,13 +1047,14 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       const sJ = photoSpacings?.[j] ?? 0.004
       const s = Math.max(0.0035, Math.min(0.020, 0.5 * (sI + sJ)))
       const minD = Math.max(0.010, s * 0.8)
-      const maxD = Math.min(0.160, Math.max(0.035, s * 8.0))
+      const maxD = Math.min(0.11, Math.max(0.025, s * 7.5))
       if (d2 < minD * minD || d2 > maxD * maxD) continue
+      if (Math.abs(dy) > maxD * 0.9) continue
 
       if (normals) {
         const njX = normals[j3], njY = normals[j3 + 1], njZ = normals[j3 + 2]
         const nd = niX * njX + niY * njY + niZ * njZ
-        if (nd < 0.40) continue
+        if (nd < 0.60) continue
       }
 
       const dr = colArr[i3] - colArr[j3]
@@ -1048,6 +1062,24 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       const db = colArr[i3 + 2] - colArr[j3 + 2]
       const dCol = Math.sqrt(dr * dr + dg * dg + db * db)
       if (dCol > 0.70) continue
+
+      const rankScore = d2 * (1 + dCol * 0.28)
+      if (nearest.length < nearestLimit) {
+        nearest.push({ j, j3, xj, yj, zj, dCol, rankScore })
+      } else {
+        let worstIdx = 0
+        for (let n = 1; n < nearest.length; n++) {
+          if (nearest[n].rankScore > nearest[worstIdx].rankScore) worstIdx = n
+        }
+        if (rankScore < nearest[worstIdx].rankScore) {
+          nearest[worstIdx] = { j, j3, xj, yj, zj, dCol, rankScore }
+        }
+      }
+    }
+
+    nearest.sort((a, b) => a.rankScore - b.rankScore)
+    for (let n = 0; n < nearest.length; n++) {
+      const { j3, xj, yj, zj, dCol } = nearest[n]
 
       const statsI = cellStats.get(key)
       const keyJ = keyFor(xj, yj, zj)
@@ -1077,12 +1109,9 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
       bin.col.push(r0, g0, b0, r1, g1, b1)
       segmentCount++
-      links++
-
-      if (segmentCount >= maxSegments) break
-      if (links >= 4) break
+      if (segmentCount >= segBudget) break
     }
-    if (segmentCount >= maxSegments) break
+    if (segmentCount >= segBudget) break
   }
 
   if (!segmentCount) return null
@@ -1113,7 +1142,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     group.add(mesh)
   }
 
-  return { group, segmentCount }
+  return { group, segmentCount, seedCount: seeds.length, segBudget }
 }
 
 async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, renderer, enableLineWeave = true }) {
@@ -2104,7 +2133,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       if (weave?.group) {
         points.add(weave.group)
         lineSegments = weave.segmentCount
-        console.info(`[WPA-10] projected line weave enabled: ${lineSegments} segments`)
+        console.info(
+          `[WPA-10] projected line weave enabled: ${lineSegments} segments ` +
+          `(seeds=${weave.seedCount}, cap=${weave.segBudget})`
+        )
       }
     } catch (err) {
       console.warn('[WPA-10] line weave build failed:', err)
