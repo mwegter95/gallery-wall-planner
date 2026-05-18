@@ -1153,13 +1153,30 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
         metaJ,
       )
 
-      const surroundBlend = Math.max(0.28, Math.min(0.74, 0.36 + bestDCol * 0.52))
-      const r0 = colArr[i3] * (1 - surroundBlend) + mIR * surroundBlend
-      const g0 = colArr[i3 + 1] * (1 - surroundBlend) + mIG * surroundBlend
-      const b0 = colArr[i3 + 2] * (1 - surroundBlend) + mIB * surroundBlend
-      const r1 = colArr[j3] * (1 - surroundBlend) + mJR * surroundBlend
-      const g1 = colArr[j3 + 1] * (1 - surroundBlend) + mJG * surroundBlend
-      const b1 = colArr[j3 + 2] * (1 - surroundBlend) + mJB * surroundBlend
+      const detailI = metaI?.detail ?? 0.5
+      const detailJ = metaJ?.detail ?? 0.5
+      const detailAvg = 0.5 * (detailI + detailJ)
+      const surroundBlend = Math.max(0.34, Math.min(0.86, 0.48 + bestDCol * 0.42 - detailAvg * 0.10))
+
+      let r0 = colArr[i3] * (1 - surroundBlend) + mIR * surroundBlend
+      let g0 = colArr[i3 + 1] * (1 - surroundBlend) + mIG * surroundBlend
+      let b0 = colArr[i3 + 2] * (1 - surroundBlend) + mIB * surroundBlend
+      let r1 = colArr[j3] * (1 - surroundBlend) + mJR * surroundBlend
+      let g1 = colArr[j3 + 1] * (1 - surroundBlend) + mJG * surroundBlend
+      let b1 = colArr[j3 + 2] * (1 - surroundBlend) + mJB * surroundBlend
+
+      // Direction-aware contrast lift: if the two zone colours differ, push
+      // endpoints apart so the gradient reads visually instead of collapsing.
+      const dzR = mJR - mIR
+      const dzG = mJG - mIG
+      const dzB = mJB - mIB
+      const gradBoost = Math.max(0.18, Math.min(0.70, 0.40 + (1 - detailAvg) * 0.28))
+      r0 = Math.max(0, Math.min(1, r0 - dzR * gradBoost * 0.5))
+      g0 = Math.max(0, Math.min(1, g0 - dzG * gradBoost * 0.5))
+      b0 = Math.max(0, Math.min(1, b0 - dzB * gradBoost * 0.5))
+      r1 = Math.max(0, Math.min(1, r1 + dzR * gradBoost * 0.5))
+      g1 = Math.max(0, Math.min(1, g1 + dzG * gradBoost * 0.5))
+      b1 = Math.max(0, Math.min(1, b1 + dzB * gradBoost * 0.5))
 
       const p = segmentCount * 6
       posOut[p] = xi
@@ -1211,9 +1228,10 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   const mat = new THREE.LineBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.86,
+    opacity: 1.0,
     depthTest: true,
     depthWrite: false,
+    toneMapped: false,
   })
 
   const mesh = new THREE.LineSegments(geo, mat)
@@ -1237,7 +1255,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       linewidth: bin.width,
       vertexColors: true,
       transparent: true,
-      opacity: 0.62,
+      opacity: 0.42,
       depthTest: true,
       depthWrite: false,
       toneMapped: false,
