@@ -948,7 +948,7 @@ function disposeWpa10LineWeave(points) {
   }
 }
 
-function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSegments = 10000000, onProgress }) {
+function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSegments = 0, onProgress }) {
   const posAttr = points.geometry?.attributes?.position
   const colAttr = points.geometry?.attributes?.color
   if (!posAttr?.array || !colAttr?.array) return null
@@ -958,10 +958,10 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   const nPts = posAttr.count
   if (nPts < 2) return null
 
-  const segBudget = Math.max(1, Math.min(maxSegments, nPts))
+  const segBudget = Math.max(1, maxSegments > 0 ? maxSegments : nPts)
   const pointStep = Math.max(1, Math.ceil(nPts / segBudget))
 
-  const CELL = 0.032
+  const CELL = 0.05
   const OFF = 4096
   const keyFromGrid = (bx, by, bz) => {
     return (bx + OFF) * 33554432 + (by + OFF) * 8192 + (bz + OFF)
@@ -1005,12 +1005,45 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   const posOut = new Float32Array(segBudget * 6)
   const colOut = new Uint8Array(segBudget * 6)
   const thickBins = [
-    { width: 1.35, max: 280000, pos: [], col: [] },
-    { width: 2.05, max: 210000, pos: [], col: [] },
-    { width: 2.95, max: 140000, pos: [], col: [] },
+    { width: 2.2, pos: [], col: [] },
+    { width: 3.3, pos: [], col: [] },
+    { width: 4.6, pos: [], col: [] },
   ]
   let segmentCount = 0
   let unresolved = 0
+
+  const zoneRadius = 0.05
+  const zoneCellRad = Math.max(1, Math.ceil(zoneRadius / CELL))
+  const sampleDirectionalZoneColor = (bx, by, bz, px, py, pz, dirx, diry, dirz, fr, fg, fb) => {
+    let ar = 0, ag = 0, ab = 0, aw = 0
+    for (let dx = -zoneCellRad; dx <= zoneCellRad; dx++) {
+      for (let dy = -zoneCellRad; dy <= zoneCellRad; dy++) {
+        for (let dz = -zoneCellRad; dz <= zoneCellRad; dz++) {
+          const cx = (bx + dx) * CELL
+          const cy = (by + dy) * CELL
+          const cz = (bz + dz) * CELL
+          const vx = cx - px, vy = cy - py, vz = cz - pz
+          const dist = Math.sqrt(vx * vx + vy * vy + vz * vz)
+          if (dist > zoneRadius) continue
+          const stats = cellStats.get(keyFromGrid(bx + dx, by + dy, bz + dz))
+          if (!stats || stats[3] <= 0) continue
+
+          const align = (vx * dirx + vy * diry + vz * dirz) / Math.max(1e-4, dist)
+          const dirW = 0.45 + 0.55 * Math.max(0, align)
+          const distW = 1 / (0.008 + dist)
+          const countW = Math.min(2.5, Math.max(0.35, stats[3] * 0.09))
+          const w = dirW * distW * countW
+
+          ar += (stats[0] / stats[3]) * w
+          ag += (stats[1] / stats[3]) * w
+          ab += (stats[2] / stats[3]) * w
+          aw += w
+        }
+      }
+    }
+    if (aw <= 1e-6) return [fr, fg, fb]
+    return [ar / aw, ag / aw, ab / aw]
+  }
 
   for (let i = 0; i < nPts; i += pointStep) {
     const i3 = i * 3
@@ -1066,22 +1099,30 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     if (bestJ >= 0) {
       const j3 = bestJ * 3
       const xj = posArr[j3], yj = posArr[j3 + 1], zj = posArr[j3 + 2]
+      const bxJ = bxAll[bestJ], byJ = byAll[bestJ], bzJ = bzAll[bestJ]
       const keyI = keyFromGrid(kx, ky, kz)
-      const keyJ = keyFromGrid(bxAll[bestJ], byAll[bestJ], bzAll[bestJ])
+      const keyJ = keyFromGrid(bxJ, byJ, bzJ)
       const statsI = cellStats.get(keyI)
       const statsJ = cellStats.get(keyJ)
       const nI = statsI?.[3] ?? 1
       const nJ = statsJ?.[3] ?? 1
       const dAvg = (nI + nJ) * 0.5
 
-      const mIR = statsI && statsI[3] > 0 ? statsI[0] / statsI[3] : colArr[i3]
-      const mIG = statsI && statsI[3] > 0 ? statsI[1] / statsI[3] : colArr[i3 + 1]
-      const mIB = statsI && statsI[3] > 0 ? statsI[2] / statsI[3] : colArr[i3 + 2]
-      const mJR = statsJ && statsJ[3] > 0 ? statsJ[0] / statsJ[3] : colArr[j3]
-      const mJG = statsJ && statsJ[3] > 0 ? statsJ[1] / statsJ[3] : colArr[j3 + 1]
-      const mJB = statsJ && statsJ[3] > 0 ? statsJ[2] / statsJ[3] : colArr[j3 + 2]
+      const lx = xj - xi, ly = yj - yi, lz = zj - zi
+      const llen = Math.sqrt(lx * lx + ly * ly + lz * lz) || 1
+      const dirx = lx / llen, diry = ly / llen, dirz = lz / llen
+      const [mIR, mIG, mIB] = sampleDirectionalZoneColor(
+        kx, ky, kz, xi, yi, zi,
+        dirx, diry, dirz,
+        colArr[i3], colArr[i3 + 1], colArr[i3 + 2],
+      )
+      const [mJR, mJG, mJB] = sampleDirectionalZoneColor(
+        bxJ, byJ, bzJ, xj, yj, zj,
+        -dirx, -diry, -dirz,
+        colArr[j3], colArr[j3 + 1], colArr[j3 + 2],
+      )
 
-      const surroundBlend = Math.max(0.14, Math.min(0.52, 0.20 + bestDCol * 0.45))
+      const surroundBlend = Math.max(0.28, Math.min(0.74, 0.36 + bestDCol * 0.52))
       const r0 = colArr[i3] * (1 - surroundBlend) + mIR * surroundBlend
       const g0 = colArr[i3 + 1] * (1 - surroundBlend) + mIG * surroundBlend
       const b0 = colArr[i3 + 2] * (1 - surroundBlend) + mIB * surroundBlend
@@ -1110,17 +1151,11 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       const densityNorm = Math.max(0, Math.min(1, (dAvg - 4) / 36))
       const spacingNorm = Math.max(0, Math.min(1, (sAvg - 0.004) / 0.014))
       const fillNeed = Math.max(0, Math.min(1, 0.58 * (1 - densityNorm) + 0.42 * spacingNorm))
-      if (fillNeed > 0.18) {
-        const h = ((i * 73856093) ^ (bestJ * 19349663)) & 1023
-        const threshold = Math.floor(fillNeed * 1023)
-        if (h <= threshold) {
-          const bIdx = fillNeed > 0.74 ? 2 : (fillNeed > 0.46 ? 1 : 0)
-          const bin = thickBins[bIdx]
-          if ((bin.pos.length / 6) < bin.max) {
-            bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
-            bin.col.push(r0, g0, b0, r1, g1, b1)
-          }
-        }
+      if (fillNeed > 0.04) {
+        const bIdx = fillNeed > 0.70 ? 2 : (fillNeed > 0.35 ? 1 : 0)
+        const bin = thickBins[bIdx]
+        bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
+        bin.col.push(r0, g0, b0, r1, g1, b1)
       }
 
       segmentCount++
