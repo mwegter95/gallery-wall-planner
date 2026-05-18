@@ -996,11 +996,28 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     cellHead.set(key, i)
 
     let stats = cellStats.get(key)
-    if (!stats) { stats = new Float32Array(4); cellStats.set(key, stats) }
+    if (!stats) { stats = new Float32Array(7); cellStats.set(key, stats) }
     stats[0] += colArr[i3]
     stats[1] += colArr[i3 + 1]
     stats[2] += colArr[i3 + 2]
     stats[3] += 1
+    stats[4] += colArr[i3] * colArr[i3]
+    stats[5] += colArr[i3 + 1] * colArr[i3 + 1]
+    stats[6] += colArr[i3 + 2] * colArr[i3 + 2]
+  }
+
+  const cellMeta = new Map()
+  for (const [key, stats] of cellStats) {
+    const n = Math.max(1, stats[3])
+    const mr = stats[0] / n
+    const mg = stats[1] / n
+    const mb = stats[2] / n
+    const vr = Math.max(0, stats[4] / n - mr * mr)
+    const vg = Math.max(0, stats[5] / n - mg * mg)
+    const vb = Math.max(0, stats[6] / n - mb * mb)
+    const sigma = Math.sqrt((vr + vg + vb) / 3)
+    const detail = Math.max(0, Math.min(1, sigma / 0.16))
+    cellMeta.set(key, { mr, mg, mb, n, detail })
   }
   const posOut = new Float32Array(segBudget * 6)
   const colOut = new Uint8Array(segBudget * 6)
@@ -1012,9 +1029,11 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
   let segmentCount = 0
   let unresolved = 0
 
-  const zoneRadius = 0.05
-  const zoneCellRad = Math.max(1, Math.ceil(zoneRadius / CELL))
-  const sampleDirectionalZoneColor = (bx, by, bz, px, py, pz, dirx, diry, dirz, fr, fg, fb) => {
+  const sampleDirectionalZoneColor = (bx, by, bz, px, py, pz, dirx, diry, dirz, fr, fg, fb, srcMeta) => {
+    const baseDetail = srcMeta?.detail ?? 0.5
+    const zoneRadius = 0.022 + (1 - baseDetail) * 0.078
+    const zoneCellRad = Math.max(1, Math.ceil(zoneRadius / CELL))
+    const colorForgiveness = 0.04 + (1 - baseDetail) * 0.17
     let ar = 0, ag = 0, ab = 0, aw = 0
     for (let dx = -zoneCellRad; dx <= zoneCellRad; dx++) {
       for (let dy = -zoneCellRad; dy <= zoneCellRad; dy++) {
@@ -1025,18 +1044,26 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
           const vx = cx - px, vy = cy - py, vz = cz - pz
           const dist = Math.sqrt(vx * vx + vy * vy + vz * vz)
           if (dist > zoneRadius) continue
-          const stats = cellStats.get(keyFromGrid(bx + dx, by + dy, bz + dz))
-          if (!stats || stats[3] <= 0) continue
+          const meta = cellMeta.get(keyFromGrid(bx + dx, by + dy, bz + dz))
+          if (!meta || meta.n <= 0) continue
 
           const align = (vx * dirx + vy * diry + vz * dirz) / Math.max(1e-4, dist)
           const dirW = 0.45 + 0.55 * Math.max(0, align)
           const distW = 1 / (0.008 + dist)
-          const countW = Math.min(2.5, Math.max(0.35, stats[3] * 0.09))
-          const w = dirW * distW * countW
+          const countW = Math.min(2.5, Math.max(0.35, meta.n * 0.09))
 
-          ar += (stats[0] / stats[3]) * w
-          ag += (stats[1] / stats[3]) * w
-          ab += (stats[2] / stats[3]) * w
+          const dr = fr - meta.mr
+          const dg = fg - meta.mg
+          const db = fb - meta.mb
+          const dCol = Math.sqrt(dr * dr + dg * dg + db * db)
+          const t = dCol / Math.max(0.01, colorForgiveness)
+          const colW = 1 / (1 + t * t)
+
+          const w = dirW * distW * countW * colW
+
+          ar += meta.mr * w
+          ag += meta.mg * w
+          ab += meta.mb * w
           aw += w
         }
       }
@@ -1104,6 +1131,8 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       const keyJ = keyFromGrid(bxJ, byJ, bzJ)
       const statsI = cellStats.get(keyI)
       const statsJ = cellStats.get(keyJ)
+      const metaI = cellMeta.get(keyI)
+      const metaJ = cellMeta.get(keyJ)
       const nI = statsI?.[3] ?? 1
       const nJ = statsJ?.[3] ?? 1
       const dAvg = (nI + nJ) * 0.5
@@ -1115,11 +1144,13 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
         kx, ky, kz, xi, yi, zi,
         dirx, diry, dirz,
         colArr[i3], colArr[i3 + 1], colArr[i3 + 2],
+        metaI,
       )
       const [mJR, mJG, mJB] = sampleDirectionalZoneColor(
         bxJ, byJ, bzJ, xj, yj, zj,
         -dirx, -diry, -dirz,
         colArr[j3], colArr[j3 + 1], colArr[j3 + 2],
+        metaJ,
       )
 
       const surroundBlend = Math.max(0.28, Math.min(0.74, 0.36 + bestDCol * 0.52))
