@@ -553,6 +553,7 @@ function buildPlanarSurfaceAtlas({
   textures,
   depthMaps,
   dmapSize,
+  yOffset = 0,
 }) {
   if (!segments?.length) return null
 
@@ -596,6 +597,10 @@ function buildPlanarSurfaceAtlas({
         const u = (px + 0.5) / drawW
         const v = (py + 0.5) / drawH
         const wp = bilinearPointOnQuad(p00, p10, p11, p01, u, v)
+        // Segment positions are in display-space Y (yOffset applied so floor=0).
+        // The w2c matrices were built from raw-world coordinates — subtract yOffset
+        // to get the raw Y before projecting.
+        const wpRawY = wp[1] - yOffset
 
         let bestScore = -1
         let br = 42, bg = 42, bb = 42
@@ -605,9 +610,9 @@ function buildPlanarSurfaceAtlas({
           const td = textures[ci]
           if (!td?.pixels) continue
 
-          const cpx = e[0]*wp[0] + e[4]*wp[1] + e[8]*wp[2] + e[12]
-          const cpy = e[1]*wp[0] + e[5]*wp[1] + e[9]*wp[2] + e[13]
-          const cpz = e[2]*wp[0] + e[6]*wp[1] + e[10]*wp[2] + e[14]
+          const cpx = e[0]*wp[0] + e[4]*wpRawY + e[8]*wp[2] + e[12]
+          const cpy = e[1]*wp[0] + e[5]*wpRawY + e[9]*wp[2] + e[13]
+          const cpz = e[2]*wp[0] + e[6]*wpRawY + e[10]*wp[2] + e[14]
           if (cpz >= -0.05) continue
           const dep = -cpz
 
@@ -2053,6 +2058,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
           textures,
           depthMaps,
           dmapSize: DMAP,
+          yOffset,
         })
         if (atlas?.tex) {
           const segments = reconstruction.segments
