@@ -533,6 +533,146 @@ function sampleCamPx(wx, wy, wz, e, k, ori, td) {
   return [td.pixels[pi], td.pixels[pi + 1], td.pixels[pi + 2]]
 }
 
+function bilinearPointOnQuad(p00, p10, p11, p01, u, v) {
+  const a = (1 - u) * (1 - v)
+  const b = u * (1 - v)
+  const c = u * v
+  const d = (1 - u) * v
+  return [
+    p00[0] * a + p10[0] * b + p11[0] * c + p01[0] * d,
+    p00[1] * a + p10[1] * b + p11[1] * c + p01[1] * d,
+    p00[2] * a + p10[2] * b + p11[2] * c + p01[2] * d,
+  ]
+}
+
+function buildPlanarSurfaceAtlas({
+  segments,
+  w2cElems,
+  camKVec,
+  camOriArr,
+  textures,
+  depthMaps,
+  dmapSize,
+}) {
+  if (!segments?.length) return null
+
+  const segs = segments.filter(s => s?.positions?.length >= 12)
+  if (!segs.length) return null
+
+  const tileSize = 256
+  const padding = 8
+  const cols = Math.max(1, Math.ceil(Math.sqrt(segs.length)))
+  const rows = Math.max(1, Math.ceil(segs.length / cols))
+  const atlasW = cols * tileSize
+  const atlasH = rows * tileSize
+
+  const canvas = document.createElement('canvas')
+  canvas.width = atlasW
+  canvas.height = atlasH
+  const ctx = canvas.getContext('2d')
+  const img = ctx.createImageData(atlasW, atlasH)
+  const out = img.data
+
+  const atlasUvsBySeg = new Map()
+
+  for (let si = 0; si < segs.length; si++) {
+    const segment = segs[si]
+    const base = segment.positions
+    const p00 = [base[0], base[1], base[2]]
+    const p10 = [base[3], base[4], base[5]]
+    const p11 = [base[6], base[7], base[8]]
+    const p01 = [base[9], base[10], base[11]]
+    const n = segment.normal || [0, 0, 1]
+
+    const cx = si % cols
+    const cy = (si / cols) | 0
+    const x0 = cx * tileSize + padding
+    const y0 = cy * tileSize + padding
+    const drawW = tileSize - padding * 2
+    const drawH = tileSize - padding * 2
+
+    for (let py = 0; py < drawH; py++) {
+      for (let px = 0; px < drawW; px++) {
+        const u = (px + 0.5) / drawW
+        const v = (py + 0.5) / drawH
+        const wp = bilinearPointOnQuad(p00, p10, p11, p01, u, v)
+
+        let bestScore = -1
+        let br = 42, bg = 42, bb = 42
+
+        for (let ci = 0; ci < w2cElems.length; ci++) {
+          const e = w2cElems[ci]
+          const td = textures[ci]
+          if (!td?.pixels) continue
+
+          const cpx = e[0]*wp[0] + e[4]*wp[1] + e[8]*wp[2] + e[12]
+          const cpy = e[1]*wp[0] + e[5]*wp[1] + e[9]*wp[2] + e[13]
+          const cpz = e[2]*wp[0] + e[6]*wp[1] + e[10]*wp[2] + e[14]
+          if (cpz >= -0.05) continue
+          const dep = -cpz
+
+          const k = camKVec[ci]
+          const u0 = k.x * cpx / dep + k.z
+          const v0 = k.y * (-cpy) / dep + k.w
+          const [uu, vv] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
+          if (uu < 0.02 || uu > 0.98 || vv < 0.02 || vv > 0.98) continue
+
+          if (depthMaps?.[ci]) {
+            const du = Math.min(dmapSize - 1, Math.max(0, Math.floor(uu * dmapSize)))
+            const dv = Math.min(dmapSize - 1, Math.max(0, Math.floor(vv * dmapSize)))
+            const minD = depthMaps[ci][dv * dmapSize + du]
+            if (dep > minD * 1.25) continue
+          }
+
+          const pu = Math.min(td.pw - 1, Math.max(0, Math.floor(uu * td.pw)))
+          const pv = Math.min(td.ph - 1, Math.max(0, Math.floor(vv * td.ph)))
+          const pi = (pv * td.pw + pu) * 4
+
+          const facing = Math.max(0, -(e[2] * n[0] + e[6] * n[1] + e[10] * n[2]))
+          if (facing < 0.08) continue
+          const score = (0.2 + facing * facing) / (0.2 + dep * dep)
+          if (score <= bestScore) continue
+
+          bestScore = score
+          br = td.pixels[pi]
+          bg = td.pixels[pi + 1]
+          bb = td.pixels[pi + 2]
+        }
+
+        const ax = x0 + px
+        const ay = y0 + py
+        const oi = (ay * atlasW + ax) * 4
+        out[oi] = br
+        out[oi + 1] = bg
+        out[oi + 2] = bb
+        out[oi + 3] = 255
+      }
+    }
+
+    const uMin = x0 / atlasW
+    const vMin = y0 / atlasH
+    const uMax = (x0 + drawW) / atlasW
+    const vMax = (y0 + drawH) / atlasH
+    atlasUvsBySeg.set(segment.id, new Float32Array([
+      uMin, vMin,
+      uMax, vMin,
+      uMax, vMax,
+      uMin, vMax,
+    ]))
+  }
+
+  ctx.putImageData(img, 0, 0)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.flipY = false
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.generateMipmaps = true
+  tex.minFilter = THREE.LinearMipMapLinearFilter
+  tex.magFilter = THREE.LinearFilter
+  tex.anisotropy = 4
+
+  return { tex, atlasUvsBySeg, atlasW, atlasH }
+}
+
 // ── WPA-6 Photo-Forward Splatting (PFS) ──────────────────────────────────────
 //
 // Analogy: DIBR (Depth Image Based Rendering), MPEG-I Immersive Video, instant 3DGS.
@@ -926,7 +1066,7 @@ function selectBestSnapshots(allSnaps, k) {
   return selected.sort((a, b) => a - b).map(i => allSnaps[i])
 }
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures }) {
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, rawBuffer, preferSurfaceAtlas = true }) {
   onProgress?.(5, 'Loading snapshots…')
   let data
   try {
@@ -1897,12 +2037,75 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
+  // WPA-9: optional reconstructed surface mesh with UV texture atlas.
+  // This bypasses point splat limits and renders textured surfaces as triangles.
+  let atlasSegments = 0
+  if (preferSurfaceAtlas && rawBuffer) {
+    try {
+      onProgress?.(96, 'Building reconstructed surface atlas…')
+      const reconstruction = await reconstructPlanarSurfaces(rawBuffer, { yOffset })
+      if (reconstruction?.segments?.length) {
+        const atlas = buildPlanarSurfaceAtlas({
+          segments: reconstruction.segments,
+          w2cElems,
+          camKVec,
+          camOriArr,
+          textures,
+          depthMaps,
+          dmapSize: DMAP,
+        })
+        if (atlas?.tex) {
+          const segments = reconstruction.segments
+          let totalPos = 0, totalIdx = 0
+          for (const s of segments) { totalPos += s.positions.length; totalIdx += s.indices.length }
+          const atlasPos = new Float32Array(totalPos)
+          const atlasUv = new Float32Array((totalPos / 3) * 2)
+          const atlasIdx = new Uint32Array(totalIdx)
+          let pOff = 0, uvOff = 0, iOff = 0, vOff = 0
+          for (const s of segments) {
+            atlasPos.set(s.positions, pOff)
+            const uv = atlas.atlasUvsBySeg.get(s.id) || s.uvs
+            if (uv?.length >= 8 && s.positions.length === 12) {
+              atlasUv.set(uv, uvOff)
+            } else if (s.uvs?.length === (s.positions.length / 3) * 2) {
+              atlasUv.set(s.uvs, uvOff)
+            }
+            for (let i = 0; i < s.indices.length; i++) atlasIdx[iOff + i] = s.indices[i] + vOff
+            pOff += s.positions.length
+            uvOff += (s.positions.length / 3) * 2
+            iOff += s.indices.length
+            vOff += s.positions.length / 3
+          }
+
+          const atlasGeo = new THREE.BufferGeometry()
+          atlasGeo.setAttribute('position', new THREE.BufferAttribute(atlasPos, 3))
+          atlasGeo.setAttribute('uv', new THREE.BufferAttribute(atlasUv, 2))
+          atlasGeo.setIndex(new THREE.BufferAttribute(atlasIdx, 1))
+          atlasGeo.computeVertexNormals()
+
+          const atlasMat = new THREE.MeshBasicMaterial({
+            map: atlas.tex,
+            side: THREE.DoubleSide,
+          })
+          const atlasMesh = new THREE.Mesh(atlasGeo, atlasMat)
+          atlasMesh.renderOrder = 1
+          points.parent?.add(atlasMesh)
+          points.visible = false
+          atlasSegments = segments.length
+          console.info(`[WPA-9] reconstructed atlas mesh enabled: ${atlasSegments} segments, ${atlas.atlasW}x${atlas.atlasH}`)
+        }
+      }
+    } catch (err) {
+      console.warn('[WPA-9] reconstructed atlas build failed:', err)
+    }
+  }
+
   onProgress?.(95, `Photo projection applied (${postClosureBakePct}% WPA-8 CPU-baked + ${Math.max(0, 100 - postClosureBakePct)}% GPU WPA-5)…`)
   console.info(
     `[projective] WPA-8 shotgun direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
     `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | closure ${closurePct}% | total baked ${postClosureBakePct}% | WPA-5 wall coverage: ${coveragePct}% | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
-    `rescue ${rescuePct}%, ` +
+    `rescue ${rescuePct}%, atlasSegs ${atlasSegments}, ` +
     `voxel assign ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
     `med splat ${medSpacingMm}mm`
   )
@@ -1938,7 +2141,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       psClosurePct:    closurePct,  // % of all points filled by WPA-8 spatial closure
       psTotalBakedPct: postClosureBakePct, // direct + closure baked share
       psDetailLift:    Number(detailLift), // avg high-frequency detail residual reinjected per baked point
-      colourMethod:    `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
+      atlasSegments,   // reconstructed segments rendered via UV texture atlas
+      colourMethod: atlasSegments > 0
+        ? `WPA-9 reconstructed surface atlas (${atlasSegments} segs) + WPA-8 bake fallback`
+        : `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }
@@ -3107,6 +3313,8 @@ export default function SpaceBuilderCanvas({
               onDiagUpdate: () => setDiagVersion(v => v + 1),
               onProgress: reportRoomLoad,
               maxFragTextures: t.renderer?.capabilities?.maxTextures,
+              rawBuffer: rawBufferRef.current,
+              preferSurfaceAtlas: true,
             }).catch(err => {
               console.warn('[projective] upgrade error:', err)
               reportRoomLoad(100, 'Photo projection failed', false)
@@ -3981,6 +4189,8 @@ export default function SpaceBuilderCanvas({
                         onDiagUpdate: () => setDiagVersion(v => v + 1),
                         onProgress: reportRoomLoad,
                         maxFragTextures: threeRef.current?.renderer?.capabilities?.maxTextures,
+                        rawBuffer: rawBufferRef.current,
+                        preferSurfaceAtlas: true,
                       })
                     } catch (err) {
                       console.warn('[rebuild] projection error:', err)
