@@ -1072,6 +1072,11 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     return [ar / aw, ag / aw, ab / aw]
   }
 
+  const srgbToLinear = (c) => {
+    if (c <= 0.04045) return c / 12.92
+    return Math.pow((c + 0.055) / 1.055, 2.4)
+  }
+
   for (let i = 0; i < nPts; i += pointStep) {
     const i3 = i * 3
     const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
@@ -1178,6 +1183,15 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       g1 = Math.max(0, Math.min(1, g1 + dzG * gradBoost * 0.5))
       b1 = Math.max(0, Math.min(1, b1 + dzB * gradBoost * 0.5))
 
+      // Three.js standard line materials interpret vertex colors as linear.
+      // Convert the sRGB projected colours so lines match point-cloud tones.
+      const lr0 = srgbToLinear(r0)
+      const lg0 = srgbToLinear(g0)
+      const lb0 = srgbToLinear(b0)
+      const lr1 = srgbToLinear(r1)
+      const lg1 = srgbToLinear(g1)
+      const lb1 = srgbToLinear(b1)
+
       const p = segmentCount * 6
       posOut[p] = xi
       posOut[p + 1] = yi + yOffset
@@ -1186,12 +1200,12 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       posOut[p + 4] = yj + yOffset
       posOut[p + 5] = zj
 
-      colOut[p] = Math.max(0, Math.min(255, Math.round(r0 * 255)))
-      colOut[p + 1] = Math.max(0, Math.min(255, Math.round(g0 * 255)))
-      colOut[p + 2] = Math.max(0, Math.min(255, Math.round(b0 * 255)))
-      colOut[p + 3] = Math.max(0, Math.min(255, Math.round(r1 * 255)))
-      colOut[p + 4] = Math.max(0, Math.min(255, Math.round(g1 * 255)))
-      colOut[p + 5] = Math.max(0, Math.min(255, Math.round(b1 * 255)))
+      colOut[p] = Math.max(0, Math.min(255, Math.round(lr0 * 255)))
+      colOut[p + 1] = Math.max(0, Math.min(255, Math.round(lg0 * 255)))
+      colOut[p + 2] = Math.max(0, Math.min(255, Math.round(lb0 * 255)))
+      colOut[p + 3] = Math.max(0, Math.min(255, Math.round(lr1 * 255)))
+      colOut[p + 4] = Math.max(0, Math.min(255, Math.round(lg1 * 255)))
+      colOut[p + 5] = Math.max(0, Math.min(255, Math.round(lb1 * 255)))
 
       // Adaptive thickness overlay: emphasise sparse regions and wider local spacing.
       const sJ = photoSpacings?.[bestJ] ?? sI
@@ -1203,7 +1217,7 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
         const bIdx = fillNeed > 0.70 ? 2 : (fillNeed > 0.35 ? 1 : 0)
         const bin = thickBins[bIdx]
         bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
-        bin.col.push(r0, g0, b0, r1, g1, b1)
+        bin.col.push(lr0, lg0, lb0, lr1, lg1, lb1)
       }
 
       segmentCount++
