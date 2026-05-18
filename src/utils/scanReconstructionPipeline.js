@@ -1,3 +1,5 @@
+import { reconstructSurface } from './surfaceReconstruction'
+
 const EPSILON = 1e-6
 
 function dot(a, b) {
@@ -479,17 +481,50 @@ export async function reconstructPlanarSurfaces(buf, {
   yOffset = 0,
   segmentation,
 } = {}) {
+  let dynamicSegments = []
+  try {
+    const reconstructedMesh = reconstructSurface(buf, {
+      yOffset,
+      cellSize: 0.055,
+      smoothPasses: 2,
+    })
+    if (reconstructedMesh?.positions?.length && reconstructedMesh?.indices?.length) {
+      dynamicSegments = segmentReconstructedMesh(reconstructedMesh, {
+        minTriangles: 8,
+        normalTolerance: 0.09,
+        planeTolerance: 0.14,
+      })
+    }
+  } catch {
+    dynamicSegments = []
+  }
+
+  const filteredDynamic = segmentation
+    ? dynamicSegments.filter(segment => {
+      if (segment.classification === 'wall') return true
+      return true
+    })
+    : dynamicSegments
+
+  if (filteredDynamic.length) {
+    return {
+      mesh: combineSegments(filteredDynamic),
+      segments: filteredDynamic,
+    }
+  }
+
   const room = computeRoomFrame(buf)
   if (!room?.segments?.length) return null
-
-  const segments = segmentation ? room.segments.filter(segment => {
-    if (segment.classification === 'wall') return true
-    return true
-  }) : room.segments
+  const fallbackSegments = segmentation
+    ? room.segments.filter(segment => {
+      if (segment.classification === 'wall') return true
+      return true
+    })
+    : room.segments
 
   return {
-    mesh: combineSegments(segments),
-    segments,
+    mesh: combineSegments(fallbackSegments),
+    segments: fallbackSegments,
   }
 }
 

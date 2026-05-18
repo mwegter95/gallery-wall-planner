@@ -533,18 +533,6 @@ function sampleCamPx(wx, wy, wz, e, k, ori, td) {
   return [td.pixels[pi], td.pixels[pi + 1], td.pixels[pi + 2]]
 }
 
-function bilinearPointOnQuad(p00, p10, p11, p01, u, v) {
-  const a = (1 - u) * (1 - v)
-  const b = u * (1 - v)
-  const c = u * v
-  const d = (1 - u) * v
-  return [
-    p00[0] * a + p10[0] * b + p11[0] * c + p01[0] * d,
-    p00[1] * a + p10[1] * b + p11[1] * c + p01[1] * d,
-    p00[2] * a + p10[2] * b + p11[2] * c + p01[2] * d,
-  ]
-}
-
 function buildPlanarSurfaceAtlas({
   segments,
   w2cElems,
@@ -557,10 +545,14 @@ function buildPlanarSurfaceAtlas({
 }) {
   if (!segments?.length) return null
 
-  const segs = segments.filter(s => s?.positions?.length >= 12)
+  const segs = segments.filter(s =>
+    s?.positions?.length >= 9 &&
+    s?.indices?.length >= 3 &&
+    s?.uvs?.length === (s.positions.length / 3) * 2,
+  )
   if (!segs.length) return null
 
-  const tileSize = 256
+  const tileSize = 224
   const padding = 8
   const cols = Math.max(1, Math.ceil(Math.sqrt(segs.length)))
   const rows = Math.max(1, Math.ceil(segs.length / cols))
@@ -573,16 +565,59 @@ function buildPlanarSurfaceAtlas({
   const ctx = canvas.getContext('2d')
   const img = ctx.createImageData(atlasW, atlasH)
   const out = img.data
+  const geomMask = new Uint8Array(atlasW * atlasH)
+  const sampleMask = new Uint8Array(atlasW * atlasH)
 
   const atlasUvsBySeg = new Map()
 
+  const samplePointFromBestCamera = (wp, n) => {
+    const wpRawY = wp[1] - yOffset
+    let bestScore = -1
+    let br = 42, bg = 42, bb = 42
+    for (let ci = 0; ci < w2cElems.length; ci++) {
+      const e = w2cElems[ci]
+      const td = textures[ci]
+      if (!td?.pixels) continue
+
+      const cpx = e[0] * wp[0] + e[4] * wpRawY + e[8] * wp[2] + e[12]
+      const cpy = e[1] * wp[0] + e[5] * wpRawY + e[9] * wp[2] + e[13]
+      const cpz = e[2] * wp[0] + e[6] * wpRawY + e[10] * wp[2] + e[14]
+      if (cpz >= -0.05) continue
+      const dep = -cpz
+
+      const k = camKVec[ci]
+      const u0 = k.x * cpx / dep + k.z
+      const v0 = k.y * (-cpy) / dep + k.w
+      const [uu, vv] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
+      if (uu < 0.01 || uu > 0.99 || vv < 0.01 || vv > 0.99) continue
+
+      if (depthMaps?.[ci]) {
+        const du = Math.min(dmapSize - 1, Math.max(0, Math.floor(uu * dmapSize)))
+        const dv = Math.min(dmapSize - 1, Math.max(0, Math.floor(vv * dmapSize)))
+        const minD = depthMaps[ci][dv * dmapSize + du]
+        if (Number.isFinite(minD) && minD < 1e8 && dep > minD * 1.45) continue
+      }
+
+      const pu = Math.min(td.pw - 1, Math.max(0, Math.floor(uu * td.pw)))
+      const pv = Math.min(td.ph - 1, Math.max(0, Math.floor(vv * td.ph)))
+      const pi = (pv * td.pw + pu) * 4
+
+      const facing = Math.max(0, -(e[2] * n[0] + e[6] * n[1] + e[10] * n[2]))
+      if (facing < 0.04) continue
+      const score = (0.1 + facing * facing) / (0.2 + dep * dep)
+      if (score <= bestScore) continue
+
+      bestScore = score
+      br = td.pixels[pi]
+      bg = td.pixels[pi + 1]
+      bb = td.pixels[pi + 2]
+    }
+    if (bestScore < 0) return null
+    return [br, bg, bb]
+  }
+
   for (let si = 0; si < segs.length; si++) {
     const segment = segs[si]
-    const base = segment.positions
-    const p00 = [base[0], base[1], base[2]]
-    const p10 = [base[3], base[4], base[5]]
-    const p11 = [base[6], base[7], base[8]]
-    const p01 = [base[9], base[10], base[11]]
     const n = segment.normal || [0, 0, 1]
 
     const cx = si % cols
@@ -592,78 +627,134 @@ function buildPlanarSurfaceAtlas({
     const drawW = tileSize - padding * 2
     const drawH = tileSize - padding * 2
 
-    for (let py = 0; py < drawH; py++) {
-      for (let px = 0; px < drawW; px++) {
-        const u = (px + 0.5) / drawW
-        const v = (py + 0.5) / drawH
-        const wp = bilinearPointOnQuad(p00, p10, p11, p01, u, v)
-        // Segment positions are in display-space Y (yOffset applied so floor=0).
-        // The w2c matrices were built from raw-world coordinates — subtract yOffset
-        // to get the raw Y before projecting.
-        const wpRawY = wp[1] - yOffset
+    const vertexCount = segment.positions.length / 3
+    const segAtlasUv = new Float32Array(vertexCount * 2)
+    for (let vi = 0; vi < vertexCount; vi++) {
+      const su = segment.uvs[vi * 2]
+      const sv = segment.uvs[vi * 2 + 1]
+      segAtlasUv[vi * 2] = (x0 + su * drawW) / atlasW
+      segAtlasUv[vi * 2 + 1] = (y0 + sv * drawH) / atlasH
+    }
+    atlasUvsBySeg.set(segment.id, segAtlasUv)
 
-        let bestScore = -1
-        let br = 42, bg = 42, bb = 42
+    const meanCol = (() => {
+      if (!segment.colors?.length) return [42, 42, 42]
+      let sr = 0, sg = 0, sb = 0
+      const nC = segment.colors.length / 3
+      for (let ci = 0; ci < segment.colors.length; ci += 3) {
+        sr += segment.colors[ci]
+        sg += segment.colors[ci + 1]
+        sb += segment.colors[ci + 2]
+      }
+      const inv = nC > 0 ? 1 / nC : 1
+      const to8 = v => Math.max(0, Math.min(255, Math.round((v <= 1 ? v * 255 : v) * inv)))
+      return [to8(sr), to8(sg), to8(sb)]
+    })()
 
-        for (let ci = 0; ci < w2cElems.length; ci++) {
-          const e = w2cElems[ci]
-          const td = textures[ci]
-          if (!td?.pixels) continue
+    for (let ti = 0; ti < segment.indices.length; ti += 3) {
+      const i0 = segment.indices[ti]
+      const i1 = segment.indices[ti + 1]
+      const i2 = segment.indices[ti + 2]
 
-          const cpx = e[0]*wp[0] + e[4]*wpRawY + e[8]*wp[2] + e[12]
-          const cpy = e[1]*wp[0] + e[5]*wpRawY + e[9]*wp[2] + e[13]
-          const cpz = e[2]*wp[0] + e[6]*wpRawY + e[10]*wp[2] + e[14]
-          if (cpz >= -0.05) continue
-          const dep = -cpz
+      const u0 = segment.uvs[i0 * 2] * drawW + x0
+      const v0 = segment.uvs[i0 * 2 + 1] * drawH + y0
+      const u1 = segment.uvs[i1 * 2] * drawW + x0
+      const v1 = segment.uvs[i1 * 2 + 1] * drawH + y0
+      const u2 = segment.uvs[i2 * 2] * drawW + x0
+      const v2 = segment.uvs[i2 * 2 + 1] * drawH + y0
 
-          const k = camKVec[ci]
-          const u0 = k.x * cpx / dep + k.z
-          const v0 = k.y * (-cpy) / dep + k.w
-          const [uu, vv] = applyUvOrientation(u0, v0, camOriArr[ci] | 0)
-          if (uu < 0.02 || uu > 0.98 || vv < 0.02 || vv > 0.98) continue
+      const minX = Math.max(x0, Math.floor(Math.min(u0, u1, u2)))
+      const maxX = Math.min(x0 + drawW - 1, Math.ceil(Math.max(u0, u1, u2)))
+      const minY = Math.max(y0, Math.floor(Math.min(v0, v1, v2)))
+      const maxY = Math.min(y0 + drawH - 1, Math.ceil(Math.max(v0, v1, v2)))
 
-          if (depthMaps?.[ci]) {
-            const du = Math.min(dmapSize - 1, Math.max(0, Math.floor(uu * dmapSize)))
-            const dv = Math.min(dmapSize - 1, Math.max(0, Math.floor(vv * dmapSize)))
-            const minD = depthMaps[ci][dv * dmapSize + du]
-            if (dep > minD * 1.25) continue
-          }
+      const den = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
+      if (Math.abs(den) < 1e-8) continue
 
-          const pu = Math.min(td.pw - 1, Math.max(0, Math.floor(uu * td.pw)))
-          const pv = Math.min(td.ph - 1, Math.max(0, Math.floor(vv * td.ph)))
-          const pi = (pv * td.pw + pu) * 4
+      const p0x = segment.positions[i0 * 3]
+      const p0y = segment.positions[i0 * 3 + 1]
+      const p0z = segment.positions[i0 * 3 + 2]
+      const p1x = segment.positions[i1 * 3]
+      const p1y = segment.positions[i1 * 3 + 1]
+      const p1z = segment.positions[i1 * 3 + 2]
+      const p2x = segment.positions[i2 * 3]
+      const p2y = segment.positions[i2 * 3 + 1]
+      const p2z = segment.positions[i2 * 3 + 2]
 
-          const facing = Math.max(0, -(e[2] * n[0] + e[6] * n[1] + e[10] * n[2]))
-          if (facing < 0.08) continue
-          const score = (0.2 + facing * facing) / (0.2 + dep * dep)
-          if (score <= bestScore) continue
+      for (let py = minY; py <= maxY; py++) {
+        for (let px = minX; px <= maxX; px++) {
+          const sx = px + 0.5
+          const sy = py + 0.5
+          const w0 = ((v1 - v2) * (sx - u2) + (u2 - u1) * (sy - v2)) / den
+          const w1 = ((v2 - v0) * (sx - u2) + (u0 - u2) * (sy - v2)) / den
+          const w2 = 1 - w0 - w1
+          if (w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4) continue
 
-          bestScore = score
-          br = td.pixels[pi]
-          bg = td.pixels[pi + 1]
-          bb = td.pixels[pi + 2]
+          const ai = py * atlasW + px
+          geomMask[ai] = 1
+
+          const wp = [
+            p0x * w0 + p1x * w1 + p2x * w2,
+            p0y * w0 + p1y * w1 + p2y * w2,
+            p0z * w0 + p1z * w1 + p2z * w2,
+          ]
+          const col = samplePointFromBestCamera(wp, n)
+          if (!col) continue
+
+          const oi = ai * 4
+          out[oi] = col[0]
+          out[oi + 1] = col[1]
+          out[oi + 2] = col[2]
+          out[oi + 3] = 255
+          sampleMask[ai] = 1
         }
-
-        const ax = x0 + px
-        const ay = y0 + py
-        const oi = (ay * atlasW + ax) * 4
-        out[oi] = br
-        out[oi + 1] = bg
-        out[oi + 2] = bb
-        out[oi + 3] = 255
       }
     }
 
-    const uMin = x0 / atlasW
-    const vMin = y0 / atlasH
-    const uMax = (x0 + drawW) / atlasW
-    const vMax = (y0 + drawH) / atlasH
-    atlasUvsBySeg.set(segment.id, new Float32Array([
-      uMin, vMin,
-      uMax, vMin,
-      uMax, vMax,
-      uMin, vMax,
-    ]))
+    for (let pass = 0; pass < 6; pass++) {
+      let changed = 0
+      for (let py = y0 + 1; py < y0 + drawH - 1; py++) {
+        for (let px = x0 + 1; px < x0 + drawW - 1; px++) {
+          const ai = py * atlasW + px
+          if (!geomMask[ai] || sampleMask[ai]) continue
+
+          let cr = 0, cg = 0, cb = 0, cc = 0
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (!dx && !dy) continue
+              const ni = (py + dy) * atlasW + (px + dx)
+              if (!sampleMask[ni]) continue
+              const oiN = ni * 4
+              cr += out[oiN]
+              cg += out[oiN + 1]
+              cb += out[oiN + 2]
+              cc++
+            }
+          }
+          if (!cc) continue
+          const oi = ai * 4
+          out[oi] = Math.round(cr / cc)
+          out[oi + 1] = Math.round(cg / cc)
+          out[oi + 2] = Math.round(cb / cc)
+          out[oi + 3] = 255
+          sampleMask[ai] = 1
+          changed++
+        }
+      }
+      if (!changed) break
+    }
+
+    for (let py = y0; py < y0 + drawH; py++) {
+      for (let px = x0; px < x0 + drawW; px++) {
+        const ai = py * atlasW + px
+        if (!geomMask[ai] || sampleMask[ai]) continue
+        const oi = ai * 4
+        out[oi] = meanCol[0]
+        out[oi + 1] = meanCol[1]
+        out[oi + 2] = meanCol[2]
+        out[oi + 3] = 255
+      }
+    }
   }
 
   ctx.putImageData(img, 0, 0)
@@ -2071,7 +2162,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
           for (const s of segments) {
             atlasPos.set(s.positions, pOff)
             const uv = atlas.atlasUvsBySeg.get(s.id) || s.uvs
-            if (uv?.length >= 8 && s.positions.length === 12) {
+            if (uv?.length === (s.positions.length / 3) * 2) {
               atlasUv.set(uv, uvOff)
             } else if (s.uvs?.length === (s.positions.length / 3) * 2) {
               atlasUv.set(s.uvs, uvOff)
