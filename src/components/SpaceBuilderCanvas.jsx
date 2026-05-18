@@ -1429,7 +1429,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   }
   camAssignVox.clear() // free ~20K entry map
 
-  // ── WPA-7.2 Direct CPU Projection + All-Camera Rescue ───────────────────────
+  // ── WPA-8 Shotgun Projection Stack ───────────────────────────────────────────
   //
   // Zero voxelisation. For each LiDAR point, decode up to 3 candidate cameras
   // from aCamAssign, project into each valid camera, then blend colours using
@@ -1437,13 +1437,18 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   // (from the same 2x2 footprint) to favour cameras that preserve detail.
   //
   // This removes nearest-neighbour quantisation, reduces hard camera seams,
-  // and raises CPU-baked coverage in two stages:
+  // and raises CPU-baked coverage in three synergistic stages:
   //   1) top-3 assigned camera blend (WPA-7.1)
   //   2) all-camera rescue search if stage 1 fails (WPA-7.2)
+  //   3) spatial closure fill from neighbouring baked points (WPA-8)
+  //
+  // Additional WPA-8 upgrades:
+  //   • per-camera photometric gain normalisation (reduces seam tone shifts)
+  //   • occlusion-gated camera validation in the CPU bake loop
   // Points with no valid CPU projection keep their packed assignment for the
   // GPU WPA-5 fallback. Points with a CPU hit set aCamAssign=-1 so GLSL outputs
   // pre-baked vColor directly.
-  onProgress?.(89, 'Baking photo colours onto LiDAR cloud (WPA-7.2 rescue blend)…')
+  onProgress?.(89, 'Baking photo colours onto LiDAR cloud (WPA-8 shotgun)…')
   const colorAttr = points.geometry.attributes.color
   const colorArr  = colorAttr?.array         // Float32Array stride-3
 
@@ -1468,12 +1473,58 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const camPW    = new Int32Array(textures.map(t => t.pw))
   const camPH    = new Int32Array(textures.map(t => t.ph))
 
+  // WPA-8 photometric normalisation: estimate each camera's mean RGB and align
+  // all cameras to a shared scene mean. This reduces visible seams from auto-
+  // exposure/white-balance drift across snapshots.
+  const camGainR = new Float32Array(nCams).fill(1)
+  const camGainG = new Float32Array(nCams).fill(1)
+  const camGainB = new Float32Array(nCams).fill(1)
+  {
+    let sceneR = 0, sceneG = 0, sceneB = 0, valid = 0
+    const meanR = new Float32Array(nCams)
+    const meanG = new Float32Array(nCams)
+    const meanB = new Float32Array(nCams)
+    for (let ci = 0; ci < nCams; ci++) {
+      const px = camPxArr[ci]
+      if (!px) continue
+      const nPx = camPW[ci] * camPH[ci]
+      const step = Math.max(1, Math.floor(nPx / 12000))
+      let sr = 0, sg = 0, sb = 0, cnt = 0
+      for (let p = 0; p < nPx; p += step) {
+        const j = p * 4
+        sr += px[j]
+        sg += px[j + 1]
+        sb += px[j + 2]
+        cnt++
+      }
+      if (cnt > 0) {
+        meanR[ci] = sr / cnt
+        meanG[ci] = sg / cnt
+        meanB[ci] = sb / cnt
+        sceneR += meanR[ci]
+        sceneG += meanG[ci]
+        sceneB += meanB[ci]
+        valid++
+      }
+    }
+    if (valid > 0) {
+      sceneR /= valid; sceneG /= valid; sceneB /= valid
+      for (let ci = 0; ci < nCams; ci++) {
+        if (!(meanR[ci] > 0) || !(meanG[ci] > 0) || !(meanB[ci] > 0)) continue
+        camGainR[ci] = Math.min(1.35, Math.max(0.75, sceneR / meanR[ci]))
+        camGainG[ci] = Math.min(1.35, Math.max(0.75, sceneG / meanG[ci]))
+        camGainB[ci] = Math.min(1.35, Math.max(0.75, sceneB / meanB[ci]))
+      }
+    }
+  }
+
   const posArr = posAttr.array   // Float32Array stride-3
   let directHits = 0, directMisses = 0
   let rank0Hits = 0, rank1Hits = 0, rank2Hits = 0
   let blendContribTotal = 0
   let rescueHits = 0
   let rescueContribTotal = 0
+  let closureHits = 0
 
   for (let i = 0; i < nPts; i++) {
     const packed = camAssignAll[i] | 0
@@ -1516,6 +1567,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       else                { u = u0;     v = v0 }
       if (u < 0 || u > 1 || v < 0 || v > 1) continue
 
+      // WPA-8: occlusion-gated camera validation at bake time.
+      const ocu = Math.min(DMAP - 1, Math.floor(u * DMAP))
+      const ocv = Math.min(DMAP - 1, Math.floor(v * DMAP))
+      const minD = depthMaps[ci][ocv * DMAP + ocu]
+      if (dep > minD * 1.22) continue
+
       // Bilinear sample with local gradient estimate from the same 2x2 footprint.
       const pw = camPW[ci], ph = camPH[ci]
       const fx = Math.max(0, Math.min(pw - 1, u * pw - 0.5))
@@ -1536,6 +1593,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       const r = r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11
       const g = g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11
       const bcol = b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11
+      const rg = r * camGainR[ci]
+      const gg = g * camGainG[ci]
+      const bg = bcol * camGainB[ci]
 
       // Camera confidence: depth x facing x gradient-detail preference.
       const l00 = (r00 + g00 + b00) * 0.3333333333
@@ -1555,9 +1615,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       if (conf <= 0) continue
       if (firstValidRank < 0) firstValidRank = rank
 
-      accR += r * conf
-      accG += g * conf
-      accB += bcol * conf
+      accR += rg * conf
+      accG += gg * conf
+      accB += bg * conf
       accW += conf
       pointContrib++
     }
@@ -1592,6 +1652,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         // Keep a tiny border guard to avoid edge-bleed from photo boundaries.
         if (u < 0.01 || u > 0.99 || v < 0.01 || v > 0.99) continue
 
+        const ocu = Math.min(DMAP - 1, Math.floor(u * DMAP))
+        const ocv = Math.min(DMAP - 1, Math.floor(v * DMAP))
+        const minD = depthMaps[ci][ocv * DMAP + ocu]
+        if (dep > minD * 1.28) continue
+
         const pw = camPW[ci], ph = camPH[ci]
         const fx = Math.max(0, Math.min(pw - 1, u * pw - 0.5))
         const fy = Math.max(0, Math.min(ph - 1, v * ph - 0.5))
@@ -1611,6 +1676,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         const r = r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11
         const g = g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11
         const bcol = b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11
+        const rg = r * camGainR[ci]
+        const gg = g * camGainG[ci]
+        const bg = bcol * camGainB[ci]
 
         const l00 = (r00 + g00 + b00) * 0.3333333333
         const l10 = (r10 + g10 + b10) * 0.3333333333
@@ -1629,9 +1697,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         const conf = (0.20 + facing * facing) * depthW * detailW
         if (conf <= 0) continue
 
-        rescueR += r * conf
-        rescueG += g * conf
-        rescueB += bcol * conf
+        rescueR += rg * conf
+        rescueG += gg * conf
+        rescueB += bg * conf
         rescueW += conf
         rescueContrib++
       }
@@ -1663,10 +1731,60 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     camAssignAll[i] = -1 // GLSL fast-path: output vColor directly, no UV re-projection
     directHits++
   }
+
+  // WPA-8 spatial closure: fill unresolved points from nearby baked colours.
+  // This aggressively reduces residual untextured holes after direct+rescue.
+  if (colorArr) {
+    const FILL_CELL = 0.05
+    const fillMap = new Map() // key -> [sr, sg, sb, n]
+    for (let i = 0; i < nPts; i++) {
+      if (camAssignAll[i] !== -1) continue
+      const i3 = i * 3
+      const bx = Math.round(posArr[i3] / FILL_CELL)
+      const by = Math.round(posArr[i3 + 1] / FILL_CELL)
+      const bz = Math.round(posArr[i3 + 2] / FILL_CELL)
+      const key = (bx + 4096) * 33554432 + (by + 4096) * 8192 + (bz + 4096)
+      let v = fillMap.get(key)
+      if (!v) { v = new Float32Array(4); fillMap.set(key, v) }
+      v[0] += colorArr[i3]
+      v[1] += colorArr[i3 + 1]
+      v[2] += colorArr[i3 + 2]
+      v[3] += 1
+    }
+
+    for (let i = 0; i < nPts; i++) {
+      if (camAssignAll[i] === -1) continue
+      const i3 = i * 3
+      const bx = Math.round(posArr[i3] / FILL_CELL)
+      const by = Math.round(posArr[i3 + 1] / FILL_CELL)
+      const bz = Math.round(posArr[i3 + 2] / FILL_CELL)
+      let best = null
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const key = (bx + dx + 4096) * 33554432 + (by + dy + 4096) * 8192 + (bz + dz + 4096)
+            const v = fillMap.get(key)
+            if (v && v[3] > 0) {
+              if (!best || v[3] > best[3]) best = v
+            }
+          }
+        }
+      }
+      if (!best) continue
+      colorArr[i3] = best[0] / best[3]
+      colorArr[i3 + 1] = best[1] / best[3]
+      colorArr[i3 + 2] = best[2] / best[3]
+      camAssignAll[i] = -1
+      closureHits++
+    }
+  }
+
   if (colorArr) colorAttr.needsUpdate = true
 
   const psHitPct  = nPts > 0 ? Math.round(directHits  / nPts * 100) : 0
   const psMissPct = nPts > 0 ? Math.round(directMisses / nPts * 100) : 0
+  const closurePct = nPts > 0 ? Math.round(closureHits / nPts * 100) : 0
+  const postClosureBakePct = nPts > 0 ? Math.round((directHits + closureHits) / nPts * 100) : 0
   const rank0Pct = directHits > 0 ? Math.round(rank0Hits / directHits * 100) : 0
   const rank1Pct = directHits > 0 ? Math.round(rank1Hits / directHits * 100) : 0
   const rank2Pct = directHits > 0 ? Math.round(rank2Hits / directHits * 100) : 0
@@ -1674,10 +1792,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const rescuePct = directHits > 0 ? Math.round(rescueHits / directHits * 100) : 0
   const rescueBlendAvg = rescueHits > 0 ? (rescueContribTotal / rescueHits).toFixed(2) : '0.00'
   console.info(
-    `[WPA-7.2] rescue gradient CPU bake: ${directHits}/${nPts} pts (${psHitPct}% hit), ` +
+    `[WPA-8] shotgun CPU bake: ${directHits}/${nPts} pts (${psHitPct}% direct hit), ` +
     `${directMisses} miss (${psMissPct}% → GPU WPA-5 fallback) | ` +
     `rank source c0/c1/c2=${rank0Pct}%/${rank1Pct}%/${rank2Pct}% | blendAvg=${blendAvg} cams | ` +
-    `rescue=${rescuePct}% (avg ${rescueBlendAvg} cams)`
+    `rescue=${rescuePct}% (avg ${rescueBlendAvg} cams) | ` +
+    `closure=${closurePct}% | total baked=${postClosureBakePct}%`
   )
 
   // ── Update geometry attributes (spacing + WPA-4 per-point normals) ──────
@@ -1746,10 +1865,10 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  onProgress?.(95, `Photo projection applied (${psHitPct}% WPA-7.2 CPU-baked + ${psMissPct}% GPU WPA-5)…`)
+  onProgress?.(95, `Photo projection applied (${postClosureBakePct}% WPA-8 CPU-baked + ${Math.max(0, 100 - postClosureBakePct)}% GPU WPA-5)…`)
   console.info(
-    `[projective] WPA-7.2 rescue gradient direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
-    `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | WPA-5 wall coverage: ${coveragePct}% | ` +
+    `[projective] WPA-8 shotgun direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
+    `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | closure ${closurePct}% | total baked ${postClosureBakePct}% | WPA-5 wall coverage: ${coveragePct}% | ` +
     `speckle ${specklePct}%, occlusion ${occludePct}%, avgFacing ${avgFacing}, ` +
     `rescue ${rescuePct}%, ` +
     `voxel assign ${voxHitPct}%direct/${voxNeighPct}%neigh/${voxFailPct}%miss, ` +
@@ -1784,7 +1903,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       psBlendAvgCams:  Number(blendAvg), // avg number of contributing cameras per CPU baked point
       psRescuePct:     rescuePct,   // % of CPU-baked points sourced by all-camera rescue
       psRescueBlendAvgCams: Number(rescueBlendAvg), // avg contributing cams within rescue hits
-      colourMethod:    `WPA-7.2 rescue gradient CPU (${psHitPct}% baked) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
+      psClosurePct:    closurePct,  // % of all points filled by WPA-8 spatial closure
+      psTotalBakedPct: postClosureBakePct, // direct + closure baked share
+      colourMethod:    `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }
