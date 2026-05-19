@@ -1030,13 +1030,75 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
   // events (modal taps, repaints) before the expensive per-point seed loop.
   await yieldToUI()
 
-  const posOut = new Float32Array(segBudget * 6)
-  const colOut = new Uint8Array(segBudget * 6)
+  // ── Chunked geometry upload ───────────────────────────────────────────────
+  // Rather than accumulating ALL segments into one giant typed array and then
+  // doing a single catastrophic GPU upload at the end (264 MB for 11M segs),
+  // we keep a fixed-size chunk buffer and flush it to a real THREE.LineSegments
+  // mesh — uploading that slice to the GPU — every CHUNK_SIZE segments.
+  // Peak CPU memory = CHUNK_SIZE × 6 × 5 bytes ≈ 6 MB instead of hundreds of MB.
+  const CHUNK_SIZE = 200_000
+
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 1.0,
+    depthTest: true,
+    depthWrite: false,
+    toneMapped: false,
+  })
+  const viewport = new THREE.Vector2(1, 1)
+  renderer?.getSize?.(viewport)
+  const group = new THREE.Group()
+  group.userData.wpa10Line = true
+
+  // Thin-line chunk buffers (reused each flush).
+  let chunkPos = new Float32Array(CHUNK_SIZE * 6)
+  let chunkCol = new Uint8Array(CHUNK_SIZE * 6)
+  let chunkFill = 0
+
+  const flushThinChunk = () => {
+    if (chunkFill === 0) return
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(chunkPos.slice(0, chunkFill * 6), 3))
+    geo.setAttribute('color',    new THREE.Uint8BufferAttribute(chunkCol.slice(0, chunkFill * 6), 3, true))
+    const mesh = new THREE.LineSegments(geo, mat)
+    mesh.userData.wpa10Line = true
+    mesh.frustumCulled = false
+    group.add(mesh)
+    chunkFill = 0
+  }
+
+  // Thick bins — also flushed at CHUNK_SIZE so their push() arrays never grow huge.
   const thickBins = [
-    { width: 2.2, pos: [], col: [] },
-    { width: 3.3, pos: [], col: [] },
-    { width: 4.6, pos: [], col: [] },
+    { width: 2.2, pos: [], col: [], segCount: 0 },
+    { width: 3.3, pos: [], col: [], segCount: 0 },
+    { width: 4.6, pos: [], col: [], segCount: 0 },
   ]
+
+  const flushThickBin = (bin) => {
+    if (!bin.pos.length) return
+    const g = new LineSegmentsGeometry()
+    g.setPositions(bin.pos)
+    g.setColors(bin.col)
+    const m = new LineMaterial({
+      linewidth: bin.width,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.42,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    })
+    m.resolution.set(Math.max(1, viewport.x), Math.max(1, viewport.y))
+    const fat = new LineSegments2(g, m)
+    fat.userData.wpa10Line = true
+    fat.frustumCulled = false
+    group.add(fat)
+    bin.segCount += (bin.pos.length / 6) | 0
+    bin.pos = []
+    bin.col = []
+  }
+
   let segmentCount = 0
   let unresolved = 0
 
@@ -1203,20 +1265,19 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
       const lg1 = srgbToLinear(g1)
       const lb1 = srgbToLinear(b1)
 
-      const p = segmentCount * 6
-      posOut[p] = xi
-      posOut[p + 1] = yi + yOffset
-      posOut[p + 2] = zi
-      posOut[p + 3] = xj
-      posOut[p + 4] = yj + yOffset
-      posOut[p + 5] = zj
-
-      colOut[p] = Math.max(0, Math.min(255, Math.round(lr0 * 255)))
-      colOut[p + 1] = Math.max(0, Math.min(255, Math.round(lg0 * 255)))
-      colOut[p + 2] = Math.max(0, Math.min(255, Math.round(lb0 * 255)))
-      colOut[p + 3] = Math.max(0, Math.min(255, Math.round(lr1 * 255)))
-      colOut[p + 4] = Math.max(0, Math.min(255, Math.round(lg1 * 255)))
-      colOut[p + 5] = Math.max(0, Math.min(255, Math.round(lb1 * 255)))
+      // Write into the current chunk buffer.
+      const p = chunkFill * 6
+      chunkPos[p]     = xi;  chunkPos[p + 1] = yi + yOffset;  chunkPos[p + 2] = zi
+      chunkPos[p + 3] = xj;  chunkPos[p + 4] = yj + yOffset;  chunkPos[p + 5] = zj
+      chunkCol[p]     = Math.max(0, Math.min(255, Math.round(lr0 * 255)))
+      chunkCol[p + 1] = Math.max(0, Math.min(255, Math.round(lg0 * 255)))
+      chunkCol[p + 2] = Math.max(0, Math.min(255, Math.round(lb0 * 255)))
+      chunkCol[p + 3] = Math.max(0, Math.min(255, Math.round(lr1 * 255)))
+      chunkCol[p + 4] = Math.max(0, Math.min(255, Math.round(lg1 * 255)))
+      chunkCol[p + 5] = Math.max(0, Math.min(255, Math.round(lb1 * 255)))
+      chunkFill++
+      // Upload this chunk to the GPU as soon as it's full, freeing the buffer for reuse.
+      if (chunkFill >= CHUNK_SIZE) flushThinChunk()
 
       // Adaptive thickness overlay: emphasise sparse regions and wider local spacing.
       const sJ = photoSpacings?.[bestJ] ?? sI
@@ -1229,6 +1290,8 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
         const bin = thickBins[bIdx]
         bin.pos.push(xi, yi + yOffset, zi, xj, yj + yOffset, zj)
         bin.col.push(lr0, lg0, lb0, lr1, lg1, lb1)
+        // Flush thick bin if it's also grown large.
+        if (bin.pos.length >= CHUNK_SIZE * 6) flushThickBin(bin)
       }
 
       segmentCount++
@@ -1236,10 +1299,14 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
       unresolved++
     }
 
-    // Yield to the browser every YIELD_CHUNK seed points so touch events and
-    // repaints can run between chunks — prevents the UI from freezing on large
-    // point clouds.  Also update the progress bar on each yield.
+    // Every YIELD_CHUNK seed points: flush the current thin-line chunk to the GPU,
+    // flush any thick bins that have grown large, update the progress bar, then
+    // yield so touch events / repaints can run before the next chunk.
     if ((i / pointStep) % YIELD_CHUNK === 0 && i > 0) {
+      flushThinChunk()
+      for (const bin of thickBins) {
+        if (bin.pos.length >= CHUNK_SIZE * 6) flushThickBin(bin)
+      }
       const pct = 96 + Math.round((i / nPts) * 3)
       onProgress?.(pct, `Building line weave (${segmentCount.toLocaleString()} / ~${Math.round(nPts / pointStep).toLocaleString()} segs)…`)
       await yieldToUI()
@@ -1247,57 +1314,13 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
     if (segmentCount >= segBudget) break
   }
 
+  // Flush whatever remains in the chunk buffers after the loop ends.
+  flushThinChunk()
+  for (const bin of thickBins) flushThickBin(bin)
+
   if (!segmentCount) return null
 
-  const positions = posOut.subarray(0, segmentCount * 6)
-  const colors = colOut.subarray(0, segmentCount * 6)
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  geo.setAttribute('color', new THREE.Uint8BufferAttribute(colors, 3, true))
-
-  const mat = new THREE.LineBasicMaterial({
-    vertexColors: true,
-    transparent: true,
-    opacity: 1.0,
-    depthTest: true,
-    depthWrite: false,
-    toneMapped: false,
-  })
-
-  const mesh = new THREE.LineSegments(geo, mat)
-  mesh.userData.wpa10Line = true
-  mesh.frustumCulled = false
-
-  const viewport = new THREE.Vector2(1, 1)
-  renderer?.getSize?.(viewport)
-
-  const group = new THREE.Group()
-  group.userData.wpa10Line = true
-  group.add(mesh)
-
-  let thickSegmentCount = 0
-  for (const bin of thickBins) {
-    if (!bin.pos.length) continue
-    const g = new LineSegmentsGeometry()
-    g.setPositions(bin.pos)
-    g.setColors(bin.col)
-    const m = new LineMaterial({
-      linewidth: bin.width,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.42,
-      depthTest: true,
-      depthWrite: false,
-      toneMapped: false,
-    })
-    m.resolution.set(Math.max(1, viewport.x), Math.max(1, viewport.y))
-    const fat = new LineSegments2(g, m)
-    fat.userData.wpa10Line = true
-    fat.frustumCulled = false
-    group.add(fat)
-    thickSegmentCount += (bin.pos.length / 6) | 0
-  }
-
+  const thickSegmentCount = thickBins.reduce((s, b) => s + b.segCount, 0)
   return {
     group,
     segmentCount,
