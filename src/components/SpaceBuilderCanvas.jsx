@@ -1382,28 +1382,46 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     ).join(' | ')
   )
 
-  // Load textures via fetch+blob so we get proper auth and error visibility.
+  // Load textures in small batches so the JS main thread is not locked solid
+  // for the entire load.  Each loadSnapshotTex does a synchronous getImageData()
+  // call (≈7 MB of canvas read at 1536 px) — firing all N at once via a single
+  // Promise.all blocks touch events and makes the UI non-responsive for seconds.
+  // Batching 3 at a time + a setTimeout(0) yield between batches lets the browser
+  // flush pending UI events (modal taps, repaints, GC) between each group.
+  //
   // A failed texture gets a 1×1 black placeholder — one bad photo won't abort
   // the whole projection (remaining cameras still contribute).
+  const TEX_BATCH = 3
   let texLoaded = 0
   const black1x1 = (() => {
     const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1)
     t.needsUpdate = true
     return t
   })()
-  const textures = await Promise.all(snaps.map(async (s, si) => {
-    try {
-      const td = await loadSnapshotTex(s.url)  // { tex, pixels, pw, ph }
-      texLoaded++
-      onProgress?.(10 + Math.round(55 * texLoaded / snaps.length), `Loading textures (${texLoaded}/${snaps.length})…`)
-      return td
-    } catch (err) {
-      console.error(`[projective] snapshot ${si} (${s.url}) failed: ${err.message}`)
-      texLoaded++
-      // pixels: null signals buildPhotosplats to skip this camera.
-      return { tex: black1x1, pixels: null, pw: 1, ph: 1 }
+  const textures = []
+  for (let batchStart = 0; batchStart < snaps.length; batchStart += TEX_BATCH) {
+    const batch = snaps.slice(batchStart, batchStart + TEX_BATCH)
+    const batchResults = await Promise.all(batch.map(async (s, bi) => {
+      const si = batchStart + bi
+      try {
+        const td = await loadSnapshotTex(s.url)  // { tex, pixels, pw, ph }
+        texLoaded++
+        onProgress?.(10 + Math.round(55 * texLoaded / snaps.length), `Loading textures (${texLoaded}/${snaps.length})…`)
+        return td
+      } catch (err) {
+        console.error(`[projective] snapshot ${si} (${s.url}) failed: ${err.message}`)
+        texLoaded++
+        // pixels: null signals buildPhotosplats to skip this camera.
+        return { tex: black1x1, pixels: null, pw: 1, ph: 1 }
+      }
+    }))
+    textures.push(...batchResults)
+    // Yield to the event loop between batches so the browser can process touch
+    // events, repaint the progress bar, and run a GC cycle.
+    if (batchStart + TEX_BATCH < snaps.length) {
+      await new Promise(r => setTimeout(r, 0))
     }
-  }))
+  }
 
   onProgress?.(68, 'Computing photo projection…')
 

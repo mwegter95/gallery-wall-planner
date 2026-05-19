@@ -7167,6 +7167,9 @@ kbd {
   padding-top: 12px;
   background: rgba(6, 9, 14, 0.56);
   backdrop-filter: blur(1px);
+  /* Allow touches to pass through the dim backdrop so modals (z-index 9900)
+     above this overlay remain fully interactive during texture loading. */
+  pointer-events: none;
 }
 .sb-scan-load-card {
   width: min(320px, calc(100% - 28px));
@@ -7175,6 +7178,8 @@ kbd {
   border: 1px solid var(--stage-border-2);
   background: color-mix(in srgb, var(--stage-ink-3) 86%, black 14%);
   box-shadow: var(--shadow-lg);
+  /* Re-enable pointer events for the card itself (parent overlay has none). */
+  pointer-events: auto;
 }
 .sb-scan-load-title {
   color: var(--stage-text-1);
