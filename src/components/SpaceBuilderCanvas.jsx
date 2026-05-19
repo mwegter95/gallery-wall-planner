@@ -948,7 +948,7 @@ function disposeWpa10LineWeave(points) {
   }
 }
 
-function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSegments = 0, onProgress }) {
+async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSegments = 0, onProgress }) {
   const posAttr = points.geometry?.attributes?.position
   const colAttr = points.geometry?.attributes?.color
   if (!posAttr?.array || !colAttr?.array) return null
@@ -960,6 +960,12 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
 
   const segBudget = Math.max(1, maxSegments > 0 ? maxSegments : nPts)
   const pointStep = Math.max(1, Math.ceil(nPts / segBudget))
+
+  // Yield to the browser event loop — called between heavy CPU chunks so touch
+  // events, modal interactions, and repaints can run between segments.
+  const yieldToUI = () => new Promise(r => setTimeout(r, 0))
+  // Yield every YIELD_CHUNK seed-point iterations (~8–16 ms per chunk at 1 μs/pt).
+  const YIELD_CHUNK = 8192
 
   const CELL = 0.05
   const OFF = 4096
@@ -1019,6 +1025,11 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
     const detail = Math.max(0, Math.min(1, sigma / 0.16))
     cellMeta.set(key, { mr, mg, mb, n, detail })
   }
+
+  // Yield after the spatial-hash build so the browser can process any queued
+  // events (modal taps, repaints) before the expensive per-point seed loop.
+  await yieldToUI()
+
   const posOut = new Float32Array(segBudget * 6)
   const colOut = new Uint8Array(segBudget * 6)
   const thickBins = [
@@ -1225,8 +1236,13 @@ function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer
       unresolved++
     }
 
-    if ((i & 0x3ffff) === 0) {
-      onProgress?.(96 + Math.min(3, (i / nPts) * 3), `Building WPA-10 nearest-neighbour lines (${segmentCount.toLocaleString()} segs)…`)
+    // Yield to the browser every YIELD_CHUNK seed points so touch events and
+    // repaints can run between chunks — prevents the UI from freezing on large
+    // point clouds.  Also update the progress bar on each yield.
+    if ((i / pointStep) % YIELD_CHUNK === 0 && i > 0) {
+      const pct = 96 + Math.round((i / nPts) * 3)
+      onProgress?.(pct, `Building line weave (${segmentCount.toLocaleString()} / ~${Math.round(nPts / pointStep).toLocaleString()} segs)…`)
+      await yieldToUI()
     }
     if (segmentCount >= segBudget) break
   }
@@ -2289,12 +2305,13 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     try {
       onProgress?.(96, 'Building WPA-10 line weave…')
       disposeWpa10LineWeave(points)
-      const weave = buildWpa10LineWeave({
+      const weave = await buildWpa10LineWeave({
         points,
         yOffset,
         normals,
         photoSpacings,
         renderer,
+        onProgress,
       })
       if (weave?.group) {
         points.add(weave.group)
@@ -2310,7 +2327,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     }
   }
 
-  onProgress?.(95, `Photo projection applied (${postClosureBakePct}% WPA-8 CPU-baked + ${Math.max(0, 100 - postClosureBakePct)}% GPU WPA-5)…`)
+  onProgress?.(99, `Photo projection applied (${postClosureBakePct}% WPA-8 CPU-baked + ${Math.max(0, 100 - postClosureBakePct)}% GPU WPA-5)…`)
   console.info(
     `[projective] WPA-8 shotgun direct (no-voxel CPU bake + WPA-5 hybrid): ${nSelected}/${allSnaps.length} snaps, ` +
     `${usedCamCount} active | CPU direct bake: ${psHitPct}% pts | closure ${closurePct}% | total baked ${postClosureBakePct}% | WPA-5 wall coverage: ${coveragePct}% | ` +
