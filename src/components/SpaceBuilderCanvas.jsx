@@ -983,9 +983,11 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
   const next = new Int32Array(nPts)
   next.fill(-1)
   const cellStats = new Map()
-  const bxAll = new Int32Array(nPts)
-  const byAll = new Int32Array(nPts)
-  const bzAll = new Int32Array(nPts)
+  // Int16 is sufficient: at CELL=0.05 m a room of ±30 m maps to ±600 grid units
+  // (Int16 range ±32767), saving 2 bytes/element × 3 arrays = 66 MB for 11M pts.
+  const bxAll = new Int16Array(nPts)
+  const byAll = new Int16Array(nPts)
+  const bzAll = new Int16Array(nPts)
 
   for (let i = 0; i < nPts; i++) {
     const i3 = i * 3
@@ -1059,8 +1061,14 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
   const flushThinChunk = () => {
     if (chunkFill === 0) return
     const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(chunkPos.slice(0, chunkFill * 6), 3))
-    geo.setAttribute('color',    new THREE.Uint8BufferAttribute(chunkCol.slice(0, chunkFill * 6), 3, true))
+    const posAttr = new THREE.BufferAttribute(chunkPos.slice(0, chunkFill * 6), 3)
+    const colAttr = new THREE.Uint8BufferAttribute(chunkCol.slice(0, chunkFill * 6), 3, true)
+    // Free CPU-side copy after WebGL uploads to GPU — saves ~5-6 MB per chunk
+    // (~330 MB total for an 11M-point scan) that would otherwise stay in the JS heap.
+    posAttr.onUploadCallback = function () { this.array = null }
+    colAttr.onUploadCallback = function () { this.array = null }
+    geo.setAttribute('position', posAttr)
+    geo.setAttribute('color',    colAttr)
     const mesh = new THREE.LineSegments(geo, mat)
     mesh.userData.wpa10Line = true
     mesh.frustumCulled = false
@@ -2185,6 +2193,11 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     camAssignAll[i] = -1 // GLSL fast-path: output vColor directly, no UV re-projection
     directHits++
   }
+
+  // Release per-camera pixel arrays — they were only needed in the bake loop above.
+  // GPU textures (THREE.Texture objects) are unaffected; only the raw ImageData pixels
+  // are freed here. Saves ~84 MB of JS heap before the line-weave phase.
+  for (const t of textures) t.pixels = null
 
   // WPA-8 spatial closure: fill unresolved points from nearby baked colours.
   // This aggressively reduces residual untextured holes after direct+rescue.
