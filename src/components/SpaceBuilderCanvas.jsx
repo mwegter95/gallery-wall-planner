@@ -759,7 +759,7 @@ function minEigenvec3(c00, c01, c02, c11, c12, c22) {
 // This is depth-adaptive: close-up points get smaller splats (preserving detail),
 // distant points get larger splats (bridging the wider LiDAR return spacing).
 // Points not covered by any camera keep their geometry-density-based spacing.
-const MAX_PROJ_CAMS  = 24
+const MAX_PROJ_CAMS  = 30
 const WEGTER_OVERLAP = 2.5  // splat covers ~2.5 px of best-camera photo at that depth
 
 function getSafeProjectiveCamLimit(maxFragTextures) {
@@ -948,7 +948,9 @@ function disposeWpa10LineWeave(points) {
   }
 }
 
-async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, renderer, maxSegments = 0, onProgress }) {
+async function buildWpa10LineWeave({ points, yOffset, normals, renderer, maxSegments = 0, onProgress }) {
+  // Read photo spacings from the geometry attribute set in upgradeProjectiveTexturing.
+  const photoSpacings = points.geometry.attributes.aLocalSpacing?.array
   const posAttr = points.geometry?.attributes?.position
   const colAttr = points.geometry?.attributes?.color
   if (!posAttr?.array || !colAttr?.array) return null
@@ -1161,7 +1163,9 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
   for (let i = 0; i < nPts; i += pointStep) {
     const i3 = i * 3
     const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
-    const niX = normals?.[i3] ?? 0, niY = normals?.[i3 + 1] ?? 1, niZ = normals?.[i3 + 2] ?? 0
+    const niX = normals ? normals[i3] / 127 : 0
+    const niY = normals ? normals[i3 + 1] / 127 : 1
+    const niZ = normals ? normals[i3 + 2] / 127 : 0
     const kx = bxAll[i], ky = byAll[i], kz = bzAll[i]
     const sI = photoSpacings?.[i] ?? 0.004
     const maxD = Math.min(0.12, Math.max(0.022, sI * 8.5))
@@ -1187,7 +1191,7 @@ async function buildWpa10LineWeave({ points, yOffset, normals, photoSpacings, re
                 const d2 = ddx * ddx + ddy * ddy + ddz * ddz
                 if (d2 > 1e-8 && d2 <= maxD2 && d2 < bestD2) {
                   if (normals) {
-                    const njX = normals[j3], njY = normals[j3 + 1], njZ = normals[j3 + 2]
+                    const njX = normals[j3] / 127, njY = normals[j3 + 1] / 127, njZ = normals[j3 + 2] / 127
                     const nd = niX * njX + niY * njY + niZ * njZ
                     if (nd < 0.52) { j = next[j]; continue }
                   }
@@ -1518,7 +1522,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   const nPts       = posAttr.count
   const sampleStep = Math.max(1, Math.floor(nPts / 20000))
   const w2cElems   = w2cMats.map(m => m.elements)
-  const photoSpacings = new Float32Array(nPts)
+  let photoSpacings = new Float32Array(nPts)
 
   // Approximate room geometry (for normal orientation fallback and floor/ceil).
   const floorY  = oldUni.uFloorY?.value  ?? -0.1
@@ -1591,9 +1595,12 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     voxNormals.set(key, new Float32Array([nx, ny, nz]))
   }
   normVox.clear()
+  await new Promise(r => setTimeout(r, 0)) // yield: GC normVox (~18 MB) before voxNormals PCA
 
   // Assign normals to all points: one lookup each, no neighbour search needed.
-  const normals = new Float32Array(nPts * 3)
+  // Int8 stores unit-vector components as ×127 integers (-127..127).
+  // Saves 75 % of normals memory vs Float32: 39 MB vs 156 MB at 13 M pts.
+  let normals = new Int8Array(nPts * 3)
   for (let i = 0; i < nPts; i++) {
     const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i)
     const bx = Math.round(x / NORM_CELL)
@@ -1602,14 +1609,19 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     const key = (bx + 2048) * 16777216 + (by + 2048) * 4096 + (bz + 2048)
     const n3  = voxNormals.get(key)
     if (n3) {
-      normals[i*3] = n3[0]; normals[i*3+1] = n3[1]; normals[i*3+2] = n3[2]
+      normals[i*3] = Math.round(n3[0] * 127)
+      normals[i*3+1] = Math.round(n3[1] * 127)
+      normals[i*3+2] = Math.round(n3[2] * 127)
     } else {
       // Shouldn't normally occur — every point should map to a voxel we built.
       const dx=x-roomCX, dz=z-roomCZ, len=Math.max(Math.sqrt(dx*dx+dz*dz),0.001)
-      normals[i*3] = dx/len; normals[i*3+1] = 0; normals[i*3+2] = dz/len
+      normals[i*3] = Math.round(dx/len * 127)
+      normals[i*3+1] = 0
+      normals[i*3+2] = Math.round(dz/len * 127)
     }
   }
   voxNormals.clear()
+  await new Promise(r => setTimeout(r, 0)) // yield: GC voxNormals before normals flat array is fully used
 
   // covered/sampled: only count non-horizontal surfaces (walls, furniture).
   // Floor and ceiling points have |ny| > 0.7 (normal mostly vertical) — a
@@ -1673,7 +1685,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     const xr = posAttr.getX(i), yr = posAttr.getY(i), zr = posAttr.getZ(i)
 
     // WPA-4: use PCA-estimated per-point normal
-    const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2]
+    const nx = normals[i*3] / 127, ny = normals[i*3+1] / 127, nz = normals[i*3+2] / 127
 
     let bestScore = 0, bestDepth = 0, bestCamIdx = -1, bestFacing = 0
     // top3: small sorted list of {ci, score} for camera assignment attribute
@@ -1773,7 +1785,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     // Only include non-horizontal surfaces (walls, furniture) in coverage %.
     // Floor/ceiling points (|ny| > 0.7) are excluded — their normals face up/down
     // and cameras can never project onto them face-on from a standing room scan.
-    const nx_s = normals[i*3], ny_s = normals[i*3+1]
+    const nx_s = normals[i*3] / 127, ny_s = normals[i*3+1] / 127
     const isVertical = Math.abs(ny_s) < 0.70
     if (isVertical) {
       sampled++
@@ -1781,6 +1793,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       else specklePts++   // wall point with zero valid cameras → true uncoloured speckle
     }
   }
+
+  await new Promise(r => setTimeout(r, 0)) // yield: let GC run before camAssignAll propagation
 
   // Diagnostic: print per-phase rejection summary to help trace 0/N camera failures
   console.info(
@@ -1860,6 +1874,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
     camAssignAll[i] = assign ?? 0  // 0 = no assignment → GPU uses all cameras
   }
   camAssignVox.clear() // free ~20K entry map
+  await new Promise(r => setTimeout(r, 0)) // yield: GC camAssignVox before WPA-8 bake loop
 
   // ── WPA-8 Shotgun Projection Stack ───────────────────────────────────────────
   //
@@ -1968,7 +1983,7 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
 
     const i3 = i * 3
     const xi = posArr[i3], yi = posArr[i3 + 1], zi = posArr[i3 + 2]
-    const nx = normals[i3], ny = normals[i3 + 1], nz = normals[i3 + 2]
+    const nx = normals[i3] / 127, ny = normals[i3 + 1] / 127, nz = normals[i3 + 2] / 127
 
     let accR = 0, accG = 0, accB = 0, accW = 0
     let firstValidRank = -1
@@ -2277,8 +2292,9 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       new THREE.BufferAttribute(photoSpacings.slice(), 1))
   }
   // Always replace aNormal since the PCA estimate is new each rebuild
+  // Normalized Int8: THREE passes [-1,1] floats to GLSL automatically.
   points.geometry.setAttribute('aNormal',
-    new THREE.BufferAttribute(normals, 3))
+    new THREE.Int8BufferAttribute(normals, 3, true))
 
   // WPA-4: Per-point camera assignment (top-3 packed indices)
   // Enables GPU fragment shader to skip 21/24 cameras per fragment → ~8× speedup.
@@ -2293,6 +2309,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
 
   const medSpacingPx = photoSpacings.slice().sort()[Math.floor(nPts / 2)] ?? 0
   const medSpacingMm = Math.round(medSpacingPx * 1000)
+  // photoSpacings is now stored in the geometry attribute; free the JS copy (~52 MB).
+  photoSpacings = null
 
   // WPA-5 derived diagnostics
   const specklePct    = sampled > 0 ? Math.round(specklePts / sampled * 100) : 0
@@ -2345,7 +2363,6 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
         points,
         yOffset,
         normals,
-        photoSpacings,
         renderer,
         onProgress,
       })
