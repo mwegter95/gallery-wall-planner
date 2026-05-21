@@ -214,9 +214,14 @@ const SPLAT_VERT_PROJ = /* glsl */`
     float angleFactor = min(1.4, 1.0 / cosView);
 
     vWorldPos = vec3(position.x, position.y + uYOffset, position.z);
-    vSplatR   = aLocalSpacing * angleFactor * 0.5;
+    // WPA-11: each disc covers 110% of the inter-point spacing (0.55 half-radius
+    // vs the old 0.5) so adjacent discs overlap slightly and the photo-patch
+    // seam between neighbouring points is invisible even at oblique angles.
+    vSplatR   = aLocalSpacing * angleFactor * 0.55;
 
-    gl_PointSize = clamp(aLocalSpacing * angleFactor * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 48.0);
+    // Raise the PointSize pixel cap from 48 → 96 so close-range discs stay
+    // large enough to cover their full photo patch without being clipped.
+    gl_PointSize = clamp(aLocalSpacing * angleFactor * 1.1 * projectionMatrix[1][1] * uViewH * 0.5 / -mvPos.z, 1.0, 96.0);
     gl_Position  = projectionMatrix * mvPos;
   }
 `
@@ -319,9 +324,26 @@ function makeProjFragShader(nCams) {
         return;
       }
 
-      // Project the point centre (not per-fragment disc position) so every
-      // sub-pixel of a splat gets the same UV — no smearing as camera moves.
-      vec3 fragRaw = vec3(vWorldPos.x, vWorldPos.y - uYOffset, vWorldPos.z);
+      // WPA-11: Photo-Projected Surface Patches ─────────────────────────────
+      // Project the fragment's ACTUAL 3D world position — point centre plus
+      // the per-fragment offset in the surface tangent plane — so each
+      // sub-pixel of the disc samples a different photo pixel at the correct
+      // 3D location.  Adjacent discs overlap by ~10% and project neighbouring
+      // regions of the same photo → seamless photo texture with no line weave.
+      //
+      // Tangent frame: t1 = horizontal in surface plane,  t2 = vertical.
+      // For a wall (normal ≈ ±X or ±Z): t2 ≈ world-up → matches phone upright.
+      // For floor/ceiling (normal ≈ ±Y): t1/t2 span the XZ plane.
+      vec3 _wpa11_ref = abs(vNorm.y) > 0.9 ? vec3(1.,0.,0.) : vec3(0.,1.,0.);
+      vec3 t1 = normalize(cross(vNorm, _wpa11_ref));
+      vec3 t2 = cross(vNorm, t1);
+      // disc ∈ [−vSplatR, +vSplatR]² — world-space offset from point centre
+      vec2 disc = (gl_PointCoord - vec2(0.5)) * (2.0 * vSplatR);
+      vec3 fragRaw = vec3(
+        vWorldPos.x        + disc.x * t1.x + disc.y * t2.x,
+        vWorldPos.y - uYOffset + disc.x * t1.y + disc.y * t2.y,
+        vWorldPos.z        + disc.x * t1.z + disc.y * t2.z
+      );
 
       // WPA-4: surface "up" = worldUp projected onto the surface plane.
       // Used by the spin-alignment score.  For floor/ceiling (normal ≈ worldUp)
@@ -1344,7 +1366,9 @@ async function buildWpa10LineWeave({ points, yOffset, normals, renderer, maxSegm
   }
 }
 
-async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, renderer, enableLineWeave = true }) {
+async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, onDiagUpdate, onProgress, maxFragTextures, renderer, enableLineWeave = false }) {
+  // WPA-11 default: sub-disc photo sampling fills inter-point gaps without a
+  // line weave.  Set enableLineWeave=true explicitly only for debugging/A-B.
   onProgress?.(5, 'Loading snapshots…')
   let data
   try {
@@ -2352,13 +2376,14 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
   points.material.dispose()
   points.material = projMat
 
-  // WPA-10: remove planar reconstruction and render a density-aware line weave
-  // directly from the WPA-8 projected point cloud colours.
+  // WPA-11: sub-disc photo-patch sampling fills inter-point gaps via the GPU
+  // fragment shader (per-fragment tangent-plane projection).  The line weave is
+  // disabled by default — enableLineWeave=true re-enables it for A/B testing.
   let lineSegments = 0
   let lineFillSegments = 0
   if (enableLineWeave) {
     try {
-      onProgress?.(96, 'Building WPA-10 line weave…')
+      onProgress?.(96, 'Building WPA-10 line weave (debug mode)…')
       disposeWpa10LineWeave(points)
       const weave = await buildWpa10LineWeave({
         points,
@@ -2425,8 +2450,8 @@ async function upgradeProjectiveTexturing({ points, yOffset, roomId, diagRef, on
       lineSegments,
       lineFillSegments,
       colourMethod: lineSegments > 0
-        ? `WPA-10 projected line weave (${lineSegments} base + ${lineFillSegments} thick fill segs) + WPA-8/WPA-5 point cloud`
-        : `WPA-8 shotgun CPU (${postClosureBakePct}% baked; direct ${psHitPct}% + closure ${closurePct}%) + WPA-5 GPU fallback (${coveragePct}% wall UV)`,
+        ? `WPA-10 projected line weave (${lineSegments} base + ${lineFillSegments} thick fill segs) + WPA-11 photo-patch points`
+        : `WPA-11 photo-patch surface splats — CPU baked ${postClosureBakePct}% + GPU sub-disc photo sampling (${coveragePct}% wall UV)`,
       projCamLimit,
     }
   }
@@ -3672,7 +3697,7 @@ export default function SpaceBuilderCanvas({
               onProgress: reportRoomLoad,
               maxFragTextures: t.renderer?.capabilities?.maxTextures,
               renderer: t.renderer,
-              enableLineWeave: true,
+              // WPA-11 default (enableLineWeave=false): sub-disc photo patches
             }).catch(err => {
               console.warn('[projective] upgrade error:', err)
               reportRoomLoad(100, 'Photo projection failed', false)
@@ -4196,6 +4221,59 @@ export default function SpaceBuilderCanvas({
             title="Toggle scan diagnostics overlay"
           >Diag</button>
         )}
+
+        {/* ── 3DGS button — always visible when room ID is known ───────── */}
+        {space?.id && (
+          <button
+            className={`sbc-fov-btn${splatVisible && splatUrl ? ' sbc-fov-btn--active' : ''}`}
+            style={{
+              marginTop: 6,
+              fontSize: '0.6rem',
+              padding: '3px 5px',
+              background: splatStatus === 'training'
+                ? 'linear-gradient(135deg,#a855f7,#ec4899)'
+                : splatUrl
+                  ? 'linear-gradient(135deg,#7c3aed,#db2777)'
+                  : undefined,
+              color: splatStatus === 'training' || splatUrl ? '#fff' : undefined,
+              border: splatStatus === 'training' || splatUrl ? 'none' : undefined,
+            }}
+            title={
+              splatStatus === 'training' ? `Training 3DGS… ${Math.round(splatProgress)}%` :
+              splatUrl ? (splatVisible ? 'Hide photorealistic 3DGS view' : 'Show photorealistic 3DGS view') :
+              'Train a 3D Gaussian Splat for photorealistic rendering'
+            }
+            onClick={async () => {
+              if (splatUrl) {
+                // Toggle splat visibility
+                setSplatVisible(v => !v)
+                return
+              }
+              if (splatStatus === 'training') return  // nothing to do while training
+              // Trigger training
+              const jwt    = getJwt()
+              const device = getDeviceToken()
+              try {
+                const r = await fetch(`${BASE}/api/rooms/${space.id}/splat/train`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'X-Device-Token': device,
+                    ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+                  },
+                })
+                if (r.ok) { setSplatStatus('training'); setSplatProgress(0) }
+                else console.error('[splat train] HTTP', r.status)
+              } catch (err) { console.error('[splat train]', err) }
+            }}
+          >
+            {splatStatus === 'training'
+              ? `✨ ${Math.round(splatProgress)}%`
+              : splatUrl
+                ? (splatVisible ? '✨ 3DGS' : '○ 3DGS')
+                : '✨ Train'}
+          </button>
+        )}
       </div>
 
       {/* ── Zoom controls — right side, vertical ─────────────────────── */}
@@ -4518,7 +4596,7 @@ export default function SpaceBuilderCanvas({
                         onProgress: reportRoomLoad,
                         maxFragTextures: threeRef.current?.renderer?.capabilities?.maxTextures,
                         renderer: threeRef.current?.renderer,
-                        enableLineWeave: true,
+                        // WPA-11 default (enableLineWeave=false): sub-disc photo patches
                       })
                     } catch (err) {
                       console.warn('[rebuild] projection error:', err)
