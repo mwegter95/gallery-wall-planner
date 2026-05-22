@@ -3183,12 +3183,14 @@ export default function SpaceBuilderCanvas({
 
   // ── 3DGS / Gaussian Splatting state ──────────────────────────────────────
   // splatUrl: set once training is done; triggers GaussianSplatViewer render
-  // splatStatus: null | 'training' | 'ready' | 'error'
+  // splatStatus: null | 'none' | 'processing' | 'training' | 'ready' | 'error' | 'failed'
   // splatProgress: 0-100, updated by polling
+  // splatPhase: human-readable phase string — contains error message on failure
   // splatVisible: user toggle — hides the splat layer without losing the URL
   const [splatUrl,      setSplatUrl]      = useState(null)
   const [splatStatus,   setSplatStatus]   = useState(null)
   const [splatProgress, setSplatProgress] = useState(0)
+  const [splatPhase,    setSplatPhase]    = useState('')
   const [splatVisible,  setSplatVisible]  = useState(true)
   // Keep splatUrlRef in sync so animate() can check it without React state reads
   splatUrlRef.current = splatVisible ? splatUrl : null
@@ -3209,12 +3211,13 @@ export default function SpaceBuilderCanvas({
 
   // ── Poll for 3DGS training status ─────────────────────────────────────────
   // Starts polling as soon as a room ID is known.  Stops when status reaches
-  // 'ready' (sets splatUrl) or the component unmounts.  404 = never trained (fine).
+  // 'ready' (sets splatUrl) or the component unmounts.
   useEffect(() => {
     const id = space?.id
     if (!id) return
-    let cancelled = false
-    let timer = null
+    let cancelled  = false
+    let timer      = null
+    let lastStatus = null   // track transitions so we only log errors once
 
     async function poll() {
       if (cancelled) return
@@ -3226,20 +3229,34 @@ export default function SpaceBuilderCanvas({
           ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
         }
         const r = await fetch(`${BASE}/api/rooms/${id}/splat/status`, { headers })
-        if (r.status === 404) return  // training never started — stop polling silently
-        if (!r.ok) { timer = setTimeout(poll, 8000); return }  // server error, retry later
+        if (r.status === 404) return  // never trained — stop polling silently
+        if (!r.ok) { timer = setTimeout(poll, 8000); return }
         const data = await r.json()
         if (cancelled) return
-        setSplatStatus(data.status)
-        setSplatProgress(data.pct ?? 0)   // server sends "pct", not "progress"
-        if (data.status === 'ready') {
-          setSplatUrl(`${BASE}/api/rooms/${id}/splat/download`)
-          return  // stop polling — URL is set
+
+        const status = data.status
+        const phase  = data.phase ?? ''
+        const pct    = data.pct   ?? 0
+
+        setSplatStatus(status)
+        setSplatProgress(pct)
+        setSplatPhase(phase)
+
+        // ── Log errors to browser console so you can see them without a backend window
+        if ((status === 'error' || status === 'failed') && status !== lastStatus) {
+          console.error(`[3DGS] Training failed for room ${id}:`, phase || '(no detail)')
         }
-        // Back off heavily on terminal / idle states so we don't spam the server
-        const delay = (data.status === 'none' || data.status === 'error' || data.status === 'failed')
-          ? 20000   // 20 s — still check so iOS-triggered retries are noticed
-          : 5000    // 5 s — active training
+        lastStatus = status
+
+        if (status === 'ready') {
+          setSplatUrl(`${BASE}/api/rooms/${id}/splat/download`)
+          return  // stop polling
+        }
+
+        // Back off on terminal / idle states; keep tight during active training
+        const delay = (status === 'none' || status === 'error' || status === 'failed')
+          ? 20000  // 20 s — still watch so iOS-triggered retries are noticed
+          : 5000   // 5 s — active training
         if (!cancelled) { timer = setTimeout(poll, delay); return }
       } catch { /* network hiccup — retry */ }
       if (!cancelled) timer = setTimeout(poll, 5000)
@@ -4249,7 +4266,8 @@ export default function SpaceBuilderCanvas({
             }}
             title={
               splatStatus === 'training' ? `Training 3DGS… ${Math.round(splatProgress)}%` :
-              (splatStatus === 'error' || splatStatus === 'failed') ? 'Training failed — click to retry' :
+              (splatStatus === 'error' || splatStatus === 'failed')
+                ? `Training failed — click to retry\n${splatPhase || '(see backend logs)'}` :
               splatUrl ? (splatVisible ? 'Hide photorealistic 3DGS view' : 'Show photorealistic 3DGS view') :
               'Train a 3D Gaussian Splat for photorealistic rendering'
             }
