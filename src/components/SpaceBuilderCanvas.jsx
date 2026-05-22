@@ -17,7 +17,6 @@ import { applyOrbitJoystickStep, radiusToSlider, scaleZoomRadius, ZOOM_MIN, ZOOM
 import { HANDLE_OFFSET, HANDLE_PAD, HANDLE_DIR, HANDLE_COLORS } from '../utils/warpHandles'
 import { loadRecentScanBuffer, saveRecentScanBuffer } from '../utils/recentScanCache'
 import { BASE, getJwt, getDeviceToken, getSnapshots } from '../utils/api'
-import GaussianSplatViewer from './GaussianSplatViewer'
 
 const IN_TO_M   = 0.0254
 const SNAP_DIST = 0.35
@@ -2629,11 +2628,6 @@ export default function SpaceBuilderCanvas({
   const [fwdJoyPos,     setFwdJoyPos]     = useState({ x: 0, y: 0 }) // fwd/back thumb CSS offset
   stateRef.current = { space, activeSurfaceId, onSelectSurface, onUpdateSurface, onSetConnection, onSurfaceTap }
 
-  // ── 3DGS: camera ref passed to GaussianSplatViewer; splatUrlRef mirrors state
-  // for zero-React-churn access inside the RAF animate loop.
-  const splatCameraRef = useRef(null)   // { viewMatrix: Float32Array[16], projMatrix: Float32Array[16], focalX, focalY }
-  const splatUrlRef    = useRef(null)   // mirrors splatUrl state — read every frame in animate()
-
   const prevCropReqRef = useRef(null)
   useEffect(() => {
     if (requestCropId && requestCropId !== prevCropReqRef.current) {
@@ -2649,14 +2643,12 @@ export default function SpaceBuilderCanvas({
     const mount = mountRef.current
     if (!mount) return
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true })
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.setSize(mount.clientWidth, mount.clientHeight)
     mount.appendChild(renderer.domElement)
-    // Sit on top of the GaussianSplatViewer canvas (z-index: 0) so LiDAR + surfaces
-    // composite over the splat layer.  position:absolute fills the mount div.
-    renderer.domElement.style.cssText = 'position:absolute;inset:0;z-index:1'
+    renderer.domElement.style.cssText = 'position:absolute;inset:0'
 
     // ── SSDD: offscreen FBO + fullscreen dilation quad ─────────────────────
     // The main scene is rendered into `ssdFBO` (color + depth), then the
@@ -3107,30 +3099,6 @@ export default function SpaceBuilderCanvas({
 
       if (needsUpdate) applyOrbit()
 
-      // ── Sync GaussianSplatViewer camera matrices (zero-alloc: mutate in place) ─
-      {
-        let sc = splatCameraRef.current
-        if (!sc) {
-          sc = { viewMatrix: new Float32Array(16), projMatrix: new Float32Array(16), focalX: 0, focalY: 0 }
-          splatCameraRef.current = sc
-        }
-        sc.viewMatrix.set(camera.matrixWorldInverse.elements)
-        sc.projMatrix.set(camera.projectionMatrix.elements)
-        const dW2 = renderer.domElement.width  * 0.5
-        const dH2 = renderer.domElement.height * 0.5
-        // projectionMatrix column-major: elements[0] = fx/half-width, elements[5] = fy/half-height
-        sc.focalX = camera.projectionMatrix.elements[0] * dW2
-        sc.focalY = camera.projectionMatrix.elements[5] * dH2
-      }
-
-      // ── Background: transparent when splat layer is composited behind ───────
-      if (splatUrlRef.current) {
-        scene.background = null          // let renderer alpha-clear to 0,0,0,0
-        renderer.setClearColor(0x000000, 0)
-      } else {
-        scene.background = bgColor       // opaque dark when no splat
-      }
-
       // Render directly to preserve geometric truth.
       renderer.setRenderTarget(null)
       renderer.render(scene, camera)
@@ -3181,19 +3149,6 @@ export default function SpaceBuilderCanvas({
   const [localLoad,       setLocalLoad] = useState({ active: false, pct: 0, phase: '' })
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
 
-  // ── 3DGS / Gaussian Splatting state ──────────────────────────────────────
-  // splatUrl: set once training is done; triggers GaussianSplatViewer render
-  // splatStatus: null | 'none' | 'processing' | 'training' | 'ready' | 'error' | 'failed'
-  // splatProgress: 0-100, updated by polling
-  // splatPhase: human-readable phase string — contains error message on failure
-  // splatVisible: user toggle — hides the splat layer without losing the URL
-  const [splatUrl,      setSplatUrl]      = useState(null)
-  const [splatStatus,   setSplatStatus]   = useState(null)
-  const [splatProgress, setSplatProgress] = useState(0)
-  const [splatPhase,    setSplatPhase]    = useState('')
-  const [splatVisible,  setSplatVisible]  = useState(true)
-  // Keep splatUrlRef in sync so animate() can check it without React state reads
-  splatUrlRef.current = splatVisible ? splatUrl : null
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
     const now = performance.now()
     const clamped = Math.max(0, Math.min(100, Math.round(pct)))
@@ -3208,63 +3163,6 @@ export default function SpaceBuilderCanvas({
       try { onRoomScanLoadProgress({ pct: clamped, phase, active }) } catch (err) { void err }
     }
   }, [onRoomScanLoadProgress])
-
-  // ── Poll for 3DGS training status ─────────────────────────────────────────
-  // Starts polling as soon as a room ID is known.  Stops when status reaches
-  // 'ready' (sets splatUrl) or the component unmounts.
-  useEffect(() => {
-    const id = space?.id
-    if (!id) return
-    let cancelled  = false
-    let timer      = null
-    let lastStatus = null   // track transitions so we only log errors once
-
-    async function poll() {
-      if (cancelled) return
-      try {
-        const jwt    = getJwt()
-        const device = getDeviceToken()
-        const headers = {
-          'X-Device-Token': device,
-          ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-        }
-        const r = await fetch(`${BASE}/api/rooms/${id}/splat/status`, { headers })
-        if (r.status === 404) return  // never trained — stop polling silently
-        if (!r.ok) { timer = setTimeout(poll, 8000); return }
-        const data = await r.json()
-        if (cancelled) return
-
-        const status = data.status
-        const phase  = data.phase ?? ''
-        const pct    = data.pct   ?? 0
-
-        setSplatStatus(status)
-        setSplatProgress(pct)
-        setSplatPhase(phase)
-
-        // ── Log errors to browser console so you can see them without a backend window
-        if ((status === 'error' || status === 'failed') && status !== lastStatus) {
-          console.error(`[3DGS] Training failed for room ${id}:`, phase || '(no detail)')
-        }
-        lastStatus = status
-
-        if (status === 'ready') {
-          setSplatUrl(`${BASE}/api/rooms/${id}/splat/download`)
-          return  // stop polling
-        }
-
-        // Back off on terminal / idle states; keep tight during active training
-        const delay = (status === 'none' || status === 'error' || status === 'failed')
-          ? 20000  // 20 s — still watch so iOS-triggered retries are noticed
-          : 5000   // 5 s — active training
-        if (!cancelled) { timer = setTimeout(poll, delay); return }
-      } catch { /* network hiccup — retry */ }
-      if (!cancelled) timer = setTimeout(poll, 5000)
-    }
-
-    poll()
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [space?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const t = threeRef.current
@@ -4205,17 +4103,6 @@ export default function SpaceBuilderCanvas({
 
   return (
     <div ref={mountRef} className="sbc-3d-viewport">
-      {/* ── Gaussian splat layer — rendered BEHIND the THREE.js canvas ── */}
-      {splatUrl && splatVisible && (
-        <GaussianSplatViewer
-          splatUrl={splatUrl}
-          cameraRef={splatCameraRef}
-          onStatus={(status, info) => {
-            if (status === 'error') console.error('[GaussianSplat]', info)
-          }}
-          style={{ zIndex: 0, background: '#080d14' }}
-        />
-      )}
 
       {snapHint && (
         <div className="sbc-snap-hint">
@@ -4244,66 +4131,6 @@ export default function SpaceBuilderCanvas({
           >Diag</button>
         )}
 
-        {/* ── 3DGS button — always visible when room ID is known ───────── */}
-        {space?.id && (
-          <button
-            className={`sbc-fov-btn${splatVisible && splatUrl ? ' sbc-fov-btn--active' : ''}`}
-            style={{
-              marginTop: 6,
-              fontSize: '0.6rem',
-              padding: '3px 5px',
-              background: splatStatus === 'training'
-                ? 'linear-gradient(135deg,#a855f7,#ec4899)'
-                : (splatStatus === 'error' || splatStatus === 'failed')
-                  ? 'linear-gradient(135deg,#dc2626,#991b1b)'
-                  : splatUrl
-                    ? 'linear-gradient(135deg,#7c3aed,#db2777)'
-                    : undefined,
-              color: (splatStatus === 'training' || splatStatus === 'error' || splatStatus === 'failed' || splatUrl)
-                ? '#fff' : undefined,
-              border: (splatStatus === 'training' || splatStatus === 'error' || splatStatus === 'failed' || splatUrl)
-                ? 'none' : undefined,
-            }}
-            title={
-              splatStatus === 'training' ? `Training 3DGS… ${Math.round(splatProgress)}%` :
-              (splatStatus === 'error' || splatStatus === 'failed')
-                ? `Training failed — click to retry\n${splatPhase || '(see backend logs)'}` :
-              splatUrl ? (splatVisible ? 'Hide photorealistic 3DGS view' : 'Show photorealistic 3DGS view') :
-              'Train a 3D Gaussian Splat for photorealistic rendering'
-            }
-            onClick={async () => {
-              if (splatUrl) {
-                // Toggle splat visibility
-                setSplatVisible(v => !v)
-                return
-              }
-              if (splatStatus === 'training') return  // nothing to do while training
-              // Trigger training
-              const jwt    = getJwt()
-              const device = getDeviceToken()
-              try {
-                const r = await fetch(`${BASE}/api/rooms/${space.id}/splat/train`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'X-Device-Token': device,
-                    ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-                  },
-                })
-                if (r.ok) { setSplatStatus('training'); setSplatProgress(0) }
-                else console.error('[splat train] HTTP', r.status)
-              } catch (err) { console.error('[splat train]', err) }
-            }}
-          >
-            {splatStatus === 'training'
-              ? `✨ ${Math.round(splatProgress)}%`
-              : (splatStatus === 'error' || splatStatus === 'failed')
-                ? '⚠ Failed'
-                : splatUrl
-                  ? (splatVisible ? '✨ 3DGS' : '○ 3DGS')
-                  : '✨ Train'}
-          </button>
-        )}
       </div>
 
       {/* ── Zoom controls — right side, vertical ─────────────────────── */}
@@ -4668,53 +4495,6 @@ export default function SpaceBuilderCanvas({
               </div>
             )}
 
-            {/* ── 3DGS training / viewer controls ───────────────────── */}
-            <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 8 }}>
-              {splatStatus === 'training' && (
-                <div>
-                  <div className="sbc-diag-dim" style={{ marginBottom: 4 }}>
-                    ✨ Training 3DGS… {Math.round(splatProgress)}%
-                  </div>
-                  <div style={{ height: 6, borderRadius: 4, background: 'rgba(255,255,255,0.14)', overflow: 'hidden' }}>
-                    <div style={{ width: `${Math.round(splatProgress)}%`, height: '100%', background: 'linear-gradient(90deg,#a855f7,#ec4899)', transition: 'width 0.4s' }} />
-                  </div>
-                </div>
-              )}
-              {splatStatus === 'ready' && splatUrl && (
-                <button
-                  className="sbc-diag-rebuild"
-                  style={{ background: splatVisible ? 'linear-gradient(90deg,#a855f7,#ec4899)' : undefined }}
-                  onClick={() => setSplatVisible(v => !v)}
-                >
-                  {splatVisible ? '◉ Hide 3DGS view' : '◎ Show 3DGS view'}
-                </button>
-              )}
-              {splatStatus === 'error' && (
-                <div className="sbc-diag-dim" style={{ color: '#f87171' }}>3DGS training failed</div>
-              )}
-              {(!splatStatus || splatStatus === 'error') && space?.id && roomScan && (
-                <button
-                  className="sbc-diag-rebuild"
-                  style={{ background: 'linear-gradient(90deg,#a855f7,#ec4899)' }}
-                  onClick={async () => {
-                    const jwt    = getJwt()
-                    const device = getDeviceToken()
-                    const headers = {
-                      'Content-Type': 'application/json',
-                      'X-Device-Token': device,
-                      ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-                    }
-                    try {
-                      const r = await fetch(`${BASE}/api/rooms/${space.id}/splat/train`, { method: 'POST', headers })
-                      if (r.ok) { setSplatStatus('training'); setSplatProgress(0) }
-                      else console.error('[splat train] HTTP', r.status)
-                    } catch (err) { console.error('[splat train]', err) }
-                  }}
-                >
-                  ✨ Train 3DGS
-                </button>
-              )}
-            </div>
           </div>
         )
       })()}
