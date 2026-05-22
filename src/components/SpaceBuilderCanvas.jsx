@@ -3231,11 +3231,16 @@ export default function SpaceBuilderCanvas({
         const data = await r.json()
         if (cancelled) return
         setSplatStatus(data.status)
-        setSplatProgress(data.progress ?? 0)
+        setSplatProgress(data.pct ?? 0)   // server sends "pct", not "progress"
         if (data.status === 'ready') {
           setSplatUrl(`${BASE}/api/rooms/${id}/splat/download`)
           return  // stop polling — URL is set
         }
+        // Back off heavily on terminal / idle states so we don't spam the server
+        const delay = (data.status === 'none' || data.status === 'error' || data.status === 'failed')
+          ? 20000   // 20 s — still check so iOS-triggered retries are noticed
+          : 5000    // 5 s — active training
+        if (!cancelled) { timer = setTimeout(poll, delay); return }
       } catch { /* network hiccup — retry */ }
       if (!cancelled) timer = setTimeout(poll, 5000)
     }
@@ -4232,14 +4237,19 @@ export default function SpaceBuilderCanvas({
               padding: '3px 5px',
               background: splatStatus === 'training'
                 ? 'linear-gradient(135deg,#a855f7,#ec4899)'
-                : splatUrl
-                  ? 'linear-gradient(135deg,#7c3aed,#db2777)'
-                  : undefined,
-              color: splatStatus === 'training' || splatUrl ? '#fff' : undefined,
-              border: splatStatus === 'training' || splatUrl ? 'none' : undefined,
+                : (splatStatus === 'error' || splatStatus === 'failed')
+                  ? 'linear-gradient(135deg,#dc2626,#991b1b)'
+                  : splatUrl
+                    ? 'linear-gradient(135deg,#7c3aed,#db2777)'
+                    : undefined,
+              color: (splatStatus === 'training' || splatStatus === 'error' || splatStatus === 'failed' || splatUrl)
+                ? '#fff' : undefined,
+              border: (splatStatus === 'training' || splatStatus === 'error' || splatStatus === 'failed' || splatUrl)
+                ? 'none' : undefined,
             }}
             title={
               splatStatus === 'training' ? `Training 3DGS… ${Math.round(splatProgress)}%` :
+              (splatStatus === 'error' || splatStatus === 'failed') ? 'Training failed — click to retry' :
               splatUrl ? (splatVisible ? 'Hide photorealistic 3DGS view' : 'Show photorealistic 3DGS view') :
               'Train a 3D Gaussian Splat for photorealistic rendering'
             }
@@ -4269,9 +4279,11 @@ export default function SpaceBuilderCanvas({
           >
             {splatStatus === 'training'
               ? `✨ ${Math.round(splatProgress)}%`
-              : splatUrl
-                ? (splatVisible ? '✨ 3DGS' : '○ 3DGS')
-                : '✨ Train'}
+              : (splatStatus === 'error' || splatStatus === 'failed')
+                ? '⚠ Failed'
+                : splatUrl
+                  ? (splatVisible ? '✨ 3DGS' : '○ 3DGS')
+                  : '✨ Train'}
           </button>
         )}
       </div>
