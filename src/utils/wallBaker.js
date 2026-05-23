@@ -48,25 +48,32 @@ void main() {
 // World point on the wall plane:
 //   World = a*uAxis + b*vAxis - offset*normal
 //     where a = mix(uMin, uMax, vUV.x), b = mix(vMin, vMax, vUV.y).
-//   (uMin/uMax/vMin/vMax are ABSOLUTE projections returned by the worker:
-//   uMin = min(point . uAxis) across all inliers.  Plane equation:
-//   normal · P + offset = 0, so P · normal = -offset for P on the plane.)
 //
 // Camera-space point (ARKit convention: camera looks along -Z):
-//   cam = w2c * world  (w2c is the world-to-camera matrix)
+//   cam = w2c * world
 //
-// Photo UV (matches existing projective code at SpaceBuilderCanvas:2026-2034):
+// Photo UV (matches SpaceBuilderCanvas:2026-2034):
 //   if cam.z >= -0.05 → behind camera, discard.
 //   dep = -cam.z
 //   uvPhoto.x = (fx/fw) * cam.x / dep + (cx/fw)
 //   uvPhoto.y = (fy/fh) * (-cam.y) / dep + (cy/fh)
 //
-// Weighting:
-//   – angle term:  max(0, dot(-cam_forward, wall_normal))^2
-//                  (wall is facing the photo — perpendicular = best)
-//   – distance:    1 / max(dep², 0.25)  (close cameras win)
-//   – bounds:      uv ∈ [0, 1]
-//   – facing:      camera must be in front of the plane (on +normal side)
+// Weighting (per fragment — uses the actual view-ray from camera to the
+// wall point, NOT the photo's constant forward direction):
+//   – viewDotNormal: cos(angle) between -viewRay and wall normal.
+//                    Near 1 = head-on hit (great sample).
+//                    Near 0 = grazing (likely picking up content from a
+//                             different surface — e.g. wall texture leaking
+//                             onto the floor plane).
+//   – facing^2  ⇒ heavily down-weight glancing rays.
+//   – Discard when viewDotNormal < 0.15 (~81° off-normal) so wildly oblique
+//     projections don't contribute at all.
+//   – Photo edge feather (smoothstep): each photo's contribution fades to
+//     zero in its outer 10 % so neighbouring photos blend smoothly instead
+//     of producing hard footprint boundaries.
+//   – 1/dist² distance falloff so close-up photos beat far-away ones.
+//   – Per-photo color gain uGain (RGB) applied before accumulation so
+//     differently-exposed photos line up to the scene's mean colour.
 //
 // Output: vec4(color * weight, weight).  Sums across photos via gl.ONE/gl.ONE.
 const BAKE_FRAG = /* glsl */`
@@ -84,9 +91,9 @@ uniform float uVMin;
 uniform float uVMax;
 
 uniform mat4  uW2C;          // world-to-camera (column-major as THREE stores)
-uniform vec3  uCamPosWorld;  // camera position in world space (for facing check)
-uniform vec3  uCamForward;   // camera forward in world space = -col2(c2w)
+uniform vec3  uCamPosWorld;  // camera position in world space
 uniform vec4  uKfwfh;        // (fx/fw, fy/fh, cx/fw, cy/fh)
+uniform vec3  uGain;         // per-photo colour gain (RGB multipliers)
 uniform sampler2D uPhoto;
 
 void main() {
@@ -95,31 +102,38 @@ void main() {
   vec3 world = uUAxis * a + uVAxis * b - uNormal * uOffset;
 
   // Cull when the camera is on the BACK side of the wall plane.
-  // Signed distance of camera to plane: normal · camPos + offset.
   if (dot(uCamPosWorld, uNormal) + uOffset <= 0.0) discard;
 
-  vec4 cam4 = uW2C * vec4(world, 1.0);
-  vec3 cam = cam4.xyz;
+  // Per-fragment view ray.  This is critical for the floor plane: from a
+  // horizontal photo, the floor's view-ray is nearly parallel to the floor
+  // and we want to discard those rays (otherwise we'd paint wall pixels
+  // onto the floor plane where the photo's upper pixels reproject).
+  vec3 viewRay = world - uCamPosWorld;
+  float dist   = length(viewRay);
+  vec3 viewN   = viewRay / max(dist, 1e-6);
+  float viewDotNormal = max(0.0, -dot(viewN, uNormal));
+  if (viewDotNormal < 0.15) discard;     // grazing angle — discard
 
-  if (cam.z >= -0.05) discard;          // behind camera
+  vec4 cam4 = uW2C * vec4(world, 1.0);
+  vec3 cam  = cam4.xyz;
+  if (cam.z >= -0.05) discard;           // behind camera
   float dep = -cam.z;
 
   float photoU = uKfwfh.x * cam.x / dep + uKfwfh.z;
   float photoV = uKfwfh.y * (-cam.y) / dep + uKfwfh.w;
   if (photoU < 0.0 || photoU > 1.0 || photoV < 0.0 || photoV > 1.0) discard;
 
-  vec3 color = texture2D(uPhoto, vec2(photoU, photoV)).rgb;
+  vec3 color = texture2D(uPhoto, vec2(photoU, photoV)).rgb * uGain;
 
-  // Photo's camera shoots best when its forward direction points INTO the
-  // wall — i.e., opposite the wall's outward normal.  Score: how anti-aligned
-  // the camera forward is with the wall normal.
-  float facing = max(0.0, -dot(uCamForward, uNormal));   // 1 = perpendicular hit
-  facing = facing * facing;                              // emphasise good hits
+  // Edge feather (10 % border falloff per axis) — smooths handoff between
+  // adjacent photos that overlap on the same wall.
+  float fU = smoothstep(0.0, 0.10, photoU) * (1.0 - smoothstep(0.90, 1.0, photoU));
+  float fV = smoothstep(0.0, 0.10, photoV) * (1.0 - smoothstep(0.90, 1.0, photoV));
 
-  float distW = 1.0 / max(dep * dep, 0.25);
-  float weight = facing * distW;
+  float facing = viewDotNormal * viewDotNormal;   // per-fragment, not per-photo
+  float distW  = 1.0 / max(dist * dist, 0.25);
+  float weight = facing * distW * fU * fV;
 
-  // Output additively-blended (color * weight) in RGB, weight in A.
   gl_FragColor = vec4(color * weight, weight);
 }
 `
@@ -155,6 +169,57 @@ function normalizeK(kRaw, fh) {
     return [k[0], k[1], k[2], 0, k[5], k[6], k[8], fh > 0 ? fh * 0.5 : 0, 1]
   }
   return k
+}
+
+// ── Photometric normalisation ─────────────────────────────────────────────────
+
+/**
+ * Compute per-photo RGB gains so all snapshots aim at a shared scene mean.
+ * Mitigates exposure / white-balance drift between captures so the bake's
+ * blended result doesn't show visible "patchwork" tone shifts across photos
+ * covering the same wall.
+ *
+ * Returns parallel-to-textures array of { r, g, b } multipliers in roughly
+ * [0.7, 1.4] (clamped so a few outlier-content photos can't push extreme
+ * shifts onto the rest of the scene).
+ */
+export function computeColorGains(textures) {
+  // Per-photo mean — sample ~50k pixels per photo for speed
+  const means = textures.map(td => {
+    if (!td?.pixels || !td.pw || !td.ph) return null
+    const px = td.pixels
+    const n  = td.pw * td.ph
+    const stride = Math.max(1, Math.floor(n / 50000))
+    let sR = 0, sG = 0, sB = 0, count = 0
+    for (let i = 0; i < n; i += stride) {
+      const off = i * 4
+      sR += px[off]; sG += px[off + 1]; sB += px[off + 2]
+      count++
+    }
+    if (!count) return null
+    return { r: sR / count, g: sG / count, b: sB / count }
+  })
+
+  const valid = means.filter(m => m)
+  if (!valid.length) return textures.map(() => ({ r: 1, g: 1, b: 1 }))
+
+  // Scene mean = average of per-photo means
+  let sR = 0, sG = 0, sB = 0
+  for (const m of valid) { sR += m.r; sG += m.g; sB += m.b }
+  const gm = { r: sR / valid.length, g: sG / valid.length, b: sB / valid.length }
+
+  // Per-photo gain (clamped softly — content-driven mean differences are real,
+  // not just exposure; we only want to nudge, not over-correct).
+  const GAIN_MIN = 0.7
+  const GAIN_MAX = 1.4
+  return means.map(m => {
+    if (!m) return { r: 1, g: 1, b: 1 }
+    return {
+      r: Math.max(GAIN_MIN, Math.min(GAIN_MAX, m.r > 0 ? gm.r / m.r : 1)),
+      g: Math.max(GAIN_MIN, Math.min(GAIN_MAX, m.g > 0 ? gm.g / m.g : 1)),
+      b: Math.max(GAIN_MIN, Math.min(GAIN_MAX, m.b > 0 ? gm.b / m.b : 1)),
+    }
+  })
 }
 
 // ── Worker driver ─────────────────────────────────────────────────────────────
@@ -213,7 +278,7 @@ const MIN_PX       = 64
  * @param renderer   THREE.WebGLRenderer (main thread)
  * @returns          { canvas, width, height, pngBlob? }
  */
-async function bakePlane({ plane, snaps, textures, renderer }) {
+async function bakePlane({ plane, snaps, textures, gains, renderer }) {
   const w = plane.uMax - plane.uMin
   const h = plane.vMax - plane.vMin
   if (w < 0.1 || h < 0.1) return null
@@ -262,8 +327,8 @@ async function bakePlane({ plane, snaps, textures, renderer }) {
       uVMax:        { value: plane.vMax },
       uW2C:         { value: new THREE.Matrix4() },
       uCamPosWorld: { value: new THREE.Vector3() },
-      uCamForward:  { value: new THREE.Vector3() },
       uKfwfh:       { value: new THREE.Vector4() },
+      uGain:        { value: new THREE.Vector3(1, 1, 1) },
       uPhoto:       { value: null },
     },
     transparent:  true,
@@ -301,9 +366,9 @@ async function bakePlane({ plane, snaps, textures, renderer }) {
     const w2c = c2wToW2c(snap.c2w)
     accumMat.uniforms.uW2C.value.fromArray(w2c)
     accumMat.uniforms.uCamPosWorld.value.set(snap.c2w[12], snap.c2w[13], snap.c2w[14])
-    // Camera forward = -col2(c2w).  Column 2 of column-major c2w = [8..10].
-    accumMat.uniforms.uCamForward.value.set(-snap.c2w[8], -snap.c2w[9], -snap.c2w[10])
     accumMat.uniforms.uKfwfh.value.set(K[0] / fw, K[4] / fh, K[6] / fw, K[7] / fh)
+    const g = gains[si] || { r: 1, g: 1, b: 1 }
+    accumMat.uniforms.uGain.value.set(g.r, g.g, g.b)
     accumMat.uniforms.uPhoto.value = tex
     accumMat.uniformsNeedUpdate = true
 
@@ -405,6 +470,12 @@ export async function bakeWallsFromScan({
   }
   console.info(`[wpa12] RANSAC found ${planes.length} planes (${planes.map(p => p.type).join(', ')})`)
 
+  // Pre-compute per-photo colour gains once (used by every plane's bake).
+  onProgress?.(33, 'Computing photo color balance')
+  const gains = computeColorGains(textures)
+  console.info('[wpa12] Photo gains:', gains.map(g =>
+    `[${g.r.toFixed(2)},${g.g.toFixed(2)},${g.b.toFixed(2)}]`).join(' '))
+
   // Phase B: WebGL bake per plane
   const walls = []
   for (let pi = 0; pi < planes.length; pi++) {
@@ -413,7 +484,7 @@ export async function bakeWallsFromScan({
     onProgress?.(35 + 60 * pi / planes.length, `Baking ${plane.type} ${pi+1}/${planes.length}`)
 
     try {
-      const baked = await bakePlane({ plane, snaps, textures, renderer })
+      const baked = await bakePlane({ plane, snaps, textures, gains, renderer })
       if (baked) walls.push({ plane, ...baked })
     } catch (err) {
       console.warn(`[wpa12] bakePlane failed for ${plane.type}:`, err)

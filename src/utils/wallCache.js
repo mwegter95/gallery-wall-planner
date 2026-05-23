@@ -44,6 +44,14 @@ function openDB() {
 }
 
 /**
+ * Bake algorithm version — bump this any time the projection shader, gain
+ * computation, RANSAC tuning, or anything that changes the visual result is
+ * modified.  Old cached blobs become unreachable automatically.
+ *   v2: viewRay-based facing, edge feather, photometric per-photo gains.
+ */
+const BAKE_VERSION = 2
+
+/**
  * Build a stable-ish cache key for a (room, scan, photoSet) tuple.
  *
  * We deliberately keep the key cheap (no point-cloud hashing) so that loads
@@ -51,7 +59,7 @@ function openDB() {
  * count changes the key auto-invalidates; otherwise we trust the bake.
  */
 export function makeCacheKey({ roomId, vertexCount, snapshotCount }) {
-  return `${roomId || 'local'}|v${vertexCount || 0}|s${snapshotCount || 0}`
+  return `bv${BAKE_VERSION}|${roomId || 'local'}|v${vertexCount || 0}|s${snapshotCount || 0}`
 }
 
 export async function getCachedWalls(cacheKey) {
