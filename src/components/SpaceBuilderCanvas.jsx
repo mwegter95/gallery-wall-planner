@@ -4187,12 +4187,12 @@ export default function SpaceBuilderCanvas({
         const upVec  = new THREE.Vector3(c2w[4]/upLen,    c2w[5]/upLen,    c2w[6]/upLen)
         const normal = new THREE.Vector3(c2w[8]/normLen,  c2w[9]/normLen,  c2w[10]/normLen)
 
-        // Load the texture asynchronously; skip this snap if it fails
+        // Load the texture via the same authenticated fetch path as projective
+        // texturing — handles BASE prefix + auth headers (X-Device-Token / JWT).
         let tex
         try {
-          tex = await new Promise((resolve, reject) => {
-            new THREE.TextureLoader().load(snap.url, resolve, undefined, reject)
-          })
+          const td = await loadSnapshotTex(snap.url)  // { tex, pixels, pw, ph }
+          tex = td.tex
         } catch (err) {
           console.warn('[photo-billboard] texture load failed for', snap.url, err)
           continue
