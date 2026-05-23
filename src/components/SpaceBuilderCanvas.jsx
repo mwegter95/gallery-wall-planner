@@ -3149,9 +3149,18 @@ export default function SpaceBuilderCanvas({
   const [localLoad,       setLocalLoad] = useState({ active: false, pct: 0, phase: '' })
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
 
-  // ── WPA-12: photo billboard mode ─────────────────────────────────────────
-  const [photoLayerMode,   setPhotoLayerMode] = useState(false)
-  const photoBillboardsRef = useRef([])  // THREE.Mesh[] currently in scene
+  // ── WPA-12: photo-baked walls + (debug) photo billboard mode ─────────────
+  const [photoLayerMode,   setPhotoLayerMode] = useState(false)   // debug billboards
+  const photoBillboardsRef = useRef([])                            // billboard meshes
+
+  // Walls mode: RANSAC-detected planes textured by projective photo bake.
+  // Replaces the point cloud while active (point cloud shows through gaps).
+  const [wallsMode,        setWallsMode]    = useState(false)
+  const wallsMeshesRef     = useRef([])     // THREE.Mesh[] for baked walls
+  const wpa12InputsRef     = useRef(null)   // { positions, vertexCount, bounds, roomId, yOffset }
+  const wpa12AbortRef      = useRef(null)   // AbortController for the running bake
+  const [wpa12Generation,  setWpa12Generation] = useState(0)  // bumps trigger re-bake
+  const [wpa12Status,      setWpa12Status]     = useState({ active: false, pct: 0, phase: '', wallCount: 0 })
 
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
     const now = performance.now()
@@ -3203,8 +3212,18 @@ export default function SpaceBuilderCanvas({
       m.material?.dispose()
     }
     photoBillboardsRef.current = []
-    // Always reset to cloud view when scan changes
+    // Clear any WPA-12 baked walls from the previous scan
+    for (const m of wallsMeshesRef.current) {
+      t.scene.remove(m)
+      m.geometry?.dispose()
+      if (m.material?.map) m.material.map.dispose()
+      m.material?.dispose()
+    }
+    wallsMeshesRef.current = []
+    // Always reset visual modes when scan changes
     setPhotoLayerMode(false)
+    setWallsMode(false)
+    setWpa12Status({ active: false, pct: 0, phase: '', wallCount: 0 })
 
     // Switch orbit style based on whether a scan is loaded
     cameraFPSRef.current = !!roomScan
@@ -3886,6 +3905,21 @@ export default function SpaceBuilderCanvas({
         reportRoomLoad(90, 'Rendering scan')
         reportRoomLoad(100, 'Scan ready', false)
 
+        // ── WPA-12: kick off photo-baked walls pipeline ──────────────────────
+        // Stash the inputs the wpa12 effect needs.  The effect (further down
+        // in this component) consumes them and runs the RANSAC + WebGL bake
+        // pipeline in the background; baked walls appear progressively.
+        if (roomId && !cancelled) {
+          wpa12InputsRef.current = {
+            positions: new Float32Array(positions.subarray(0, vi * 3)),
+            vertexCount: vi,
+            bounds: { minX, maxX, minY, maxY, minZ, maxZ },
+            roomId,
+            yOffset,
+          }
+          setWpa12Generation(g => g + 1)  // trigger the wpa12 useEffect below
+        }
+
         // Dedicated reconstruction is rendered as a separate mesh layer so the
         // room shape stays faithful without replacing the point cloud preview.
 
@@ -4235,6 +4269,234 @@ export default function SpaceBuilderCanvas({
     return () => { cancelled = true }
   }, [photoLayerMode, space?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── WPA-12: photo-baked walls pipeline ───────────────────────────────────
+  // Triggered by setWpa12Generation(g+1) after the point cloud builds (with a
+  // roomId).  Steps:
+  //   1.  Check IndexedDB cache → if hit, hydrate canvases instantly.
+  //   2.  Otherwise: fetch snapshots, load textures, run RANSAC worker,
+  //       run WebGL projective bake, cache results.
+  //   3.  Mount each baked wall as a textured PlaneGeometry mesh in scene.
+  // Walls are HIDDEN by default — toggling the 🧱 button reveals them and
+  // hides the point cloud.
+  useEffect(() => {
+    if (wpa12Generation === 0) return
+    const inputs = wpa12InputsRef.current
+    if (!inputs) return
+    const t = threeRef.current
+    if (!t?.renderer) return
+
+    // Cancel any in-flight bake from a previous generation
+    if (wpa12AbortRef.current) {
+      try { wpa12AbortRef.current.abort() } catch { /* ignore */ }
+    }
+    const ac = new AbortController()
+    wpa12AbortRef.current = ac
+
+    function disposeWallMeshes() {
+      for (const m of wallsMeshesRef.current) {
+        t.scene.remove(m)
+        m.geometry?.dispose()
+        if (m.material?.map) m.material.map.dispose()
+        m.material?.dispose()
+      }
+      wallsMeshesRef.current = []
+    }
+
+    /** Build a textured PlaneGeometry mesh for one baked wall. */
+    function mountWall({ plane, canvas, width, height }) {
+      const w = plane.uMax - plane.uMin
+      const h = plane.vMax - plane.vMin
+      if (w < 0.1 || h < 0.1) return null
+
+      const tex = new THREE.CanvasTexture(canvas)
+      tex.flipY          = true   // PlaneGeometry default UVs expect Y-up
+      tex.minFilter      = THREE.LinearMipMapLinearFilter
+      tex.magFilter      = THREE.LinearFilter
+      tex.anisotropy     = 4
+      tex.generateMipmaps = true
+      tex.needsUpdate    = true
+
+      const geo = new THREE.PlaneGeometry(w, h)
+      const mat = new THREE.MeshBasicMaterial({
+        map:         tex,
+        transparent: true,
+        alphaTest:   0.01,         // discard uncovered fragments → point cloud shows through
+        side:        THREE.DoubleSide,
+        depthWrite:  true,
+      })
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.visible = wallsMode   // start hidden unless user already enabled the mode
+
+      // Position: extent center on the plane.
+      // Plane-local 2D coords of the center: (uMid, vMid) where uMid=(uMin+uMax)/2.
+      // 3D world point: uMid*uAxis + vMid*vAxis - offset*normal.
+      const uMid = (plane.uMin + plane.uMax) * 0.5
+      const vMid = (plane.vMin + plane.vMax) * 0.5
+      const px = uMid * plane.uAxis[0] + vMid * plane.vAxis[0] - plane.offset * plane.normal[0]
+      const py = uMid * plane.uAxis[1] + vMid * plane.vAxis[1] - plane.offset * plane.normal[1]
+      const pz = uMid * plane.uAxis[2] + vMid * plane.vAxis[2] - plane.offset * plane.normal[2]
+      // The point cloud shader applies uYOffset; baked walls live in scene
+      // space so we apply yOffset here directly.
+      mesh.position.set(px, py + (inputs.yOffset || 0), pz)
+
+      // Orient: local +X = uAxis, +Y = vAxis, +Z = normal.
+      const uAxis  = new THREE.Vector3().fromArray(plane.uAxis)
+      const vAxis  = new THREE.Vector3().fromArray(plane.vAxis)
+      const normal = new THREE.Vector3().fromArray(plane.normal)
+      const rotMat = new THREE.Matrix4().makeBasis(uAxis, vAxis, normal)
+      mesh.quaternion.setFromRotationMatrix(rotMat)
+
+      t.scene.add(mesh)
+      wallsMeshesRef.current.push(mesh)
+      return mesh
+    }
+
+    async function runBake() {
+      // Dynamic imports so wallBaker code-splits into its own chunk
+      const { bakeWallsFromScan, normalizeK, hydrateCachedWalls } = await import('../utils/wallBaker.js')
+      const { makeCacheKey, getCachedWalls, putCachedWalls }      = await import('../utils/wallCache.js')
+
+      const reportPct = (pct, phase) => {
+        if (ac.signal.aborted) return
+        setWpa12Status(s => ({ ...s, active: pct < 100, pct: Math.round(pct), phase }))
+      }
+      reportPct(2, 'Starting wall bake')
+
+      // ── Fetch snapshots ────────────────────────────────────────────────────
+      let data
+      try { data = await getSnapshots(inputs.roomId) } catch (err) {
+        console.warn('[wpa12] snapshot fetch failed:', err)
+        reportPct(100, 'No snapshots — wall bake skipped')
+        return
+      }
+      if (ac.signal.aborted) return
+      const allSnaps = data?.snapshots || []
+      if (!allSnaps.length) {
+        console.warn('[wpa12] no snapshots — wall bake skipped')
+        reportPct(100, 'No snapshots — wall bake skipped')
+        return
+      }
+
+      // Normalize K for each snap (handle SIMD-padded legacy layouts)
+      const snaps = allSnaps.map(s => {
+        const K = normalizeK(s.K, s.fh)
+        return { ...s, K }
+      }).filter(s =>
+        s.K?.length >= 9 && s.K[0] > 0 && s.fw > 0 && s.fh > 0 &&
+        Array.isArray(s.c2w) && s.c2w.length === 16
+      )
+      if (!snaps.length) {
+        console.warn('[wpa12] no valid snapshots after K normalization')
+        reportPct(100, 'No valid snapshots — wall bake skipped')
+        return
+      }
+
+      // ── Cache check ────────────────────────────────────────────────────────
+      const cacheKey = makeCacheKey({
+        roomId: inputs.roomId,
+        vertexCount: inputs.vertexCount,
+        snapshotCount: snaps.length,
+      })
+      try {
+        const cached = await getCachedWalls(cacheKey)
+        if (cached?.length && !ac.signal.aborted) {
+          reportPct(60, `Loading ${cached.length} cached walls`)
+          const hydrated = await hydrateCachedWalls(cached)
+          if (ac.signal.aborted) return
+          disposeWallMeshes()
+          for (const w of hydrated) mountWall(w)
+          reportPct(100, `Loaded ${hydrated.length} cached walls`)
+          setWpa12Status({ active: false, pct: 100, phase: 'Cached', wallCount: hydrated.length })
+          return
+        }
+      } catch (err) {
+        console.warn('[wpa12] cache read failed:', err)
+      }
+      if (ac.signal.aborted) return
+
+      // ── Load all snapshot textures (auth headers + BASE prefix via loadSnapshotTex) ──
+      reportPct(10, `Loading ${snaps.length} photos`)
+      const textures = []
+      for (let i = 0; i < snaps.length; i++) {
+        if (ac.signal.aborted) return
+        try {
+          const td = await loadSnapshotTex(snaps[i].url)
+          textures.push(td)
+        } catch (err) {
+          console.warn(`[wpa12] photo ${i} load failed:`, err)
+          textures.push(null)
+        }
+        reportPct(10 + 15 * (i + 1) / snaps.length, `Loading photos (${i+1}/${snaps.length})`)
+      }
+
+      // ── Full RANSAC + WebGL bake pipeline ─────────────────────────────────
+      let result
+      try {
+        result = await bakeWallsFromScan({
+          positions:   inputs.positions,
+          vertexCount: inputs.vertexCount,
+          bounds:      inputs.bounds,
+          roomId:      inputs.roomId,
+          snaps,
+          textures,
+          renderer:    t.renderer,
+          onProgress: (pct, phase) => reportPct(25 + pct * 0.7, phase),
+          signal:      ac.signal,
+        })
+      } catch (err) {
+        console.warn('[wpa12] bake failed:', err)
+        reportPct(100, 'Bake failed')
+        return
+      } finally {
+        // Free the loaded photo textures — wall meshes have their own
+        for (const td of textures) td?.tex?.dispose?.()
+      }
+      if (ac.signal.aborted) return
+
+      // ── Mount walls in the scene ──────────────────────────────────────────
+      disposeWallMeshes()
+      for (const w of result.walls) mountWall(w)
+
+      // ── Cache the result for next time ────────────────────────────────────
+      try {
+        const cachePayload = result.walls.map(w => ({
+          plane:    w.plane,
+          width:    w.width,
+          height:   w.height,
+          pngBlob:  w.pngBlob,
+        }))
+        await putCachedWalls(cacheKey, cachePayload)
+      } catch (err) {
+        console.warn('[wpa12] cache write failed:', err)
+      }
+
+      reportPct(100, `Baked ${result.walls.length} walls`)
+      setWpa12Status({ active: false, pct: 100, phase: 'Ready', wallCount: result.walls.length })
+      console.info(`[wpa12] Baked ${result.walls.length} walls (cache key: ${cacheKey})`)
+    }
+
+    runBake().catch(err => {
+      console.warn('[wpa12] runBake threw:', err)
+      setWpa12Status({ active: false, pct: 100, phase: 'Failed', wallCount: 0 })
+    })
+
+    return () => {
+      try { ac.abort() } catch { /* ignore */ }
+    }
+  }, [wpa12Generation]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Toggle wall visibility when wallsMode flips ──────────────────────────
+  // Also re-runs when wallCount changes so freshly-baked walls inherit the
+  // current wallsMode (the bake is asynchronous; a wall mounted after the
+  // user toggled the mode on would otherwise stay hidden until the next toggle).
+  useEffect(() => {
+    if (pointCloudMeshRef.current) {
+      pointCloudMeshRef.current.visible = !wallsMode
+    }
+    for (const m of planeMeshesRef.current) m.visible = !wallsMode
+    for (const m of wallsMeshesRef.current) m.visible = wallsMode
+  }, [wallsMode, wpa12Status.wallCount])
+
   // ── Joystick pointer handlers — shared helper ────────────────────────────
   function makeJoyHandlers(joyRef, setPos) {
     return {
@@ -4314,14 +4576,46 @@ export default function SpaceBuilderCanvas({
           >Diag</button>
         )}
 
-        {/* WPA-12: Photo billboard toggle — only shown when a room scan is active */}
+        {/* WPA-12: Walls toggle (primary) — RANSAC + photo-baked walls */}
         {roomScan && space?.id && (
           <button
-            className={`sbc-fov-btn${photoLayerMode ? ' sbc-fov-btn--active' : ''}`}
+            className={`sbc-fov-btn${wallsMode ? ' sbc-fov-btn--active' : ''}`}
             style={{
               marginTop: 8,
               fontSize: '0.7rem',
               padding: '3px 6px',
+              ...(wallsMode ? {
+                background: 'linear-gradient(135deg, #6b4d1a 0%, #4f380d 100%)',
+                borderColor: '#e6a93b',
+                color: '#ffd982',
+              } : {}),
+              ...(wpa12Status.active ? { opacity: 0.6, cursor: 'progress' } : {}),
+            }}
+            disabled={wpa12Status.active || (wpa12Status.wallCount === 0 && !wallsMode)}
+            onClick={() => setWallsMode(v => !v)}
+            title={
+              wpa12Status.active
+                ? `Baking walls: ${wpa12Status.pct}% — ${wpa12Status.phase}`
+                : wpa12Status.wallCount === 0
+                  ? 'Walls not yet detected — wait for bake to complete or scan with snapshots'
+                  : wallsMode
+                    ? `Hide ${wpa12Status.wallCount} baked walls and return to point cloud`
+                    : `Show ${wpa12Status.wallCount} photo-baked walls (WPA-12)`
+            }
+          >{wpa12Status.active
+              ? `${wpa12Status.pct}%`
+              : wallsMode ? '☁ Cloud' : `🧱 Walls${wpa12Status.wallCount > 0 ? ` (${wpa12Status.wallCount})` : ''}`}
+          </button>
+        )}
+
+        {/* WPA-12 debug: photo billboard toggle (raw snapshots as floating quads) */}
+        {roomScan && space?.id && (
+          <button
+            className={`sbc-fov-btn${photoLayerMode ? ' sbc-fov-btn--active' : ''}`}
+            style={{
+              marginTop: 4,
+              fontSize: '0.65rem',
+              padding: '2px 5px',
               ...(photoLayerMode ? {
                 background: 'linear-gradient(135deg, #1a6b3a 0%, #0d4f2b 100%)',
                 borderColor: '#2ecc71',
@@ -4330,9 +4624,9 @@ export default function SpaceBuilderCanvas({
             }}
             onClick={() => setPhotoLayerMode(v => !v)}
             title={photoLayerMode
-              ? 'Switch back to point cloud view'
-              : 'Show all snapshots as aligned photo quads in 3D space (WPA-12)'}
-          >{photoLayerMode ? '☁ Cloud' : '📷 Photos'}</button>
+              ? 'Hide photo billboards and return to point cloud'
+              : 'DEBUG: show raw snapshots as floating photo quads (for inspecting capture coverage)'}
+          >{photoLayerMode ? '☁' : '📷'}</button>
         )}
 
       </div>
