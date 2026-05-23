@@ -48,8 +48,10 @@ function openDB() {
  * computation, RANSAC tuning, or anything that changes the visual result is
  * modified.  Old cached blobs become unreachable automatically.
  *   v2: viewRay-based facing, edge feather, photometric per-photo gains.
+ *   v3: inlier coverage mask gates unscanned regions; up to 12 walls;
+ *       separate floor/ceiling/wall RANSAC thresholds (0.5%/0.3%/1.5%).
  */
-const BAKE_VERSION = 2
+const BAKE_VERSION = 3
 
 /**
  * Build a stable-ish cache key for a (room, scan, photoSet) tuple.

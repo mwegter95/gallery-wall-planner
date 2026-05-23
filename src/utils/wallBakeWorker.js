@@ -217,11 +217,11 @@ function planeExtent(pts, count, plane, thresh, mask, planeType) {
   const vy = nz*ux - nx*uz
   const vz = nx*uy - ny*ux
 
-  // Project all inliers; track centroid and uv extent
+  // Pass 1: compute extent and centroid from this plane's inliers (mask[i] === 2)
   let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity
   let cx = 0, cy = 0, cz = 0, n = 0
   for (let i = 0; i < count; i++) {
-    if (mask && mask[i] !== 2) continue  // 2 marks "inlier of THIS plane"
+    if (mask && mask[i] !== 2) continue
     const x = pts[i*3], y = pts[i*3+1], z = pts[i*3+2]
     cx += x; cy += y; cz += z; n++
     const u = x*ux + y*uy + z*uz
@@ -234,11 +234,59 @@ function planeExtent(pts, count, plane, thresh, mask, planeType) {
   if (n < 1) return null
   cx /= n; cy /= n; cz /= n
 
+  // Pass 2: rasterize inliers into a small 2D coverage grid (~64 px/m, capped).
+  // Used at bake time to mask out unscanned regions — critical for partial
+  // scans where the floor or ceiling has a "donut" shape (scanned perimeter,
+  // unscanned interior).  Without the mask the bake fills the whole bounding
+  // rectangle with photo content even where nothing was scanned, producing the
+  // floor-wrapping-into-walls artefact.
+  const COVERAGE_PX_PER_M = 64
+  const COVERAGE_MAX = 256
+  const wMeters = Math.max(0.05, uMax - uMin)
+  const hMeters = Math.max(0.05, vMax - vMin)
+  let cW = Math.min(COVERAGE_MAX, Math.max(16, Math.round(wMeters * COVERAGE_PX_PER_M)))
+  let cH = Math.min(COVERAGE_MAX, Math.max(16, Math.round(hMeters * COVERAGE_PX_PER_M)))
+  const coverageRaw = new Uint8Array(cW * cH)
+  const uSpan = uMax - uMin
+  const vSpan = vMax - vMin
+  for (let i = 0; i < count; i++) {
+    if (mask && mask[i] !== 2) continue
+    const x = pts[i*3], y = pts[i*3+1], z = pts[i*3+2]
+    const u = x*ux + y*uy + z*uz
+    const v = x*vx + y*vy + z*vz
+    const cx0 = Math.min(cW - 1, Math.max(0, Math.floor((u - uMin) / uSpan * cW)))
+    const cy0 = Math.min(cH - 1, Math.max(0, Math.floor((v - vMin) / vSpan * cH)))
+    coverageRaw[cy0 * cW + cx0] = 255
+  }
+  // Dilate by 2 cells (two 3×3 max passes) so the mask doesn't have ragged
+  // single-pixel holes between adjacent inliers.  Roughly 6 cm of grow at
+  // 64 px/m — enough to fill scan dropouts, small enough to preserve real
+  // unscanned regions.
+  let coverage = coverageRaw
+  for (let pass = 0; pass < 2; pass++) {
+    const next = new Uint8Array(cW * cH)
+    for (let y = 0; y < cH; y++) {
+      for (let x = 0; x < cW; x++) {
+        let any = 0
+        for (let dy = -1; dy <= 1 && !any; dy++) {
+          for (let dx = -1; dx <= 1 && !any; dx++) {
+            const xx = x + dx, yy = y + dy
+            if (xx < 0 || xx >= cW || yy < 0 || yy >= cH) continue
+            if (coverage[yy * cW + xx]) any = 255
+          }
+        }
+        next[y * cW + x] = any
+      }
+    }
+    coverage = next
+  }
+
   return {
     centroid: [cx, cy, cz],
     uAxis: [ux, uy, uz],
     vAxis: [vx, vy, vz],
     uMin, uMax, vMin, vMax,
+    coverage, coverageW: cW, coverageH: cH,
   }
 }
 
@@ -269,29 +317,33 @@ self.onmessage = function (e) {
     const count = msg.count
     const bounds = msg.bounds
     const THRESH = msg.thresh ?? 0.05    // 5 cm default
-    const MIN_FRAC = msg.minFrac ?? 0.02 // 2 % of total points
-    const MAX_WALLS = msg.maxWalls ?? 8
+    const MAX_WALLS = msg.maxWalls ?? 12 // up to 12 walls (alcoves, doorways, etc.)
+
+    // Separate thresholds: floor/ceiling are often partial scans (the user
+    // walks around the room and only catches the perimeter / occasional
+    // ceiling glance), so a 2 % overall threshold rejects valid ceilings.
+    // Walls keep the stricter threshold to suppress noise planes.
+    const FLOOR_MIN   = Math.max(2000, Math.floor(count * (msg.floorMinFrac   ?? 0.005))) // 0.5 %
+    const CEILING_MIN = Math.max(1500, Math.floor(count * (msg.ceilingMinFrac ?? 0.003))) // 0.3 %
+    const WALL_MIN    = Math.max(2000, Math.floor(count * (msg.wallMinFrac    ?? 0.015))) // 1.5 %
 
     self.postMessage({ type: 'progress', pct: 5, phase: 'Plane detection starting' })
 
     const mask = new Uint8Array(count)   // 0 = available, 1 = consumed
     const detected = []
 
-    // ── Floor: largest vertical-normal plane near minY ────────────────────────
-    // Constraint: |ny| > 0.9 AND centroid is in lower half of room.
+    // ── Floor: largest vertical-normal plane in the lower half ────────────────
     self.postMessage({ type: 'progress', pct: 10, phase: 'Detecting floor' })
     const yMid = (bounds.minY + bounds.maxY) * 0.5
     const floorConstraint = (nx, ny, nz) => Math.abs(ny) > 0.9
     let res = ransacPlane(pts, count, 1500, THRESH, mask, floorConstraint)
     if (res) {
-      // Reject if centroid is in upper half (it'd be the ceiling)
       let refined = refinePlane(pts, count, res.plane, THRESH, mask)
       const yPlane = -refined.d / (refined.ny || 1e-6)
       if (yPlane < yMid) {
         const finalInliers = countInliers(pts, count, refined, THRESH, mask)
-        if (finalInliers >= count * MIN_FRAC) {
+        if (finalInliers >= FLOOR_MIN) {
           markInliers(pts, count, refined, THRESH, mask)
-          // Compute extent
           tagInliersForExtent(pts, count, refined, THRESH, mask)
           const ext = planeExtent(pts, count, refined, THRESH, mask, 'floor')
           untagInliersForExtent(mask)
@@ -311,7 +363,7 @@ self.onmessage = function (e) {
       const yPlane = -refined.d / (refined.ny || 1e-6)
       if (yPlane > yMid) {
         const finalInliers = countInliers(pts, count, refined, THRESH, mask)
-        if (finalInliers >= count * MIN_FRAC) {
+        if (finalInliers >= CEILING_MIN) {
           markInliers(pts, count, refined, THRESH, mask)
           tagInliersForExtent(pts, count, refined, THRESH, mask)
           const ext = planeExtent(pts, count, refined, THRESH, mask, 'ceiling')
@@ -326,7 +378,7 @@ self.onmessage = function (e) {
 
     // ── Walls (iterative, up to MAX_WALLS) ────────────────────────────────────
     const wallConstraint = (nx, ny, nz) => Math.abs(ny) < 0.2
-    const MIN_INLIERS = Math.max(200, Math.floor(count * MIN_FRAC))
+    const MIN_INLIERS = WALL_MIN
     for (let w = 0; w < MAX_WALLS; w++) {
       const pct = 25 + Math.floor(70 * w / MAX_WALLS)
       self.postMessage({ type: 'progress', pct, phase: `Detecting wall ${w+1}` })

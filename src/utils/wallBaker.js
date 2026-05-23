@@ -95,11 +95,24 @@ uniform vec3  uCamPosWorld;  // camera position in world space
 uniform vec4  uKfwfh;        // (fx/fw, fy/fh, cx/fw, cy/fh)
 uniform vec3  uGain;         // per-photo colour gain (RGB multipliers)
 uniform sampler2D uPhoto;
+uniform sampler2D uCoverage; // 1-channel mask: 1.0 where the plane has scan
+                             //   coverage, 0.0 elsewhere.  Critical for partial
+                             //   floors/ceilings where the user only scanned a
+                             //   perimeter — without it the bake fills the whole
+                             //   extent with whatever photos project there.
 
 void main() {
   float a = mix(uUMin, uUMax, vUV.x);
   float b = mix(uVMin, uVMax, vUV.y);
   vec3 world = uUAxis * a + uVAxis * b - uNormal * uOffset;
+
+  // Scan-coverage gate: where the original LiDAR scan never observed this
+  // patch of the plane, we don't want to fabricate texture from oblique
+  // photos that happen to project here.  Soft mask in [0,1] from a dilated
+  // inlier rasterisation — pixels with low coverage drop their weight to 0
+  // so the point cloud bleeds through.
+  float coverage = texture2D(uCoverage, vUV).r;
+  if (coverage < 0.05) discard;
 
   // Cull when the camera is on the BACK side of the wall plane.
   if (dot(uCamPosWorld, uNormal) + uOffset <= 0.0) discard;
@@ -132,7 +145,7 @@ void main() {
 
   float facing = viewDotNormal * viewDotNormal;   // per-fragment, not per-photo
   float distW  = 1.0 / max(dist * dist, 0.25);
-  float weight = facing * distW * fU * fV;
+  float weight = facing * distW * fU * fV * coverage;
 
   gl_FragColor = vec4(color * weight, weight);
 }
@@ -313,6 +326,24 @@ async function bakePlane({ plane, snaps, textures, gains, renderer }) {
   const bakeScene  = new THREE.Scene()
   const bakeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
 
+  // Build coverage DataTexture from the worker's inlier raster mask.  This
+  // is sampled by the bake shader to gate out unscanned regions.  We expand
+  // the single-channel mask into RGBA so we don't need WebGL2-only formats.
+  const cW = plane.coverageW || 1
+  const cH = plane.coverageH || 1
+  const rgba = new Uint8Array(cW * cH * 4)
+  const src  = plane.coverage || new Uint8Array(cW * cH)
+  for (let i = 0; i < src.length; i++) {
+    const v = src[i]
+    rgba[i*4] = v; rgba[i*4+1] = v; rgba[i*4+2] = v; rgba[i*4+3] = 255
+  }
+  const coverageTex = new THREE.DataTexture(rgba, cW, cH, THREE.RGBAFormat, THREE.UnsignedByteType)
+  coverageTex.minFilter = THREE.LinearFilter
+  coverageTex.magFilter = THREE.LinearFilter
+  coverageTex.wrapS = THREE.ClampToEdgeWrapping
+  coverageTex.wrapT = THREE.ClampToEdgeWrapping
+  coverageTex.needsUpdate = true
+
   const accumMat = new THREE.ShaderMaterial({
     vertexShader:   BAKE_VERT,
     fragmentShader: BAKE_FRAG,
@@ -330,6 +361,7 @@ async function bakePlane({ plane, snaps, textures, gains, renderer }) {
       uKfwfh:       { value: new THREE.Vector4() },
       uGain:        { value: new THREE.Vector3(1, 1, 1) },
       uPhoto:       { value: null },
+      uCoverage:    { value: coverageTex },
     },
     transparent:  true,
     depthTest:    false,
@@ -425,6 +457,7 @@ async function bakePlane({ plane, snaps, textures, gains, renderer }) {
   normMat.dispose()
   accumRT.dispose()
   finalRT.dispose()
+  coverageTex.dispose()
 
   // Restore renderer state
   renderer.setRenderTarget(prevRT)
