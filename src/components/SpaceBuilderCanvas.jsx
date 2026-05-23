@@ -3657,6 +3657,21 @@ export default function SpaceBuilderCanvas({
               reportRoomLoad(100, 'Photo projection failed', false)
             })
           }
+
+          // ── WPA-12: kick off photo-baked walls pipeline (raw-points path) ───
+          if (roomId && !cancelled) {
+            console.info(`[wpa12] Triggering bake from raw-points path: ${vi} verts, roomId=${roomId}`)
+            wpa12InputsRef.current = {
+              positions: new Float32Array(positions.subarray(0, vi * 3)),
+              vertexCount: vi,
+              bounds: { minX, maxX, minY, maxY, minZ, maxZ },
+              roomId,
+              yOffset,
+            }
+            setWpa12Generation(g => g + 1)
+          } else if (!roomId) {
+            console.info('[wpa12] Skipping bake: no roomId (local-only scan)')
+          }
           return
         } catch (err) {
           console.warn('[SpaceBuilderCanvas] Could not render raw points:', err)
@@ -3910,6 +3925,7 @@ export default function SpaceBuilderCanvas({
         // in this component) consumes them and runs the RANSAC + WebGL bake
         // pipeline in the background; baked walls appear progressively.
         if (roomId && !cancelled) {
+          console.info(`[wpa12] Triggering bake from triangulated path: ${vi} verts, roomId=${roomId}`)
           wpa12InputsRef.current = {
             positions: new Float32Array(positions.subarray(0, vi * 3)),
             vertexCount: vi,
@@ -3918,6 +3934,8 @@ export default function SpaceBuilderCanvas({
             yOffset,
           }
           setWpa12Generation(g => g + 1)  // trigger the wpa12 useEffect below
+        } else if (!roomId) {
+          console.info('[wpa12] Skipping bake: no roomId (local-only scan)')
         }
 
         // Dedicated reconstruction is rendered as a separate mesh layer so the
@@ -4281,9 +4299,16 @@ export default function SpaceBuilderCanvas({
   useEffect(() => {
     if (wpa12Generation === 0) return
     const inputs = wpa12InputsRef.current
-    if (!inputs) return
+    if (!inputs) {
+      console.warn('[wpa12] Effect fired but no inputs — skipping')
+      return
+    }
     const t = threeRef.current
-    if (!t?.renderer) return
+    if (!t?.renderer) {
+      console.warn('[wpa12] Effect fired but renderer not ready — skipping')
+      return
+    }
+    console.info(`[wpa12] Effect firing for generation ${wpa12Generation}, ${inputs.vertexCount} verts`)
 
     // Cancel any in-flight bake from a previous generation
     if (wpa12AbortRef.current) {
