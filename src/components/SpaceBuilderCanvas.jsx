@@ -3149,6 +3149,10 @@ export default function SpaceBuilderCanvas({
   const [localLoad,       setLocalLoad] = useState({ active: false, pct: 0, phase: '' })
   const roomLoadProgressRef = useRef({ pct: -1, phase: '', ts: 0 })
 
+  // ── WPA-12: photo billboard mode ─────────────────────────────────────────
+  const [photoLayerMode,   setPhotoLayerMode] = useState(false)
+  const photoBillboardsRef = useRef([])  // THREE.Mesh[] currently in scene
+
   const reportRoomLoad = useCallback((pct, phase, active = true) => {
     const now = performance.now()
     const clamped = Math.max(0, Math.min(100, Math.round(pct)))
@@ -3190,6 +3194,17 @@ export default function SpaceBuilderCanvas({
       deepDispose(m)
     }
     planeMeshesRef.current = []
+
+    // Clear any WPA-12 photo billboards from the previous scan
+    for (const m of photoBillboardsRef.current) {
+      t.scene.remove(m)
+      m.geometry?.dispose()
+      if (m.material?.map) m.material.map.dispose()
+      m.material?.dispose()
+    }
+    photoBillboardsRef.current = []
+    // Always reset to cloud view when scan changes
+    setPhotoLayerMode(false)
 
     // Switch orbit style based on whether a scan is loaded
     cameraFPSRef.current = !!roomScan
@@ -4052,6 +4067,174 @@ export default function SpaceBuilderCanvas({
     }
   }, [diagMode])
 
+  // ── WPA-12: photo billboard layer ────────────────────────────────────────
+  // When photoLayerMode is toggled on: hide the point cloud and place each
+  // snapshot as a full-resolution textured quad aligned in 3D space using its
+  // c2w matrix.  Toggling off restores the point cloud and removes all quads.
+  useEffect(() => {
+    const t = threeRef.current
+    if (!t) return
+
+    function clearBillboards() {
+      for (const mesh of photoBillboardsRef.current) {
+        t.scene.remove(mesh)
+        mesh.geometry.dispose()
+        if (mesh.material.map) mesh.material.map.dispose()
+        mesh.material.dispose()
+      }
+      photoBillboardsRef.current = []
+    }
+
+    // Always sync point-cloud visibility
+    if (pointCloudMeshRef.current) {
+      pointCloudMeshRef.current.visible = !photoLayerMode
+    }
+    // Also hide/show plane-patch meshes (projective-texture splats)
+    for (const m of planeMeshesRef.current) {
+      m.visible = !photoLayerMode
+    }
+
+    if (!photoLayerMode) {
+      clearBillboards()
+      return
+    }
+
+    const roomId = space?.id
+    if (!roomId) return
+
+    let cancelled = false
+
+    // Normalize raw K array to canonical 9-float [fx,0,0, 0,fy,0, cx,cy,1]
+    function normalizeK(kRaw) {
+      if (!Array.isArray(kRaw) || kRaw.length === 0) return null
+      const k = kRaw.map(Number)
+      // SIMD-padded 12: [fx,0,0,pad, 0,fy,0,pad, cx,cy,1,pad]
+      if (k.length >= 12 && !(k[4] > 0) && (k[5] > 0) && (k[8] > 0)) {
+        return [k[0], k[1], k[2], k[4], k[5], k[6], k[8], k[9], k[10]]
+      }
+      // Shifted 9-float
+      if (k.length >= 9 && !(k[4] > 0) && (k[5] > 0) && (k[8] > 0)) {
+        return [k[0], k[1], k[2], 0, k[5], k[6], k[8], k.length >= 10 ? k[9] : 0, 1]
+      }
+      return k
+    }
+
+    async function buildBillboards() {
+      let data
+      try { data = await getSnapshots(roomId) } catch (err) {
+        console.warn('[photo-billboard] snapshot fetch failed:', err)
+        return
+      }
+      if (cancelled) return
+
+      const allSnaps = data?.snapshots
+      if (!allSnaps?.length) {
+        console.warn('[photo-billboard] no snapshots for room', roomId)
+        return
+      }
+
+      const yOffset = yOffsetRef.current || 0
+      const D = 0.7  // metres — display distance in front of each camera
+
+      const newMeshes = []
+
+      for (const snap of allSnaps) {
+        if (cancelled) break
+
+        const K = normalizeK(snap.K)
+        if (!K || !(K[0] > 0) || !(snap.fw > 0) || !(snap.fh > 0)) continue
+        if (!Array.isArray(snap.c2w) || snap.c2w.length < 16) continue
+
+        const c2w = snap.c2w
+        // c2w is column-major 4×4:
+        //   col0 (right):   c2w[0..2]
+        //   col1 (up):      c2w[4..6]
+        //   col2 (back):    c2w[8..10]  (ARKit looks along -col2)
+        //   col3 (pos):     c2w[12..14]
+        const fx = K[0], fy = K[4]
+        const camW = snap.fw, camH = snap.fh
+
+        // Camera position in scene space (ARKit Y → scene Y via yOffset)
+        const camX = c2w[12]
+        const camY = c2w[13] + yOffset
+        const camZ = c2w[14]
+
+        // Camera forward = -(col2) — normalised
+        const fwdLen = Math.sqrt(c2w[8]*c2w[8] + c2w[9]*c2w[9] + c2w[10]*c2w[10]) || 1
+        const fwdX = -c2w[8] / fwdLen
+        const fwdY = -c2w[9] / fwdLen
+        const fwdZ = -c2w[10] / fwdLen
+
+        // Quad centre: D metres in front of the camera
+        const cx = camX + fwdX * D
+        const cy = camY + fwdY * D
+        const cz = camZ + fwdZ * D
+
+        // Physical size of the view frustum at distance D
+        const qW = (camW / fx) * D
+        const qH = (camH / fy) * D
+
+        // THREE.PlaneGeometry faces +Z in local space; we orient it so:
+        //   local +X  = camera right  = col0
+        //   local +Y  = camera up     = col1
+        //   local +Z  = plane normal  = camera back-direction = col2 (opposite of fwd)
+        //   (this makes the textured face point toward where the camera was pointing)
+        const rightLen = Math.sqrt(c2w[0]*c2w[0]+c2w[1]*c2w[1]+c2w[2]*c2w[2]) || 1
+        const upLen    = Math.sqrt(c2w[4]*c2w[4]+c2w[5]*c2w[5]+c2w[6]*c2w[6]) || 1
+        const normLen  = fwdLen
+
+        const right  = new THREE.Vector3(c2w[0]/rightLen, c2w[1]/rightLen, c2w[2]/rightLen)
+        const upVec  = new THREE.Vector3(c2w[4]/upLen,    c2w[5]/upLen,    c2w[6]/upLen)
+        const normal = new THREE.Vector3(c2w[8]/normLen,  c2w[9]/normLen,  c2w[10]/normLen)
+
+        // Load the texture asynchronously; skip this snap if it fails
+        let tex
+        try {
+          tex = await new Promise((resolve, reject) => {
+            new THREE.TextureLoader().load(snap.url, resolve, undefined, reject)
+          })
+        } catch (err) {
+          console.warn('[photo-billboard] texture load failed for', snap.url, err)
+          continue
+        }
+        if (cancelled) { tex.dispose(); break }
+
+        const geo = new THREE.PlaneGeometry(qW, qH)
+        const mat = new THREE.MeshBasicMaterial({
+          map: tex,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          transparent: false,
+        })
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.position.set(cx, cy, cz)
+
+        // Apply rotation so the plane aligns with the camera's right/up/normal axes
+        const rotMat = new THREE.Matrix4().makeBasis(right, upVec, normal)
+        mesh.quaternion.setFromRotationMatrix(rotMat)
+
+        t.scene.add(mesh)
+        newMeshes.push(mesh)
+      }
+
+      if (!cancelled) {
+        photoBillboardsRef.current = newMeshes
+        console.info(`[photo-billboard] placed ${newMeshes.length} photo quads (D=${D}m, yOffset=${yOffset.toFixed(3)})`)
+      } else {
+        // Cleanup any meshes built before cancellation
+        for (const m of newMeshes) {
+          t.scene.remove(m)
+          m.geometry.dispose()
+          if (m.material.map) m.material.map.dispose()
+          m.material.dispose()
+        }
+      }
+    }
+
+    buildBillboards()
+    return () => { cancelled = true }
+  }, [photoLayerMode, space?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Joystick pointer handlers — shared helper ────────────────────────────
   function makeJoyHandlers(joyRef, setPos) {
     return {
@@ -4129,6 +4312,27 @@ export default function SpaceBuilderCanvas({
             onClick={() => setDiagVisible(v => !v)}
             title="Toggle scan diagnostics overlay"
           >Diag</button>
+        )}
+
+        {/* WPA-12: Photo billboard toggle — only shown when a room scan is active */}
+        {roomScan && space?.id && (
+          <button
+            className={`sbc-fov-btn${photoLayerMode ? ' sbc-fov-btn--active' : ''}`}
+            style={{
+              marginTop: 8,
+              fontSize: '0.7rem',
+              padding: '3px 6px',
+              ...(photoLayerMode ? {
+                background: 'linear-gradient(135deg, #1a6b3a 0%, #0d4f2b 100%)',
+                borderColor: '#2ecc71',
+                color: '#2ecc71',
+              } : {}),
+            }}
+            onClick={() => setPhotoLayerMode(v => !v)}
+            title={photoLayerMode
+              ? 'Switch back to point cloud view'
+              : 'Show all snapshots as aligned photo quads in 3D space (WPA-12)'}
+          >{photoLayerMode ? '☁ Cloud' : '📷 Photos'}</button>
         )}
 
       </div>
