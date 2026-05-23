@@ -50,8 +50,11 @@ function openDB() {
  *   v2: viewRay-based facing, edge feather, photometric per-photo gains.
  *   v3: inlier coverage mask gates unscanned regions; up to 12 walls;
  *       separate floor/ceiling/wall RANSAC thresholds (0.5%/0.3%/1.5%).
+ *   v4: per-photo depth maps for occlusion rejection; tighter floor/ceiling
+ *       distance threshold (2 cm); walls keep full coverage (depth handles
+ *       geometry); WALL_MIN dropped to 0.3 % for small/alcove walls.
  */
-const BAKE_VERSION = 3
+const BAKE_VERSION = 4
 
 /**
  * Build a stable-ish cache key for a (room, scan, photoSet) tuple.

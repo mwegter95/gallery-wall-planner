@@ -100,6 +100,12 @@ uniform sampler2D uCoverage; // 1-channel mask: 1.0 where the plane has scan
                              //   floors/ceilings where the user only scanned a
                              //   perimeter — without it the bake fills the whole
                              //   extent with whatever photos project there.
+uniform sampler2D uDepthMap; // per-photo depth map of all detected planes
+                             //   (R = linear metres).  Used to reject samples
+                             //   where the photo's view-ray is blocked by a
+                             //   closer plane before reaching this wall point.
+uniform float uHasDepth;     // 0/1 — depth map valid for this photo
+uniform float uOcclusionEps; // depth-equality tolerance (metres)
 
 void main() {
   float a = mix(uUMin, uUMax, vUV.x);
@@ -135,6 +141,15 @@ void main() {
   float photoU = uKfwfh.x * cam.x / dep + uKfwfh.z;
   float photoV = uKfwfh.y * (-cam.y) / dep + uKfwfh.w;
   if (photoU < 0.0 || photoU > 1.0 || photoV < 0.0 || photoV > 1.0) discard;
+
+  // Depth-occlusion test: the depth map was rendered with THREE's
+  // PerspectiveCamera (NDC Y-up), but our photoV uses image Y-down — so
+  // flip Y when sampling the depth map.  Skip the test for the very first
+  // bake call (uHasDepth=0) where the map hasn't been bound yet.
+  if (uHasDepth > 0.5) {
+    float mapDepth = texture2D(uDepthMap, vec2(photoU, 1.0 - photoV)).r;
+    if (mapDepth > 0.001 && mapDepth < dep - uOcclusionEps) discard;
+  }
 
   vec3 color = texture2D(uPhoto, vec2(photoU, photoV)).rgb * uGain;
 
@@ -182,6 +197,148 @@ function normalizeK(kRaw, fh) {
     return [k[0], k[1], k[2], 0, k[5], k[6], k[8], fh > 0 ? fh * 0.5 : 0, 1]
   }
   return k
+}
+
+// ── Per-photo depth maps ──────────────────────────────────────────────────────
+//
+// Without occlusion, the bake projects "whatever the photo sees at this UV"
+// onto the wall plane — even when the photo's view-ray actually hits a
+// different (closer) surface first.  Symptoms:
+//   • Floor: photos taken horizontally see walls + floor.  When projecting
+//     a far floor pixel through the camera, the ray's photo-UV lands in the
+//     wall part of the image — wall colour ends up baked onto the floor.
+//   • Walls behind objects: a TV/lamp/frame occludes the wall from the
+//     LiDAR, leaving no scan inliers on the wall behind it.  Coverage mask
+//     correctly says "no data" and discards those fragments.
+//
+// Solution: render a per-photo depth map using the detected planes as
+// occluders.  At bake time, the shader samples the depth map at the
+// projected photo UV.  If the recorded depth there is significantly less
+// than the current wall point's depth, the wall point is occluded by a
+// closer plane in the photo → discard.
+
+const DEPTH_VERT = /* glsl */`
+varying float vDepth;
+void main() {
+  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+  vDepth = -mvPos.z;                    // positive metres in front of camera
+  gl_Position = projectionMatrix * mvPos;
+}
+`
+
+const DEPTH_FRAG = /* glsl */`
+precision highp float;
+varying float vDepth;
+void main() {
+  // R channel = linear depth (metres).  Half-float target gives ~5 mm
+  // precision over a ~50 m range — way better than 8-bit packing.
+  gl_FragColor = vec4(vDepth, 0.0, 0.0, 1.0);
+}
+`
+
+const DEPTH_MAP_W = 256
+const DEPTH_MAP_H = 192
+
+/**
+ * Render a per-photo depth map of the detected planes.
+ *
+ * @returns Array<THREE.Texture|null> parallel to snaps.  Caller MUST dispose
+ *   each by also disposing the render target stored in dispose lists.
+ */
+function buildDepthMaps({ snaps, planes, renderer, signal }) {
+  // Build the occluder scene once: every detected plane as a Mesh quad.
+  const occluderScene = new THREE.Scene()
+  const occluderGeos = []
+  const occluderMats = []
+  const depthMat = new THREE.ShaderMaterial({
+    vertexShader:   DEPTH_VERT,
+    fragmentShader: DEPTH_FRAG,
+    side:           THREE.DoubleSide,
+  })
+  occluderMats.push(depthMat)
+
+  for (const plane of planes) {
+    const w = plane.uMax - plane.uMin
+    const h = plane.vMax - plane.vMin
+    if (w < 0.05 || h < 0.05) continue
+
+    const geo = new THREE.PlaneGeometry(w, h)
+    occluderGeos.push(geo)
+    const mesh = new THREE.Mesh(geo, depthMat)
+
+    const uMid = (plane.uMin + plane.uMax) * 0.5
+    const vMid = (plane.vMin + plane.vMax) * 0.5
+    const px = uMid * plane.uAxis[0] + vMid * plane.vAxis[0] - plane.offset * plane.normal[0]
+    const py = uMid * plane.uAxis[1] + vMid * plane.vAxis[1] - plane.offset * plane.normal[1]
+    const pz = uMid * plane.uAxis[2] + vMid * plane.vAxis[2] - plane.offset * plane.normal[2]
+    mesh.position.set(px, py, pz)
+
+    const uAxis  = new THREE.Vector3().fromArray(plane.uAxis)
+    const vAxis  = new THREE.Vector3().fromArray(plane.vAxis)
+    const normal = new THREE.Vector3().fromArray(plane.normal)
+    mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(uAxis, vAxis, normal))
+    occluderScene.add(mesh)
+  }
+
+  // Save renderer state
+  const prevRT         = renderer.getRenderTarget()
+  const prevAutoClear  = renderer.autoClear
+  const prevClearColor = renderer.getClearColor(new THREE.Color())
+  const prevClearAlpha = renderer.getClearAlpha()
+  renderer.autoClear = false
+  renderer.setClearColor(0x000000, 0)
+
+  const halfFloat = renderer.capabilities.isWebGL2
+    || !!renderer.getContext().getExtension('EXT_color_buffer_half_float')
+
+  const depthMaps = []
+  const renderTargets = []     // returned alongside maps so caller can dispose
+
+  for (let si = 0; si < snaps.length; si++) {
+    if (signal?.aborted) break
+    const snap = snaps[si]
+    if (!snap?.c2w || !snap?.K || !snap?.fw || !snap?.fh) {
+      depthMaps.push(null); renderTargets.push(null)
+      continue
+    }
+
+    // Photo camera: vFOV from K[4]=fy and fh; aspect = fw/fh.
+    const vFovDeg = 2 * Math.atan(snap.fh * 0.5 / snap.K[4]) * 180 / Math.PI
+    const aspect  = snap.fw / snap.fh
+    const cam = new THREE.PerspectiveCamera(vFovDeg, aspect, 0.05, 50)
+    cam.matrix.fromArray(snap.c2w)
+    cam.matrixAutoUpdate = false
+    cam.matrixWorldNeedsUpdate = true
+    cam.updateMatrixWorld(true)
+
+    const target = new THREE.WebGLRenderTarget(DEPTH_MAP_W, DEPTH_MAP_H, {
+      format:        THREE.RGBAFormat,
+      type:          halfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType,
+      depthBuffer:   true,
+      stencilBuffer: false,
+      minFilter:     THREE.LinearFilter,
+      magFilter:     THREE.LinearFilter,
+    })
+
+    renderer.setRenderTarget(target)
+    renderer.clear(true, true, false)
+    renderer.render(occluderScene, cam)
+
+    depthMaps.push(target.texture)
+    renderTargets.push(target)
+  }
+
+  // Restore renderer
+  renderer.setRenderTarget(prevRT)
+  renderer.autoClear = prevAutoClear
+  renderer.setClearColor(prevClearColor, prevClearAlpha)
+
+  // Dispose occluder geometries (shared depth material can keep living until
+  // the caller is done with the maps — the textures share the GL program).
+  for (const g of occluderGeos) g.dispose()
+  depthMat.dispose()
+
+  return { depthMaps, renderTargets, halfFloat }
 }
 
 // ── Photometric normalisation ─────────────────────────────────────────────────
@@ -291,7 +448,7 @@ const MIN_PX       = 64
  * @param renderer   THREE.WebGLRenderer (main thread)
  * @returns          { canvas, width, height, pngBlob? }
  */
-async function bakePlane({ plane, snaps, textures, gains, renderer }) {
+async function bakePlane({ plane, snaps, textures, gains, depthMaps, renderer }) {
   const w = plane.uMax - plane.uMin
   const h = plane.vMax - plane.vMin
   if (w < 0.1 || h < 0.1) return null
@@ -362,6 +519,9 @@ async function bakePlane({ plane, snaps, textures, gains, renderer }) {
       uGain:        { value: new THREE.Vector3(1, 1, 1) },
       uPhoto:       { value: null },
       uCoverage:    { value: coverageTex },
+      uDepthMap:    { value: null },
+      uHasDepth:    { value: 0 },
+      uOcclusionEps:{ value: 0.10 },
     },
     transparent:  true,
     depthTest:    false,
@@ -402,6 +562,9 @@ async function bakePlane({ plane, snaps, textures, gains, renderer }) {
     const g = gains[si] || { r: 1, g: 1, b: 1 }
     accumMat.uniforms.uGain.value.set(g.r, g.g, g.b)
     accumMat.uniforms.uPhoto.value = tex
+    const dm = depthMaps?.[si]
+    accumMat.uniforms.uDepthMap.value = dm || null
+    accumMat.uniforms.uHasDepth.value = dm ? 1 : 0
     accumMat.uniformsNeedUpdate = true
 
     renderer.render(bakeScene, bakeCamera)
@@ -504,25 +667,47 @@ export async function bakeWallsFromScan({
   console.info(`[wpa12] RANSAC found ${planes.length} planes (${planes.map(p => p.type).join(', ')})`)
 
   // Pre-compute per-photo colour gains once (used by every plane's bake).
-  onProgress?.(33, 'Computing photo color balance')
+  onProgress?.(31, 'Computing photo color balance')
   const gains = computeColorGains(textures)
   console.info('[wpa12] Photo gains:', gains.map(g =>
     `[${g.r.toFixed(2)},${g.g.toFixed(2)},${g.b.toFixed(2)}]`).join(' '))
+
+  // Pre-compute per-photo depth maps using detected planes as occluders.
+  // Each photo gets a small (256×192) depth render of every plane, which
+  // the bake shader then samples to reject occluded fragments.
+  onProgress?.(34, 'Building photo depth maps')
+  let depthMaps = []
+  let depthRTs  = []
+  try {
+    const dmResult = buildDepthMaps({ snaps, planes, renderer, signal })
+    depthMaps = dmResult.depthMaps
+    depthRTs  = dmResult.renderTargets
+    console.info(`[wpa12] Built ${depthMaps.filter(d => d).length}/${snaps.length} depth maps (halfFloat=${dmResult.halfFloat})`)
+  } catch (err) {
+    console.warn('[wpa12] depth map build failed; baking without occlusion:', err)
+  }
+  if (signal?.aborted) {
+    for (const rt of depthRTs) rt?.dispose?.()
+    return { walls: [], planes }
+  }
 
   // Phase B: WebGL bake per plane
   const walls = []
   for (let pi = 0; pi < planes.length; pi++) {
     if (signal?.aborted) break
     const plane = planes[pi]
-    onProgress?.(35 + 60 * pi / planes.length, `Baking ${plane.type} ${pi+1}/${planes.length}`)
+    onProgress?.(38 + 58 * pi / planes.length, `Baking ${plane.type} ${pi+1}/${planes.length}`)
 
     try {
-      const baked = await bakePlane({ plane, snaps, textures, gains, renderer })
+      const baked = await bakePlane({ plane, snaps, textures, gains, depthMaps, renderer })
       if (baked) walls.push({ plane, ...baked })
     } catch (err) {
       console.warn(`[wpa12] bakePlane failed for ${plane.type}:`, err)
     }
   }
+
+  // Free depth maps now that all planes are baked
+  for (const rt of depthRTs) rt?.dispose?.()
 
   onProgress?.(100, `Baked ${walls.length}/${planes.length} surfaces`)
   return { walls, planes }

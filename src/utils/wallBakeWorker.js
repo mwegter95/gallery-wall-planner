@@ -234,51 +234,60 @@ function planeExtent(pts, count, plane, thresh, mask, planeType) {
   if (n < 1) return null
   cx /= n; cy /= n; cz /= n
 
-  // Pass 2: rasterize inliers into a small 2D coverage grid (~64 px/m, capped).
-  // Used at bake time to mask out unscanned regions — critical for partial
-  // scans where the floor or ceiling has a "donut" shape (scanned perimeter,
-  // unscanned interior).  Without the mask the bake fills the whole bounding
-  // rectangle with photo content even where nothing was scanned, producing the
-  // floor-wrapping-into-walls artefact.
+  // Coverage mask — purpose differs by plane type:
+  //   floor/ceiling: gate out unscanned regions so partial "donut" scans
+  //     only show photo content where the user actually scanned the surface.
+  //   wall: always fully covered.  Objects on the wall (TV, lamps, frames)
+  //     occlude the LiDAR creating zero-inlier patches, but we want the
+  //     wall texture to fill the full plane extent anyway — depth occlusion
+  //     in the bake shader handles geometric correctness; an empty
+  //     coverage mask would just produce ugly black holes around every
+  //     wall-mounted object.
   const COVERAGE_PX_PER_M = 64
   const COVERAGE_MAX = 256
   const wMeters = Math.max(0.05, uMax - uMin)
   const hMeters = Math.max(0.05, vMax - vMin)
   let cW = Math.min(COVERAGE_MAX, Math.max(16, Math.round(wMeters * COVERAGE_PX_PER_M)))
   let cH = Math.min(COVERAGE_MAX, Math.max(16, Math.round(hMeters * COVERAGE_PX_PER_M)))
-  const coverageRaw = new Uint8Array(cW * cH)
-  const uSpan = uMax - uMin
-  const vSpan = vMax - vMin
-  for (let i = 0; i < count; i++) {
-    if (mask && mask[i] !== 2) continue
-    const x = pts[i*3], y = pts[i*3+1], z = pts[i*3+2]
-    const u = x*ux + y*uy + z*uz
-    const v = x*vx + y*vy + z*vz
-    const cx0 = Math.min(cW - 1, Math.max(0, Math.floor((u - uMin) / uSpan * cW)))
-    const cy0 = Math.min(cH - 1, Math.max(0, Math.floor((v - vMin) / vSpan * cH)))
-    coverageRaw[cy0 * cW + cx0] = 255
-  }
-  // Dilate by 2 cells (two 3×3 max passes) so the mask doesn't have ragged
-  // single-pixel holes between adjacent inliers.  Roughly 6 cm of grow at
-  // 64 px/m — enough to fill scan dropouts, small enough to preserve real
-  // unscanned regions.
-  let coverage = coverageRaw
-  for (let pass = 0; pass < 2; pass++) {
-    const next = new Uint8Array(cW * cH)
-    for (let y = 0; y < cH; y++) {
-      for (let x = 0; x < cW; x++) {
-        let any = 0
-        for (let dy = -1; dy <= 1 && !any; dy++) {
-          for (let dx = -1; dx <= 1 && !any; dx++) {
-            const xx = x + dx, yy = y + dy
-            if (xx < 0 || xx >= cW || yy < 0 || yy >= cH) continue
-            if (coverage[yy * cW + xx]) any = 255
-          }
-        }
-        next[y * cW + x] = any
-      }
+
+  let coverage
+  if (planeType === 'wall') {
+    // Always-covered mask for walls.
+    coverage = new Uint8Array(cW * cH).fill(255)
+  } else {
+    // Rasterise inliers into a 2D occupancy grid + dilate.
+    const coverageRaw = new Uint8Array(cW * cH)
+    const uSpan = uMax - uMin
+    const vSpan = vMax - vMin
+    for (let i = 0; i < count; i++) {
+      if (mask && mask[i] !== 2) continue
+      const x = pts[i*3], y = pts[i*3+1], z = pts[i*3+2]
+      const u = x*ux + y*uy + z*uz
+      const v = x*vx + y*vy + z*vz
+      const cx0 = Math.min(cW - 1, Math.max(0, Math.floor((u - uMin) / uSpan * cW)))
+      const cy0 = Math.min(cH - 1, Math.max(0, Math.floor((v - vMin) / vSpan * cH)))
+      coverageRaw[cy0 * cW + cx0] = 255
     }
-    coverage = next
+    // Dilate by 2 cells (two 3×3 max passes) ~ 6 cm at 64 px/m — fills tiny
+    // single-pixel scan dropouts without extending into truly unscanned space.
+    coverage = coverageRaw
+    for (let pass = 0; pass < 2; pass++) {
+      const next = new Uint8Array(cW * cH)
+      for (let y = 0; y < cH; y++) {
+        for (let x = 0; x < cW; x++) {
+          let any = 0
+          for (let dy = -1; dy <= 1 && !any; dy++) {
+            for (let dx = -1; dx <= 1 && !any; dx++) {
+              const xx = x + dx, yy = y + dy
+              if (xx < 0 || xx >= cW || yy < 0 || yy >= cH) continue
+              if (coverage[yy * cW + xx]) any = 255
+            }
+          }
+          next[y * cW + x] = any
+        }
+      }
+      coverage = next
+    }
   }
 
   return {
@@ -316,16 +325,23 @@ self.onmessage = function (e) {
     const pts = msg.pts                  // Float32Array, transferred
     const count = msg.count
     const bounds = msg.bounds
-    const THRESH = msg.thresh ?? 0.05    // 5 cm default
     const MAX_WALLS = msg.maxWalls ?? 12 // up to 12 walls (alcoves, doorways, etc.)
 
-    // Separate thresholds: floor/ceiling are often partial scans (the user
-    // walks around the room and only catches the perimeter / occasional
-    // ceiling glance), so a 2 % overall threshold rejects valid ceilings.
-    // Walls keep the stricter threshold to suppress noise planes.
+    // Per-plane-type distance thresholds (point ↔ plane RANSAC tolerance):
+    //  * Floor/ceiling: 2 cm — tighter so furniture bases and wall-bottom
+    //    points (sitting on the floor surface) don't qualify as floor
+    //    inliers, which would otherwise contaminate the floor coverage mask
+    //    and let photos paint furniture/wall content onto the floor plane.
+    //  * Walls: 5 cm — keep the looser threshold; LiDAR wall scans have
+    //    more noise (oblique angle, longer return distance).
+    const FC_THRESH   = msg.fcThresh   ?? 0.02
+    const WALL_THRESH = msg.wallThresh ?? 0.05
+
+    // Separate inlier minima: floor/ceiling can be partial; walls should be
+    // permissive enough to catch small alcoves/accent walls (~1 m wide).
     const FLOOR_MIN   = Math.max(2000, Math.floor(count * (msg.floorMinFrac   ?? 0.005))) // 0.5 %
     const CEILING_MIN = Math.max(1500, Math.floor(count * (msg.ceilingMinFrac ?? 0.003))) // 0.3 %
-    const WALL_MIN    = Math.max(2000, Math.floor(count * (msg.wallMinFrac    ?? 0.015))) // 1.5 %
+    const WALL_MIN    = Math.max(1500, Math.floor(count * (msg.wallMinFrac    ?? 0.003))) // 0.3 %
 
     self.postMessage({ type: 'progress', pct: 5, phase: 'Plane detection starting' })
 
@@ -336,16 +352,16 @@ self.onmessage = function (e) {
     self.postMessage({ type: 'progress', pct: 10, phase: 'Detecting floor' })
     const yMid = (bounds.minY + bounds.maxY) * 0.5
     const floorConstraint = (nx, ny, nz) => Math.abs(ny) > 0.9
-    let res = ransacPlane(pts, count, 1500, THRESH, mask, floorConstraint)
+    let res = ransacPlane(pts, count, 1500, FC_THRESH, mask, floorConstraint)
     if (res) {
-      let refined = refinePlane(pts, count, res.plane, THRESH, mask)
+      let refined = refinePlane(pts, count, res.plane, FC_THRESH, mask)
       const yPlane = -refined.d / (refined.ny || 1e-6)
       if (yPlane < yMid) {
-        const finalInliers = countInliers(pts, count, refined, THRESH, mask)
+        const finalInliers = countInliers(pts, count, refined, FC_THRESH, mask)
         if (finalInliers >= FLOOR_MIN) {
-          markInliers(pts, count, refined, THRESH, mask)
-          tagInliersForExtent(pts, count, refined, THRESH, mask)
-          const ext = planeExtent(pts, count, refined, THRESH, mask, 'floor')
+          markInliers(pts, count, refined, FC_THRESH, mask)
+          tagInliersForExtent(pts, count, refined, FC_THRESH, mask)
+          const ext = planeExtent(pts, count, refined, FC_THRESH, mask, 'floor')
           untagInliersForExtent(mask)
           if (ext) {
             detected.push({ type: 'floor', normal: [refined.nx, refined.ny, refined.nz],
@@ -357,16 +373,16 @@ self.onmessage = function (e) {
 
     // ── Ceiling ───────────────────────────────────────────────────────────────
     self.postMessage({ type: 'progress', pct: 20, phase: 'Detecting ceiling' })
-    res = ransacPlane(pts, count, 1500, THRESH, mask, floorConstraint)
+    res = ransacPlane(pts, count, 1500, FC_THRESH, mask, floorConstraint)
     if (res) {
-      let refined = refinePlane(pts, count, res.plane, THRESH, mask)
+      let refined = refinePlane(pts, count, res.plane, FC_THRESH, mask)
       const yPlane = -refined.d / (refined.ny || 1e-6)
       if (yPlane > yMid) {
-        const finalInliers = countInliers(pts, count, refined, THRESH, mask)
+        const finalInliers = countInliers(pts, count, refined, FC_THRESH, mask)
         if (finalInliers >= CEILING_MIN) {
-          markInliers(pts, count, refined, THRESH, mask)
-          tagInliersForExtent(pts, count, refined, THRESH, mask)
-          const ext = planeExtent(pts, count, refined, THRESH, mask, 'ceiling')
+          markInliers(pts, count, refined, FC_THRESH, mask)
+          tagInliersForExtent(pts, count, refined, FC_THRESH, mask)
+          const ext = planeExtent(pts, count, refined, FC_THRESH, mask, 'ceiling')
           untagInliersForExtent(mask)
           if (ext) {
             detected.push({ type: 'ceiling', normal: [refined.nx, refined.ny, refined.nz],
@@ -383,19 +399,19 @@ self.onmessage = function (e) {
       const pct = 25 + Math.floor(70 * w / MAX_WALLS)
       self.postMessage({ type: 'progress', pct, phase: `Detecting wall ${w+1}` })
 
-      res = ransacPlane(pts, count, 700, THRESH, mask, wallConstraint)
+      res = ransacPlane(pts, count, 700, WALL_THRESH, mask, wallConstraint)
       if (!res) break
 
-      let refined = refinePlane(pts, count, res.plane, THRESH, mask)
+      let refined = refinePlane(pts, count, res.plane, WALL_THRESH, mask)
       // Re-check constraint after refinement (could drift)
       if (Math.abs(refined.ny) >= 0.2) break
 
-      const finalInliers = countInliers(pts, count, refined, THRESH, mask)
+      const finalInliers = countInliers(pts, count, refined, WALL_THRESH, mask)
       if (finalInliers < MIN_INLIERS) break
 
-      markInliers(pts, count, refined, THRESH, mask)
-      tagInliersForExtent(pts, count, refined, THRESH, mask)
-      const ext = planeExtent(pts, count, refined, THRESH, mask, 'wall')
+      markInliers(pts, count, refined, WALL_THRESH, mask)
+      tagInliersForExtent(pts, count, refined, WALL_THRESH, mask)
+      const ext = planeExtent(pts, count, refined, WALL_THRESH, mask, 'wall')
       untagInliersForExtent(mask)
       if (!ext) break
 
