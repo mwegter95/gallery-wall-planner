@@ -34,6 +34,14 @@ const MAX_HISTORY = 50
 // Properties that count as "moveable" actions worth undo-ing
 const HISTORY_KEYS = new Set(['pose3d', 'rotYDeg', 'widthIn', 'heightIn'])
 
+// Room scanning runs entirely through the native ARKit bridge that the StageAR
+// iOS wrapper exposes — it injects `window.__stageARNative = true` at document
+// start (see StageAR ContentView.swift / LidarScanner.jsx). In any plain
+// browser (desktop or mobile) there's no scanner to drive, so the scan options
+// are only surfaced when running inside the native app.
+const isStageARNative = () =>
+  typeof window !== 'undefined' && !!window.__stageARNative
+
 export default function SpaceBuilder({ existingSpace, onSave, onClose, library = {}, allLayouts = {}, walls = {}, rooms = {}, loadRoom = null }) {
   const [space, setSpace]                 = useState(() => {
     if (!existingSpace) return createSpace()
@@ -1186,8 +1194,9 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
               Add
             </button>
 
-            {/* LiDAR scan button */}
-            {space.roomScan ? (
+            {/* LiDAR scan button — only inside the native StageAR iOS app, which
+                provides the ARKit scanning bridge. Hidden in plain browsers. */}
+            {isStageARNative() && (space.roomScan ? (
               <button className="sb-btn sb-btn--ghost sb-btn--scan" onClick={handleRescan} title="Re-scan room with LiDAR">
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
                   <rect x="0.65" y="0.65" width="4.2" height="4.2" rx="0.6" stroke="currentColor" strokeWidth="1.2" fill="none"/>
@@ -1209,7 +1218,7 @@ export default function SpaceBuilder({ existingSpace, onSave, onClose, library =
                 </svg>
                 Scan Room
               </button>
-            )}
+            ))}
 
             <button
               className={`sb-btn sb-btn--stitch${isStitching ? ' sb-btn--loading' : ''}`}
