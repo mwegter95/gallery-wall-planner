@@ -68,9 +68,13 @@ export function hydrateTokenFromParent(tokenKey) {
     if (d.token) {
       if (d.token !== local) {
         try { localStorage.setItem(tokenKey, d.token) } catch {}
+        // Reload to boot logged-in with the recovered token — but only during
+        // the initial load window, never once and never mid-session, so a
+        // late-arriving message can't reload over an in-flight user action.
         let already = false
         try { already = sessionStorage.getItem(RELOAD_GUARD) === '1' } catch {}
-        if (!already) {
+        const earlyBoot = typeof performance === 'undefined' || performance.now() < 3500
+        if (!already && earlyBoot) {
           try { sessionStorage.setItem(RELOAD_GUARD, '1') } catch {}
           window.removeEventListener('message', onMsg)
           window.location.reload()
