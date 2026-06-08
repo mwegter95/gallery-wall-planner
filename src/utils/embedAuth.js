@@ -10,7 +10,7 @@
  * michaelwegter.com for the parent half of this protocol.
  *
  * Protocol (postMessage):
- *   iframe → parent  { type:'mw-embed-auth', action:'request' }
+ *   iframe → parent  { type:'mw-embed-auth', action:'request' }   (no secret)
  *   iframe → parent  { type:'mw-embed-auth', action:'set', token }
  *   iframe → parent  { type:'mw-embed-auth', action:'clear' }
  *   parent → iframe  { type:'mw-embed-auth', action:'token', token }
@@ -18,6 +18,12 @@
 
 const NS = 'mw-embed-auth'
 const RELOAD_GUARD = NS + ':reloaded'
+
+// Token-bearing messages are posted ONLY to these first-party parent origins
+// (never '*'), so a page that embeds this app can't skim the login token. The
+// live parent origin is captured from the handshake below when available.
+const PARENT_ORIGINS = ['https://michaelwegter.com', 'https://www.michaelwegter.com']
+let knownParentOrigin = null
 
 function isEmbedded() {
   try { return window.parent && window.parent !== window } catch { return false }
@@ -32,16 +38,19 @@ function parentAllowed(origin) {
   } catch { return false }
 }
 
+// Post a token-bearing message to the trusted parent origin(s) only.
+function postToParent(msg) {
+  if (!isEmbedded()) return
+  const targets = knownParentOrigin ? [knownParentOrigin] : PARENT_ORIGINS
+  for (const origin of targets) {
+    try { window.parent.postMessage(msg, origin) } catch {}
+  }
+}
+
 /** Mirror a token change up to the parent vault. Pass the new token after a
  *  login, or null after a logout. */
 export function syncTokenToParent(token) {
-  if (!isEmbedded()) return
-  try {
-    window.parent.postMessage(
-      token ? { type: NS, action: 'set', token } : { type: NS, action: 'clear' },
-      '*'
-    )
-  } catch {}
+  postToParent(token ? { type: NS, action: 'set', token } : { type: NS, action: 'clear' })
 }
 
 /** On embedded boot, pull the token from the parent vault. If our local copy
@@ -53,6 +62,7 @@ export function hydrateTokenFromParent(tokenKey) {
     if (!parentAllowed(e.origin)) return
     const d = e.data
     if (!d || d.type !== NS || d.action !== 'token') return
+    knownParentOrigin = e.origin   // trust this origin for future token messages
     let local = null
     try { local = localStorage.getItem(tokenKey) } catch {}
     if (d.token) {
@@ -73,5 +83,7 @@ export function hydrateTokenFromParent(tokenKey) {
     }
   }
   window.addEventListener('message', onMsg)
+  // The request carries no token, so '*' is fine here; the parent authenticates
+  // us by origin + source window, and we only trust origin-validated replies.
   try { window.parent.postMessage({ type: NS, action: 'request' }, '*') } catch {}
 }
