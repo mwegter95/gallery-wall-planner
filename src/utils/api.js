@@ -9,6 +9,8 @@
  *   - Anonymous:        X-Device-Token: <uuid>   (persistent per browser)
  */
 
+import { syncTokenToParent } from './embedAuth.js'
+
 // In dev this is '' so paths stay relative (Vite proxy handles them).
 // In production (VITE_API_URL=https://api.michaelwegter.com) it becomes absolute.
 export const BASE = import.meta.env.VITE_API_URL || ''
@@ -23,9 +25,13 @@ function getDeviceToken() {
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────
-export function getJwt()      { return localStorage.getItem('gwp-jwt') }
-export function setJwt(token) { localStorage.setItem('gwp-jwt', token) }
-export function clearJwt()    { localStorage.removeItem('gwp-jwt') }
+// Mirror token changes to the first-party parent shell so an embedded session
+// survives Safari evicting this iframe's third-party storage (no-op when not
+// embedded). See utils/embedAuth.js + michaelwegter.com AppFrame.jsx.
+export const TOKEN_KEY = 'gwp-jwt'
+export function getJwt()      { return localStorage.getItem(TOKEN_KEY) }
+export function setJwt(token) { localStorage.setItem(TOKEN_KEY, token); syncTokenToParent(token) }
+export function clearJwt()    { localStorage.removeItem(TOKEN_KEY); syncTokenToParent(null) }
 export function isLoggedIn()  { return Boolean(getJwt()) }
 export { getDeviceToken }
 
